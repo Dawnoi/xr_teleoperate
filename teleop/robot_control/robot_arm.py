@@ -135,6 +135,8 @@ class G1_29_ArmController:
                     self.msg.motor_cmd[id].kd = self.kd_high
             self.msg.motor_cmd[id].q  = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
+        self.q_target = self.get_current_dual_arm_q().copy()
+        self.tauff_target = np.zeros_like(self.q_target)
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -418,6 +420,8 @@ class G1_23_ArmController:
                     self.msg.motor_cmd[id].kd = self.kd_high
             self.msg.motor_cmd[id].q  = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
+        self.q_target = self.get_current_dual_arm_q().copy()
+        self.tauff_target = np.zeros_like(self.q_target)
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -693,6 +697,8 @@ class H1_2_ArmController:
                     self.msg.motor_cmd[id].kd = self.kd_high
             self.msg.motor_cmd[id].q  = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
+        self.q_target = self.get_current_dual_arm_q().copy()
+        self.tauff_target = np.zeros_like(self.q_target)
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -962,6 +968,8 @@ class H1_ArmController:
                 self.msg.motor_cmd[id].mode = 0x0A
             self.msg.motor_cmd[id].q  = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
+        self.q_target = self.get_current_dual_arm_q().copy()
+        self.tauff_target = np.zeros_like(self.q_target)
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -1195,6 +1203,8 @@ class H2_ArmController:
             )
             self.msg.motor_cmd[id].q = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
+        self.q_target = self.get_current_dual_arm_q().copy()
+        self.tauff_target = np.zeros_like(self.q_target)
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
