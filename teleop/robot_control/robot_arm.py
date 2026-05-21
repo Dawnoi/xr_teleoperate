@@ -23,7 +23,7 @@ G1_23_Num_Motors = 35
 H1_2_Num_Motors = 35
 H1_Num_Motors = 20
 H2_Num_Motors = 35
- 
+
 
 class MotorState:
     def __init__(self):

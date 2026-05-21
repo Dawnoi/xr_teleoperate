@@ -77,9 +77,13 @@ cd ~/unitree_ws/src/xr_teleoperate
 
 python teleop/demo_xrobotics_mujoco.py \
   --frequency 30 \
+  --viewer-robot g1_d_mobile \
   --controller-deadman grip \
   --head-reference-mode head_coupled \
   --controller-orientation-mode absolute \
+  --base-max-vx 0.15 \
+  --base-max-wz 0.40 \
+  --base-max-z 1.0 \
   --max-arm-joint-speed 1.2 \
   --home-return-speed 0.5 \
   --ee dex1
@@ -94,10 +98,14 @@ cd ~/unitree_ws/src/xr_teleoperate
 
 python teleop/demo_xrobotics_mujoco.py \
   --frequency 30 \
+  --viewer-robot g1_d_mobile \
   --controller-deadman grip \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
+  --base-max-vx 0.15 \
+  --base-max-wz 0.40 \
+  --base-max-z 1.0 \
   --max-arm-joint-speed 1.2 \
   --home-return-speed 0.5 \
   --ee dex1
@@ -112,10 +120,14 @@ cd ~/unitree_ws/src/xr_teleoperate
 
 python teleop/demo_xrobotics_mujoco.py \
   --frequency 30 \
+  --viewer-robot g1_d_mobile \
   --controller-deadman none \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
+  --base-max-vx 0.15 \
+  --base-max-wz 0.40 \
+  --base-max-z 1.0 \
   --max-arm-joint-speed 1.2 \
   --home-return-speed 0.5 \
   --ee dex1
@@ -160,11 +172,17 @@ python teleop/teleop_hand_and_arm.py \
 ## 常用操作
 
 - 启动程序
-- 机械臂回 home / ready
+- MuJoCo 中初始停在 G1D ready / home pose
 - 按 `r` 进入 tracking
 - 按住对应手柄 `grip` 才允许运动
 - 松开 `grip` 后保持当前位置
 - 按 `q` 退出
+
+MuJoCo G1D 带底盘场景下：
+
+- 左摇杆上下：前进 / 后退
+- 左摇杆左右：原地转向
+- 右摇杆上下：升降柱
 
 如当前分支保留了附加逻辑：
 
@@ -208,17 +226,76 @@ python teleop/teleop_hand_and_arm.py \
   --base-max-z 1.0 \
   --base-stick-deadzone 0.12
 ```
+```
+python teleop/teleop_hand_and_arm.py \
+  --input-mode controller \
+  --arm G1_29 \
+  --ee dex1 \
+  --network-interface wlo1 \  
+  --base-controller g1d_agv \
+  --controller-deadman grip \
+  --head-reference-mode fixed_per_grip \
+  --controller-mapping-mode anchored_safe \
+  --controller-orientation-mode relative \
+  --base-max-vx 0.15 \
+  --base-max-wz 0.40 \
+  --base-max-z 1.0 \
+  --base-stick-deadzone 0.12
+```
+
 
 ### MuJoCo 主用
 
 ```bash
 python teleop/demo_xrobotics_mujoco.py \
   --frequency 30 \
+  --viewer-robot g1_d_mobile \
   --controller-deadman grip \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
+  --base-max-vx 0.15 \
+  --base-max-wz 0.40 \
+  --base-max-z 1.0 \
   --max-arm-joint-speed 1.2 \
   --home-return-speed 0.5 \
   --ee dex1
+```
+
+backup
+```
+mujoco
+
+python teleop/demo_xrobotics_mujoco.py \
+    --frequency 30 \
+    --viewer-robot g1_d_mobile \
+    --controller-deadman grip \
+    --head-reference-mode live_head_reference \
+    --controller-mapping-mode anchored_safe \
+    --controller-orientation-mode relative \
+    --base-max-vx 0.15 \
+    --base-max-wz 0.40 \
+    --base-max-z 1.0 \
+    --max-arm-joint-speed 1.2 \
+    --home-return-speed 0.5 \
+    --ee dex1
+```
+```
+real robot
+
+python teleop/teleop_hand_and_arm.py \
+    --input-mode controller \
+    --arm G1_29 \
+    --ee dex1 \
+    --network-interface eno1 \
+    --base-controller g1d_agv \
+    --controller-deadman grip \
+    --head-reference-mode live_head_reference \
+    --controller-mapping-mode anchored_safe \
+    --controller-orientation-mode relative \
+    --base-max-vx 0.15 \
+    --base-max-wz 0.40 \
+    --base-max-z 1.0 \
+    --base-stick-deadzone 0.12
+
 ```
