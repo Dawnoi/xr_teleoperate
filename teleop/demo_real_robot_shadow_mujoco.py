@@ -10,8 +10,8 @@ import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_G1_XML = REPO_ROOT / "assets/g1/g1_body29_hand14.xml"
-DEFAULT_DEX1_XML = Path("/home/dx/unitree_ws/src/TWIST2/assets/.generated/g1_29dof_mode_15_with_dex1_1_scene.xml")
-DEFAULT_G1D_XML = Path("/home/dx/unitree_ws/src/TWIST2/assets/g1_d/g1_d_scene.xml")
+DEFAULT_DEX1_XML = REPO_ROOT / "assets/.generated/g1_29dof_mode_15_with_dex1_1_scene.xml"
+DEFAULT_G1D_XML = REPO_ROOT / "assets/g1_d/g1_d_scene.xml"
 
 ARM_JOINT_NAMES = [
     "left_shoulder_pitch_joint",

@@ -6,11 +6,11 @@ import xml.etree.ElementTree as ET
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TWIST2_ROOT = REPO_ROOT.parent / "TWIST2"
-SRC_G1D_COMPILED_XML = TWIST2_ROOT / "assets" / "g1_d" / "g1_d_compiled.xml"
+ASSETS_ROOT = REPO_ROOT / "assets"
+SRC_G1D_COMPILED_XML = ASSETS_ROOT / "g1_d" / "g1_d_compiled.xml"
 SRC_G1D_DIR = SRC_G1D_COMPILED_XML.parent
-SRC_G1_DEX1_COMPILED_XML = TWIST2_ROOT / "assets" / ".generated" / "g1_29dof_mode_15_with_dex1_1_compiled.xml"
-GENERATED_DIR = REPO_ROOT / "assets" / ".generated"
+SRC_G1_DEX1_COMPILED_XML = ASSETS_ROOT / ".generated" / "g1_29dof_mode_15_with_dex1_1_compiled.xml"
+GENERATED_DIR = ASSETS_ROOT / ".generated"
 GENERATED_G1D_MOBILE_XML = GENERATED_DIR / "g1_d_mobile_scene.xml"
 
 WHEEL_RADIUS = 0.0848

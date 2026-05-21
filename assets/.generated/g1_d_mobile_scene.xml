@@ -1,5 +1,5 @@
 <mujoco model="g1_d_mobile_scene">
-  <compiler angle="radian" meshdir="/home/dx/unitree_ws/src/TWIST2/assets/g1_d" />
+  <compiler angle="radian" meshdir="/home/dx/unitree_ws/src/xr_teleoperate/assets/g1_d" />
   <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" iterations="100" noslip_iterations="8" />
   <statistic center="0 0 0.9" extent="1.4" />
   <visual>
@@ -53,11 +53,11 @@
     <mesh name="right_hand_middle_1_link" content_type="model/stl" file="meshes/right_hand_middle_1_link.STL" />
     <mesh name="right_hand_index_0_link" content_type="model/stl" file="meshes/right_hand_index_0_link.STL" />
     <mesh name="right_hand_index_1_link" content_type="model/stl" file="meshes/right_hand_index_1_link.STL" />
-    <mesh name="Dex1_base_link" content_type="model/stl" file="/home/dx/unitree_ws/src/unitree_ros_official/robots/g1_description/meshes/Dex1_base_link.STL" />
-    <mesh name="Dex1_finger_link_1" content_type="model/stl" file="/home/dx/unitree_ws/src/unitree_ros_official/robots/g1_description/meshes/Dex1_finger_link_1.STL" />
-    <mesh name="dex1_col_1" content_type="model/stl" file="/home/dx/unitree_ws/src/unitree_ros_official/robots/g1_description/meshes/dex1_col_1.stl" />
-    <mesh name="Dex1_finger_link_2" content_type="model/stl" file="/home/dx/unitree_ws/src/unitree_ros_official/robots/g1_description/meshes/Dex1_finger_link_2.STL" />
-    <mesh name="dex1_col_2" content_type="model/stl" file="/home/dx/unitree_ws/src/unitree_ros_official/robots/g1_description/meshes/dex1_col_2.stl" />
+    <mesh name="Dex1_base_link" content_type="model/stl" file="../g1_description/meshes/Dex1_base_link.STL" />
+    <mesh name="Dex1_finger_link_1" content_type="model/stl" file="../g1_description/meshes/Dex1_finger_link_1.STL" />
+    <mesh name="dex1_col_1" content_type="model/stl" file="../g1_description/meshes/dex1_col_1.stl" />
+    <mesh name="Dex1_finger_link_2" content_type="model/stl" file="../g1_description/meshes/Dex1_finger_link_2.STL" />
+    <mesh name="dex1_col_2" content_type="model/stl" file="../g1_description/meshes/dex1_col_2.stl" />
     <texture type="skybox" builtin="flat" rgb1="0 0 0" rgb2="0 0 0" width="512" height="3072" />
     <texture type="2d" name="groundplane" builtin="checker" mark="edge" rgb1="0.2 0.3 0.4" rgb2="0.1 0.2 0.3" markrgb="0.8 0.8 0.8" width="300" height="300" />
     <material name="groundplane" texture="groundplane" texuniform="true" texrepeat="5 5" reflectance="0.2" />
