@@ -11,6 +11,7 @@ import numpy as np
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_G1_XML = REPO_ROOT / "assets/g1/g1_body29_hand14.xml"
 DEFAULT_DEX1_XML = Path("/home/dx/unitree_ws/src/TWIST2/assets/.generated/g1_29dof_mode_15_with_dex1_1_scene.xml")
+DEFAULT_G1D_XML = Path("/home/dx/unitree_ws/src/TWIST2/assets/g1_d/g1_d_scene.xml")
 
 ARM_JOINT_NAMES = [
     "left_shoulder_pitch_joint",
@@ -68,6 +69,7 @@ from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorStates_
 
 from teleop.robot_control.robot_arm import G1_29_JointArmIndex, kTopicLowState
 from teleop.robot_control.robot_hand_unitree import kTopicGripperLeftState, kTopicGripperRightState
+from teleop.utils.g1d_mujoco_builder import prepare_g1d_mobile_scene
 
 
 def parse_args():
@@ -78,12 +80,23 @@ def parse_args():
     parser.add_argument("--network-interface", type=str, default=None, help="DDS network interface, e.g. eno1/wlo1.")
     parser.add_argument("--xml", type=str, default=None, help="Optional MuJoCo XML path override.")
     parser.add_argument("--ee", type=str, choices=["none", "dex1"], default="dex1", help="Whether to visualize Dex1 gripper state.")
+    parser.add_argument(
+        "--viewer-robot",
+        type=str,
+        choices=["g1", "g1_d", "g1_d_mobile"],
+        default="g1_d_mobile",
+        help='Shadow viewer model. "g1_d" matches the fixed-base G1D viewer, "g1_d_mobile" matches the movable G1D MuJoCo scene used by pure simulation.',
+    )
     return parser.parse_args()
 
 
 def resolve_xml_path(args):
     if args.xml:
         return Path(args.xml).expanduser().resolve()
+    if args.viewer_robot == "g1_d_mobile":
+        return prepare_g1d_mobile_scene(use_dex1=(args.ee == "dex1"))
+    if args.viewer_robot == "g1_d" and DEFAULT_G1D_XML.exists():
+        return DEFAULT_G1D_XML
     if args.ee == "dex1" and DEFAULT_DEX1_XML.exists():
         return DEFAULT_DEX1_XML
     return DEFAULT_G1_XML.resolve()
@@ -218,9 +231,22 @@ def main():
             stop_requested = True
             print("[EXIT] keyboard Q pressed, closing real-robot shadow viewer.")
 
-    print(f"[SHADOW] starting passive real-robot MuJoCo viewer with xml={xml_path}")
+    print(
+        f"[SHADOW] starting passive real-robot MuJoCo viewer: "
+        f"viewer_robot={args.viewer_robot}, ee={args.ee}, xml={xml_path}"
+    )
     print("[SHADOW] this script only subscribes to DDS state; it does not publish commands or affect teleop.")
     print("[SHADOW] launch the real robot teleop normally, and this viewer will follow the live arm/gripper state.")
+    if args.viewer_robot == "g1_d" and args.ee == "dex1" and dex1_qpos_indices is None:
+        print(
+            "[G1D_VIEWER] fixed-base G1D XML has no Dex1 joints in the current asset path; "
+            "arm state will mirror normally, but Dex1 gripper will not animate."
+        )
+    if args.viewer_robot == "g1_d_mobile":
+        print(
+            "[G1D_MOBILE] using the same movable G1D MuJoCo scene path as pure simulation. "
+            "In shadow mode, only real arm/gripper state is mirrored; base stays at its ready pose."
+        )
 
     try:
         with mjv.launch_passive(

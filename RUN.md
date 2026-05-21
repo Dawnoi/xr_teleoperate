@@ -208,6 +208,7 @@ cd ~/unitree_ws/src/xr_teleoperate
 
 python teleop/demo_real_robot_shadow_mujoco.py \
   --network-interface eno1 \
+  --viewer-robot g1_d_mobile \
   --ee dex1
 ```
 
@@ -218,8 +219,24 @@ cd ~/unitree_ws/src/xr_teleoperate
 
 python teleop/demo_real_robot_shadow_mujoco.py \
   --network-interface wlo1 \
+  --viewer-robot g1_d_mobile \
   --ee dex1
 ```
+
+说明：
+
+- `--viewer-robot g1_d_mobile`
+  - 与纯 MuJoCo 主用模式保持一致
+  - 使用同一套 G1D mobile 场景
+  - shadow 模式下只同步 **真机双臂 + Dex1**，底盘保持 ready pose
+
+- `--viewer-robot g1_d`
+  - 固定底座 G1D 视图
+  - 如果你只想稳定看上半身镜像，也可以用这个
+
+- `--viewer-robot g1`
+  - 原始 G1 视图
+  - 只看双臂时也可用
 
 ---
 
@@ -335,6 +352,11 @@ MuJoCo G1D 场景下：
 
 - `--network-interface eno1`
   - 指定订阅真机状态使用的 DDS 网卡
+
+- `--viewer-robot g1_d_mobile`
+  - 真机 shadow viewer 推荐值
+  - 与纯 MuJoCo 主用场景一致
+  - 也可选 `g1_d` / `g1`
 
 - `--ee dex1`
   - 在 MuJoCo 中同时显示 Dex1 夹爪状态
