@@ -274,6 +274,7 @@ class Dex1_1_Gripper_Controller:
         self.LeftGripperState_subscriber.Init()
         self.RightGripperState_subscriber = ChannelSubscriber(kTopicGripperRightState, MotorStates_)
         self.RightGripperState_subscriber.Init()
+        self.last_gripper_state_timestamp = None
 
         # Shared Arrays for gripper states
         self.left_gripper_state_value = Value('d', 0.0, lock=True)
@@ -304,7 +305,13 @@ class Dex1_1_Gripper_Controller:
             if left_gripper_msg is not None and right_gripper_msg is not None:
                 self.left_gripper_state_value.value = left_gripper_msg.states[0].q
                 self.right_gripper_state_value.value = right_gripper_msg.states[0].q
+                self.last_gripper_state_timestamp = time.time()
             time.sleep(0.002)
+
+    def get_state_age(self):
+        if self.last_gripper_state_timestamp is None:
+            return None
+        return time.time() - self.last_gripper_state_timestamp
     
     def ctrl_dual_gripper(self, dual_gripper_action):
         """set current left, right gripper motor cmd target q"""

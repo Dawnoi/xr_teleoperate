@@ -54,6 +54,7 @@ class H2_LowState:
 class DataBuffer:
     def __init__(self):
         self.data = None
+        self.timestamp = None
         self.lock = threading.Lock()
 
     def GetData(self):
@@ -63,6 +64,17 @@ class DataBuffer:
     def SetData(self, data):
         with self.lock:
             self.data = data
+            self.timestamp = time.time()
+
+    def GetTimestamp(self):
+        with self.lock:
+            return self.timestamp
+
+    def GetAge(self):
+        with self.lock:
+            if self.timestamp is None:
+                return None
+            return time.time() - self.timestamp
 
 class G1_29_ArmController:
     def __init__(self, motion_mode = False, simulation_mode = False):

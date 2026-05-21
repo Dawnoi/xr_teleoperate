@@ -91,6 +91,107 @@ def get_state() -> dict:
     }
 
 
+class TimingDebugger:
+    def __init__(self, enabled: bool = False, interval_sec: float = 2.0):
+        self.enabled = enabled
+        self.interval_sec = max(0.5, float(interval_sec))
+        self._last_report_time = time.time()
+        self._reset()
+
+    def _reset(self):
+        self.loop_count = 0
+        self.loop_total = 0.0
+        self.loop_max = 0.0
+        self.overrun_count = 0
+        self.tele_fetch_total = 0.0
+        self.tele_fetch_max = 0.0
+        self.tele_none_count = 0
+        self.ik_total = 0.0
+        self.ik_max = 0.0
+        self.ik_count = 0
+        self.agv_total = 0.0
+        self.agv_max = 0.0
+        self.agv_count = 0
+
+    def add_loop(self, dt: float, overrun: bool):
+        if not self.enabled:
+            return
+        self.loop_count += 1
+        self.loop_total += dt
+        self.loop_max = max(self.loop_max, dt)
+        if overrun:
+            self.overrun_count += 1
+
+    def add_tele_fetch(self, dt: float, got_data: bool):
+        if not self.enabled:
+            return
+        self.tele_fetch_total += dt
+        self.tele_fetch_max = max(self.tele_fetch_max, dt)
+        if not got_data:
+            self.tele_none_count += 1
+
+    def add_ik(self, dt: float):
+        if not self.enabled:
+            return
+        self.ik_total += dt
+        self.ik_max = max(self.ik_max, dt)
+        self.ik_count += 1
+
+    def add_agv(self, dt: float):
+        if not self.enabled:
+            return
+        self.agv_total += dt
+        self.agv_max = max(self.agv_max, dt)
+        self.agv_count += 1
+
+    def maybe_report(self, arm_ctrl=None, gripper_ctrl=None):
+        if not self.enabled:
+            return
+        now = time.time()
+        if (now - self._last_report_time) < self.interval_sec:
+            return
+
+        arm_age = None
+        if arm_ctrl is not None and hasattr(arm_ctrl, "lowstate_buffer"):
+            try:
+                arm_age = arm_ctrl.lowstate_buffer.GetAge()
+            except Exception:
+                arm_age = None
+
+        gripper_age = None
+        if gripper_ctrl is not None and hasattr(gripper_ctrl, "get_state_age"):
+            try:
+                gripper_age = gripper_ctrl.get_state_age()
+            except Exception:
+                gripper_age = None
+
+        loop_avg_ms = (self.loop_total / self.loop_count * 1000.0) if self.loop_count else 0.0
+        tele_avg_ms = (self.tele_fetch_total / self.loop_count * 1000.0) if self.loop_count else 0.0
+        ik_avg_ms = (self.ik_total / self.ik_count * 1000.0) if self.ik_count else 0.0
+        agv_avg_ms = (self.agv_total / self.agv_count * 1000.0) if self.agv_count else 0.0
+
+        timing_msg = (
+            "[TIMING] "
+            f"loop avg/max={loop_avg_ms:.1f}/{self.loop_max * 1000.0:.1f} ms, "
+            f"tele avg/max={tele_avg_ms:.1f}/{self.tele_fetch_max * 1000.0:.1f} ms, "
+            f"ik avg/max={ik_avg_ms:.1f}/{self.ik_max * 1000.0:.1f} ms ({self.ik_count} calls), "
+            f"agv avg/max={agv_avg_ms:.1f}/{self.agv_max * 1000.0:.1f} ms ({self.agv_count} calls)"
+        )
+        if arm_age is not None:
+            timing_msg += f", arm_state_age_ms={arm_age * 1000.0:.1f}"
+        logger_mp.info(timing_msg)
+
+        state_parts = [f"tele_none={self.tele_none_count}", f"overrun={self.overrun_count}/{self.loop_count}"]
+        if arm_age is not None:
+            state_parts.insert(0, f"arm_state_age_ms={arm_age * 1000.0:.1f}")
+        if gripper_age is not None:
+            state_parts.insert(1 if arm_age is not None else 0, f"gripper_state_age_ms={gripper_age * 1000.0:.1f}")
+        logger_mp.info("[TIMING_STATE] " + ", ".join(state_parts))
+
+        self._last_report_time = now
+        self._reset()
+
+
 def reset_arm_ik_state(arm_ik, arm_q):
     arm_q = np.asarray(arm_q, dtype=float).copy()
     if hasattr(arm_ik, "init_data"):
@@ -125,6 +226,7 @@ if __name__ == '__main__':
     arm_ctrl = None
     tv_wrapper = None
     listen_keyboard_thread = None
+    gripper_ctrl = None
     parser = argparse.ArgumentParser()
     # basic control parameters
     parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
@@ -158,6 +260,10 @@ if __name__ == '__main__':
                         help='"legacy_main" reproduces the original main-branch controller mapping semantics as closely as possible. "anchored_safe" uses the newer grip-anchor based takeover-safe mapping.')
     parser.add_argument('--calibration-mode', type=str, choices=['manual', 'auto'], default='manual',
                         help='Calibration trigger in head_coupled/hybrid mode. "manual" waits for key c after r; "auto" calibrates once live pose data is available. fixed_per_grip/live_head_reference do not require manual calibration.')
+    parser.add_argument('--timing-debug', action='store_true',
+                        help='Enable periodic timing / staleness logs for diagnosing wireless lag and runtime stalls.')
+    parser.add_argument('--timing-debug-interval', type=float, default=2.0,
+                        help='Seconds between timing debug reports when --timing-debug is enabled.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
@@ -177,6 +283,7 @@ if __name__ == '__main__':
     normalized_head_mode = "head_coupled" if args.head_reference_mode == "calibrated" else (
         "live_head_reference" if args.head_reference_mode in {"live", "head_decoupled_live"} else args.head_reference_mode
     )
+    timing_debugger = TimingDebugger(enabled=args.timing_debug, interval_sec=args.timing_debug_interval)
     if args.base_controller == "g1d_agv" and args.motion:
         raise ValueError("Do not combine --base-controller g1d_agv with --motion. G1D AGV base control should run with the arms kept in debug mode.")
 
@@ -217,6 +324,8 @@ if __name__ == '__main__':
             controller_mapping_mode=args.controller_mapping_mode,
         )
         logger_mp.info("Using XR-Robotics as the only Pico input source.")
+        if args.timing_debug:
+            logger_mp.info(f"[TIMING] debug enabled, report interval = {args.timing_debug_interval:.1f}s")
         
         agv_bridge = None
         # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
@@ -452,11 +561,14 @@ if __name__ == '__main__':
             current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, current_lr_arm_q)
 
             # get xr's tele data
+            tele_fetch_start = time.perf_counter()
             tele_data = tv_wrapper.get_tele_data(
                 current_left_robot_wrist_pose=current_left_wrist_pose,
                 current_right_robot_wrist_pose=current_right_wrist_pose,
             )
+            timing_debugger.add_tele_fetch(time.perf_counter() - tele_fetch_start, tele_data is not None)
             if tele_data is None:
+                timing_debugger.maybe_report(arm_ctrl=arm_ctrl, gripper_ctrl=gripper_ctrl)
                 time.sleep(0.01)
                 continue
 
@@ -597,8 +709,10 @@ if __name__ == '__main__':
                     base_z = right_stick_y * args.base_max_z
 
                 if agv_bridge is not None:
+                    agv_send_start = time.perf_counter()
                     agv_bridge.move(base_vx, base_vy, base_wz)
                     agv_bridge.height_adjust(base_z)
+                    timing_debugger.add_agv(time.perf_counter() - agv_send_start)
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
             if zero_takeover_this_frame:
@@ -615,10 +729,11 @@ if __name__ == '__main__':
                 sol_q = home_target_q.copy()
                 sol_tauff = compute_arm_gravity_tauff(arm_ik, sol_q)
             elif left_arm_enabled or right_arm_enabled:
-                time_ik_start = time.time()
+                time_ik_start = time.perf_counter()
                 sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
-                time_ik_end = time.time()
-                logger_mp.debug(f"ik:\t{round(time_ik_end - time_ik_start, 6)}")
+                ik_dt = time.perf_counter() - time_ik_start
+                timing_debugger.add_ik(ik_dt)
+                logger_mp.debug(f"ik:\t{round(ik_dt, 6)}")
             else:
                 sol_q = current_hold_q.copy()
                 sol_tauff = current_hold_tauff.copy()
@@ -760,6 +875,8 @@ if __name__ == '__main__':
             current_time = time.time()
             time_elapsed = current_time - start_time
             sleep_time = max(0, (1 / args.frequency) - time_elapsed)
+            timing_debugger.add_loop(time_elapsed, overrun=(sleep_time <= 1e-6))
+            timing_debugger.maybe_report(arm_ctrl=arm_ctrl, gripper_ctrl=gripper_ctrl)
             time.sleep(sleep_time)
             logger_mp.debug(f"main process sleep: {sleep_time}")
 

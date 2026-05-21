@@ -1,24 +1,20 @@
 # RUN.md
 
-## 1. 真机：仅手臂 + Dex1，不控底盘
+仅保留 **不用按 `C` 做标定** 的启动方式。
 
-```bash
-cd ~/unitree_ws/src/xr_teleoperate
+当前文档只保留两类头参考模式：
 
-python teleop/teleop_hand_and_arm.py \
-  --input-mode controller \
-  --arm G1_29 \
-  --ee dex1 \
-  --network-interface eno1 \
-  --controller-deadman grip \
-  --head-reference-mode fixed_per_grip \
-  --controller-mapping-mode anchored_safe \
-  --controller-orientation-mode relative
-```
+- `fixed_per_grip`：**推荐主用**，每次按下 grip 自动建立本次接管参考
+- `live_head_reference`：实时头参考，适合实验 / 对比
+
+不再保留需要 `C` 的模式：
+
+- `calibrated` / `head_coupled`
+- `hybrid`
 
 ---
 
-## 2. 真机：手臂 + Dex1 + G1D 底盘
+## 1. 真机主用：手臂 + Dex1 + G1D 底盘（免 C）
 
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
@@ -33,21 +29,81 @@ python teleop/teleop_hand_and_arm.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --base-max-vx 0.15 \
-  --base-max-wz 0.40 \
+  --max-arm-joint-speed 3.5 \
+  --base-max-vx 0.20 \
+  --base-max-wz 0.60 \
   --base-max-z 1.0 \
-  --base-stick-deadzone 0.12
+  --base-stick-deadzone 0.10
 ```
 
-### 当前底盘控制语义
+Wi‑Fi:
 
-- 左摇杆上下：前进/后退
-- 左摇杆左右：原地转
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
+python teleop/teleop_hand_and_arm.py \
+  --input-mode controller \
+  --arm G1_29 \
+  --ee dex1 \
+  --network-interface wlo1 \
+  --base-controller g1d_agv \
+  --controller-deadman grip \
+  --head-reference-mode fixed_per_grip \
+  --controller-mapping-mode anchored_safe \
+  --controller-orientation-mode relative \
+  --max-arm-joint-speed 3.5 \
+  --base-max-vx 0.20 \
+  --base-max-wz 0.60 \
+  --base-max-z 1.0 \
+  --base-stick-deadzone 0.10
+```
+
+底盘语义：
+
+- 左摇杆上下：前进 / 后退
+- 左摇杆左右：原地转向
 - 右摇杆上下：升降柱
 
 ---
 
-## 3. 真机：手臂 + 底盘，转向更快
+## 2. 真机：仅手臂 + Dex1，不控底盘（免 C）
+
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
+python teleop/teleop_hand_and_arm.py \
+  --input-mode controller \
+  --arm G1_29 \
+  --ee dex1 \
+  --network-interface eno1 \
+  --controller-deadman grip \
+  --head-reference-mode fixed_per_grip \
+  --controller-mapping-mode anchored_safe \
+  --controller-orientation-mode relative \
+  --max-arm-joint-speed 3.5
+```
+
+---
+
+## 3. 真机：不控 Dex1，只看双臂（免 C）
+
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
+python teleop/teleop_hand_and_arm.py \
+  --input-mode controller \
+  --arm G1_29 \
+  --network-interface eno1 \
+  --controller-deadman grip \
+  --head-reference-mode fixed_per_grip \
+  --controller-mapping-mode anchored_safe \
+  --controller-orientation-mode relative \
+  --max-arm-joint-speed 3.5
+```
+
+---
+
+## 4. 真机备选：live 头参考（免 C）
 
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
@@ -59,39 +115,19 @@ python teleop/teleop_hand_and_arm.py \
   --network-interface eno1 \
   --base-controller g1d_agv \
   --controller-deadman grip \
-  --head-reference-mode fixed_per_grip \
+  --head-reference-mode live_head_reference \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --base-max-vx 0.15 \
+  --max-arm-joint-speed 3.5 \
+  --base-max-vx 0.20 \
   --base-max-wz 0.60 \
   --base-max-z 1.0 \
-  --base-stick-deadzone 0.12
+  --base-stick-deadzone 0.10
 ```
 
 ---
 
-## 4. MuJoCo：头动带手动
-
-```bash
-cd ~/unitree_ws/src/xr_teleoperate
-
-python teleop/demo_xrobotics_mujoco.py \
-  --frequency 30 \
-  --viewer-robot g1_d_mobile \
-  --controller-deadman grip \
-  --head-reference-mode head_coupled \
-  --controller-orientation-mode absolute \
-  --base-max-vx 0.15 \
-  --base-max-wz 0.40 \
-  --base-max-z 1.0 \
-  --max-arm-joint-speed 1.2 \
-  --home-return-speed 0.5 \
-  --ee dex1
-```
-
----
-
-## 5. MuJoCo：头动不直接带手动
+## 5. MuJoCo 主用：fixed_per_grip（免 C）
 
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
@@ -103,17 +139,17 @@ python teleop/demo_xrobotics_mujoco.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --base-max-vx 0.15 \
-  --base-max-wz 0.40 \
+  --base-max-vx 0.20 \
+  --base-max-wz 0.60 \
   --base-max-z 1.0 \
-  --max-arm-joint-speed 1.2 \
+  --max-arm-joint-speed 5.0 \
   --home-return-speed 0.5 \
   --ee dex1
 ```
 
 ---
 
-## 6. MuJoCo：不需要一直按 grip，便于调试
+## 6. MuJoCo：调试版，不需要一直按 grip（免 C）
 
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
@@ -125,69 +161,183 @@ python teleop/demo_xrobotics_mujoco.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --base-max-vx 0.15 \
-  --base-max-wz 0.40 \
+  --base-max-vx 0.20 \
+  --base-max-wz 0.60 \
   --base-max-z 1.0 \
-  --max-arm-joint-speed 1.2 \
+  --max-arm-joint-speed 5.0 \
   --home-return-speed 0.5 \
   --ee dex1
 ```
 
 ---
 
-## 7. 真机：不控 Dex1，只看双臂
+## 7. MuJoCo 备选：live 头参考（免 C）
 
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/teleop_hand_and_arm.py \
-  --input-mode controller \
-  --arm G1_29 \
-  --network-interface eno1 \
+python teleop/demo_xrobotics_mujoco.py \
+  --frequency 30 \
+  --viewer-robot g1_d_mobile \
   --controller-deadman grip \
-  --head-reference-mode fixed_per_grip \
+  --head-reference-mode live_head_reference \
   --controller-mapping-mode anchored_safe \
-  --controller-orientation-mode relative
+  --controller-orientation-mode relative \
+  --base-max-vx 0.20 \
+  --base-max-wz 0.60 \
+  --base-max-z 1.0 \
+  --max-arm-joint-speed 5.0 \
+  --home-return-speed 0.5 \
+  --ee dex1
 ```
 
 ---
 
-## 8. 真机：头动带手动演示模式
+## 8. 真机状态 MuJoCo 镜像
+
+用途：
+
+- 真机 teleop 启动后
+- MuJoCo 实时显示 **真机双臂 + Dex1 夹爪真实状态**
+- 只订阅，不发控制，不影响现有使用
+
+先启动真机，再开：
 
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/teleop_hand_and_arm.py \
-  --input-mode controller \
-  --arm G1_29 \
-  --ee dex1 \
+python teleop/demo_real_robot_shadow_mujoco.py \
   --network-interface eno1 \
-  --controller-deadman grip \
-  --head-reference-mode head_coupled \
-  --controller-orientation-mode absolute
+  --ee dex1
+```
+
+Wi‑Fi:
+
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
+python teleop/demo_real_robot_shadow_mujoco.py \
+  --network-interface wlo1 \
+  --ee dex1
 ```
 
 ---
 
 ## 常用操作
 
-- 启动程序
-- MuJoCo 中初始停在 G1D ready / home pose
-- 按 `r` 进入 tracking
-- 按住对应手柄 `grip` 才允许运动
-- 松开 `grip` 后保持当前位置
-- 按 `q` 退出
+- 按 `r`：进入 tracking
+- 按住对应手柄 `grip`：该侧手臂 / 夹爪允许运动
+- 松开 `grip`：保持当前位置
+- 按 `q`：退出
 
-MuJoCo G1D 带底盘场景下：
+MuJoCo G1D 场景下：
 
 - 左摇杆上下：前进 / 后退
 - 左摇杆左右：原地转向
 - 右摇杆上下：升降柱
 
-如当前分支保留了附加逻辑：
+---
 
-- 按 `y`：回 ready / home
-- 按 `c`：重新参考 / 重标定
+## 常用 `--` 参数说明
+
+### 通用
+
+- `--input-mode controller`
+  - 使用 XR 控制器输入
+  - 当前真机主链路就用这个
+
+- `--arm G1_29`
+  - 选择机械臂型号
+  - 当前这里统一用 `G1_29`
+
+- `--ee dex1`
+  - 选择末端执行器
+  - 这里表示使用 Dex1 夹爪
+
+- `--network-interface eno1`
+  - 指定 DDS 网卡
+  - 有线常用 `eno1`
+  - 无线常用 `wlo1`
+
+- `--controller-deadman grip`
+  - 只有按住对应侧 `grip` 才允许运动
+  - 推荐真机始终使用
+
+- `--controller-deadman none`
+  - 不需要一直按 grip
+  - 只建议 MuJoCo 调试时使用
+
+### 头参考 / 映射
+
+- `--head-reference-mode fixed_per_grip`
+  - **推荐主用**
+  - 不需要按 `C`
+  - 每次按下 grip 时自动建立当前接管参考
+  - 适合真机稳定遥操
+
+- `--head-reference-mode live_head_reference`
+  - 不需要按 `C`
+  - 头参考始终实时变化
+  - 更适合实验 / 对比，不如 `fixed_per_grip` 稳
+
+- `--controller-mapping-mode anchored_safe`
+  - 推荐主用
+  - 采用 grip-anchor 的更安全接管逻辑
+
+- `--controller-orientation-mode relative`
+  - 推荐主用
+  - 手腕姿态按“接管时刻”的相对旋转变化
+  - 比 `absolute` 更稳
+
+### 真机底盘
+
+- `--base-controller g1d_agv`
+  - 开启 G1D 底盘控制
+  - 当前推荐链路
+
+- `--base-max-vx 0.20`
+  - 最大前后速度
+  - 数值越大，前进后退越快
+
+- `--base-max-wz 0.60`
+  - 最大转向角速度
+  - 数值越大，原地转向越快
+
+- `--base-max-z 1.0`
+  - 升降柱控制幅度
+
+- `--base-stick-deadzone 0.10`
+  - 摇杆死区
+  - 越大越不容易轻微漂移
+
+- `--max-arm-joint-speed 3.5`
+  - 真机推荐值
+  - 这是外层关节目标限速，单位 rad/s
+  - 如果太小会感觉跟手慢、迟滞明显
+
+### MuJoCo
+
+- `--frequency 30`
+  - MuJoCo 主循环刷新频率
+
+- `--viewer-robot g1_d_mobile`
+  - 使用带移动底盘的 G1D MuJoCo 视图
+
+- `--max-arm-joint-speed 5.0`
+  - MuJoCo 推荐值
+  - MuJoCo 中手臂目标关节最大速度
+  - 越大动作越快，越小越平滑
+
+- `--home-return-speed 0.5`
+  - 回 home / ready pose 时的关节速度限制
+
+### 真机状态镜像
+
+- `--network-interface eno1`
+  - 指定订阅真机状态使用的 DDS 网卡
+
+- `--ee dex1`
+  - 在 MuJoCo 中同时显示 Dex1 夹爪状态
 
 ---
 
@@ -203,99 +353,3 @@ G1D 当前链路不要使用：
 
 - 手臂应走 debug 模式
 - 底盘应走 `g1d_agv`
-
----
-
-## 推荐主命令
-
-### 真机主用
-
-```bash
-python teleop/teleop_hand_and_arm.py \
-  --input-mode controller \
-  --arm G1_29 \
-  --ee dex1 \
-  --network-interface eno1 \
-  --base-controller g1d_agv \
-  --controller-deadman grip \
-  --head-reference-mode fixed_per_grip \
-  --controller-mapping-mode anchored_safe \
-  --controller-orientation-mode relative \
-  --base-max-vx 0.15 \
-  --base-max-wz 0.40 \
-  --base-max-z 1.0 \
-  --base-stick-deadzone 0.12
-```
-```
-python teleop/teleop_hand_and_arm.py \
-  --input-mode controller \
-  --arm G1_29 \
-  --ee dex1 \
-  --network-interface wlo1 \  
-  --base-controller g1d_agv \
-  --controller-deadman grip \
-  --head-reference-mode fixed_per_grip \
-  --controller-mapping-mode anchored_safe \
-  --controller-orientation-mode relative \
-  --base-max-vx 0.15 \
-  --base-max-wz 0.40 \
-  --base-max-z 1.0 \
-  --base-stick-deadzone 0.12
-```
-
-
-### MuJoCo 主用
-
-```bash
-python teleop/demo_xrobotics_mujoco.py \
-  --frequency 30 \
-  --viewer-robot g1_d_mobile \
-  --controller-deadman grip \
-  --head-reference-mode fixed_per_grip \
-  --controller-mapping-mode anchored_safe \
-  --controller-orientation-mode relative \
-  --base-max-vx 0.15 \
-  --base-max-wz 0.40 \
-  --base-max-z 1.0 \
-  --max-arm-joint-speed 1.2 \
-  --home-return-speed 0.5 \
-  --ee dex1
-```
-
-backup
-```
-mujoco
-
-python teleop/demo_xrobotics_mujoco.py \
-    --frequency 30 \
-    --viewer-robot g1_d_mobile \
-    --controller-deadman grip \
-    --head-reference-mode live_head_reference \
-    --controller-mapping-mode anchored_safe \
-    --controller-orientation-mode relative \
-    --base-max-vx 0.15 \
-    --base-max-wz 0.40 \
-    --base-max-z 1.0 \
-    --max-arm-joint-speed 1.2 \
-    --home-return-speed 0.5 \
-    --ee dex1
-```
-```
-real robot
-
-python teleop/teleop_hand_and_arm.py \
-    --input-mode controller \
-    --arm G1_29 \
-    --ee dex1 \
-    --network-interface eno1 \
-    --base-controller g1d_agv \
-    --controller-deadman grip \
-    --head-reference-mode live_head_reference \
-    --controller-mapping-mode anchored_safe \
-    --controller-orientation-mode relative \
-    --base-max-vx 0.15 \
-    --base-max-wz 0.40 \
-    --base-max-z 1.0 \
-    --base-stick-deadzone 0.12
-
-```
