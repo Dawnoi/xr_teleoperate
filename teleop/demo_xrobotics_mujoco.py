@@ -46,6 +46,7 @@ import pinocchio as pin
 
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK
 from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
+from teleop.utils.arm_workspace_safety import clamp_dual_wrist_poses_to_box
 from teleop.utils.g1d_mujoco_builder import prepare_g1d_mobile_scene
 from teleop.utils.xr_robotics_wrapper import XRRoboticsWrapper
 
@@ -135,6 +136,27 @@ def parse_args():
         choices=["manual", "auto"],
         default="manual",
         help='Calibration trigger in head_coupled/hybrid mode. "manual" waits for keyboard C inside the MuJoCo window; "auto" calibrates as soon as live pose arrives. fixed_per_grip/live_head_reference do not require manual calibration.',
+    )
+    parser.add_argument(
+        "--disable-arm-workspace-limit",
+        action="store_true",
+        help="Disable the MuJoCo-side wrist workspace clamp before IK.",
+    )
+    parser.add_argument(
+        "--arm-workspace-min",
+        type=float,
+        nargs=3,
+        default=[0.0, -0.45, -0.20],
+        metavar=("XMIN", "YMIN", "ZMIN"),
+        help="Forward box workspace lower bound in the arm IK/base frame, applied before IK.",
+    )
+    parser.add_argument(
+        "--arm-workspace-max",
+        type=float,
+        nargs=3,
+        default=[0.50, 0.45, 0.55],
+        metavar=("XMAX", "YMAX", "ZMAX"),
+        help="Forward box workspace upper bound in the arm IK/base frame, applied before IK.",
     )
     return parser.parse_args()
 
@@ -265,6 +287,9 @@ def main():
     # teleop_hand_and_arm.py launch flow.
     os.chdir(Path(__file__).resolve().parent)
     arm_ik = G1_29_ArmIK()
+    workspace_limit_enabled = not args.disable_arm_workspace_limit
+    workspace_min = np.asarray(args.arm_workspace_min, dtype=float)
+    workspace_max = np.asarray(args.arm_workspace_max, dtype=float)
 
     model = mj.MjModel.from_xml_path(str(xml_path))
     data = mj.MjData(model)
@@ -365,6 +390,14 @@ def main():
                 "[G1D_MOBILE] enabling kinematic planar base hold for teleop stability "
                 "(locks roll/pitch so the two-wheel viewer does not tip over at startup)."
             )
+    if workspace_limit_enabled:
+        print(
+            "[ARM_WORKSPACE] enabled: forward box, "
+            f"min=({workspace_min[0]:.3f}, {workspace_min[1]:.3f}, {workspace_min[2]:.3f}), "
+            f"max=({workspace_max[0]:.3f}, {workspace_max[1]:.3f}, {workspace_max[2]:.3f})"
+        )
+    else:
+        print("[ARM_WORKSPACE] disabled.")
     calibration_required = normalized_head_mode in {"head_coupled", "hybrid"}
     calibrated = not calibration_required
     calibration_requested = calibration_required and args.calibration_mode == "auto"
@@ -525,12 +558,21 @@ def main():
                             xr_wrapper.sync_reference_to_current_live_pose(require_live=False)
                         reset_arm_ik_state(arm_ik, current_lr_arm_q)
                         post_home_takeover_armed = False
+                    left_target_pose = tele_data.left_wrist_pose
+                    right_target_pose = tele_data.right_wrist_pose
+                    if workspace_limit_enabled:
+                        left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_box(
+                            left_target_pose,
+                            right_target_pose,
+                            workspace_min,
+                            workspace_max,
+                        )
                     if home_return_active:
                         sol_q = home_target_q.copy()
                     elif left_arm_enabled or right_arm_enabled:
                         sol_q, _ = arm_ik.solve_ik(
-                            tele_data.left_wrist_pose,
-                            tele_data.right_wrist_pose,
+                            left_target_pose,
+                            right_target_pose,
                             current_lr_arm_q,
                             arm_dq,
                         )

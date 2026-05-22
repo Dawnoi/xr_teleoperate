@@ -442,6 +442,22 @@ G1D 当前链路不要使用：
     --latency-trace \
     --latency-trace-path ./utils/data/latency_trace.jsonl \
     --timing-debug \
+
+    python teleop/teleop_hand_and_arm.py \
+    --input-mode controller \
+    --arm G1_29 \
+    --ee dex1 \
+    --network-interface wlo1 \
+    --base-controller g1d_agv \
+    --controller-deadman grip \
+    --head-reference-mode fixed_per_grip \
+    --controller-mapping-mode anchored_safe \
+    --controller-orientation-mode relative \
+    --max-arm-joint-speed 5.0 \
+    --home-return-speed 1.0 \
+    --latency-trace \
+    --latency-trace-path ./utils/data/latency_trace.jsonl \
+    --timing-debug \
   ———
 
   ## 图也还能继续生成
