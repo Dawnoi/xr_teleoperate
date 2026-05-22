@@ -74,6 +74,31 @@ python teleop/teleop_hand_and_arm.py \
   --base-stick-deadzone 0.10
 ```
 
+一键脚本：
+
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
+# 有线
+bash scripts/start_real_robot_wired.sh
+
+# Wi‑Fi
+bash scripts/start_real_robot_wifi.sh
+```
+
+如果网卡名字不同，可以直接覆盖：
+
+```bash
+NETWORK_INTERFACE=enp3s0 bash scripts/start_real_robot_wired.sh
+NETWORK_INTERFACE=wlan0  bash scripts/start_real_robot_wifi.sh
+```
+
+如果要临时追加额外参数，也可以直接接在后面：
+
+```bash
+bash scripts/start_real_robot_wifi.sh --timing-debug --timing-debug-interval 2.0
+```
+
 底盘语义：
 
 - 左摇杆上下：前进 / 后退
