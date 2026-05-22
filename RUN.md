@@ -422,8 +422,6 @@ G1D 当前链路不要使用：
 - 底盘应走 `g1d_agv`
 
 
-  ### 1）运行时开启追踪
-
   cd ~/unitree_ws/src/xr_teleoperate
 
   python teleop/teleop_hand_and_arm.py \
@@ -436,17 +434,16 @@ G1D 当前链路不要使用：
     --head-reference-mode fixed_per_grip \
     --controller-mapping-mode anchored_safe \
     --controller-orientation-mode relative \
+    --max-arm-joint-speed 5.0 \
+    --home-return-speed 1.0 \
     --latency-trace \
     --latency-trace-path ./utils/data/latency_trace.jsonl \
-  --timing-debug \
-  --timing-debug-interval 2.0
+    --timing-debug \
+  ———
 
-  ### 2）运行时会打印这种日志
-
-  [LATENCY] seq=7 收到输入->DDS下发=8.31 ms | DDS下发->执行响应=22.12 ms | 收到输入->执行响应=30.43 ms
-
-  ### 3）生成图
+  ## 图也还能继续生成
 
   python teleop/utils/plot_latency_trace.py \
     ./utils/data/latency_trace.jsonl \
     --output ./utils/data/latency_trace.png
+
