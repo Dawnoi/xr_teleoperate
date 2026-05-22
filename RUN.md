@@ -64,6 +64,45 @@ python teleop/teleop_hand_and_arm.py \
 - 左摇杆左右：原地转向
 - 右摇杆上下：升降柱
 
+### 1.1 开启时延追踪（收到输入 -> DDS下发 -> 执行响应）
+
+```bash
+python teleop/teleop_hand_and_arm.py \
+  --input-mode controller \
+  --arm G1_29 \
+  --ee dex1 \
+  --network-interface eno1 \
+  --base-controller g1d_agv \
+  --controller-deadman grip \
+  --head-reference-mode fixed_per_grip \
+  --controller-mapping-mode anchored_safe \
+  --controller-orientation-mode relative \
+  --latency-trace \
+  --latency-trace-path ./utils/data/latency_trace.jsonl
+```
+
+运行时会打印：
+
+```text
+[LATENCY] seq=7 收到输入->DDS下发=8.31 ms | DDS下发->执行响应=22.12 ms | 收到输入->执行响应=30.43 ms
+```
+
+生成图：
+
+```bash
+python teleop/utils/plot_latency_trace.py \
+  ./utils/data/latency_trace.jsonl \
+  --output ./utils/data/latency_trace.png
+```
+
+图里会直接展示：
+
+- 收到输入 -> DDS下发
+- DDS下发 -> 执行响应
+- 收到输入 -> 执行响应
+
+最近若干条样本还会画成时间线，方便直接看“从哪一点到哪一点”。
+
 ---
 
 ## 2. 真机：仅手臂 + Dex1，不控底盘（免 C）

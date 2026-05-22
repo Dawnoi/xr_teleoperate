@@ -76,6 +76,27 @@ class DataBuffer:
                 return None
             return time.time() - self.timestamp
 
+
+def _init_latency_trace_fields(controller):
+    controller._latency_tracker = None
+    controller._pending_trace_seq = 0
+
+
+def _set_latency_tracker(controller, tracker):
+    controller._latency_tracker = tracker
+
+
+def _mark_trace_published(controller, trace_seq):
+    if not trace_seq:
+        return
+    tracker = getattr(controller, "_latency_tracker", None)
+    if tracker is None:
+        return
+    try:
+        tracker.mark_publish(int(trace_seq))
+    except Exception as e:
+        logger_mp.warning(f"[LATENCY] failed to mark publish for seq={trace_seq}: {e}")
+
 class G1_29_ArmController:
     def __init__(self, motion_mode = False, simulation_mode = False):
         logger_mp.info("Initialize G1_29_ArmController...")
@@ -97,6 +118,7 @@ class G1_29_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+        _init_latency_trace_fields(self)
 
         if self.motion_mode:
             self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Motion, hg_LowCmd)
@@ -186,6 +208,7 @@ class G1_29_ArmController:
             with self.ctrl_lock:
                 arm_q_target     = self.q_target
                 arm_tauff_target = self.tauff_target
+                trace_seq = self._pending_trace_seq
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -199,6 +222,7 @@ class G1_29_ArmController:
 
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
+            _mark_trace_published(self, trace_seq)
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -211,11 +235,15 @@ class G1_29_ArmController:
             # logger_mp.debug(f"arm_velocity_limit:{self.arm_velocity_limit}")
             # logger_mp.debug(f"sleep_time:{sleep_time}")
 
-    def ctrl_dual_arm(self, q_target, tauff_target):
+    def set_latency_tracker(self, tracker):
+        _set_latency_tracker(self, tracker)
+
+    def ctrl_dual_arm(self, q_target, tauff_target, trace_seq = None):
         '''Set control target values q & tau of the left and right arm motors.'''
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -381,6 +409,7 @@ class G1_23_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+        _init_latency_trace_fields(self)
 
         
         if self.motion_mode:
@@ -471,6 +500,7 @@ class G1_23_ArmController:
             with self.ctrl_lock:
                 arm_q_target     = self.q_target
                 arm_tauff_target = self.tauff_target
+                trace_seq = self._pending_trace_seq
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -484,6 +514,7 @@ class G1_23_ArmController:
 
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
+            _mark_trace_published(self, trace_seq)
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -496,11 +527,15 @@ class G1_23_ArmController:
             # logger_mp.debug(f"arm_velocity_limit:{self.arm_velocity_limit}")
             # logger_mp.debug(f"sleep_time:{sleep_time}")
 
-    def ctrl_dual_arm(self, q_target, tauff_target):
+    def set_latency_tracker(self, tracker):
+        _set_latency_tracker(self, tracker)
+
+    def ctrl_dual_arm(self, q_target, tauff_target, trace_seq = None):
         '''Set control target values q & tau of the left and right arm motors.'''
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -658,6 +693,7 @@ class H1_2_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+        _init_latency_trace_fields(self)
 
 
         if self.motion_mode:
@@ -748,6 +784,7 @@ class H1_2_ArmController:
             with self.ctrl_lock:
                 arm_q_target     = self.q_target
                 arm_tauff_target = self.tauff_target
+                trace_seq = self._pending_trace_seq
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -761,6 +798,7 @@ class H1_2_ArmController:
 
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
+            _mark_trace_published(self, trace_seq)
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -773,11 +811,15 @@ class H1_2_ArmController:
             # logger_mp.debug(f"arm_velocity_limit:{self.arm_velocity_limit}")
             # logger_mp.debug(f"sleep_time:{sleep_time}")
 
-    def ctrl_dual_arm(self, q_target, tauff_target):
+    def set_latency_tracker(self, tracker):
+        _set_latency_tracker(self, tracker)
+
+    def ctrl_dual_arm(self, q_target, tauff_target, trace_seq = None):
         '''Set control target values q & tau of the left and right arm motors.'''
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -939,6 +981,7 @@ class H1_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+        _init_latency_trace_fields(self)
 
         self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Debug, go_LowCmd)
         self.lowcmd_publisher.Init()
@@ -1016,6 +1059,7 @@ class H1_ArmController:
             with self.ctrl_lock:
                 arm_q_target     = self.q_target
                 arm_tauff_target = self.tauff_target
+                trace_seq = self._pending_trace_seq
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -1029,6 +1073,7 @@ class H1_ArmController:
 
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
+            _mark_trace_published(self, trace_seq)
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1041,11 +1086,15 @@ class H1_ArmController:
             # logger_mp.debug(f"arm_velocity_limit:{self.arm_velocity_limit}")
             # logger_mp.debug(f"sleep_time:{sleep_time}")
 
-    def ctrl_dual_arm(self, q_target, tauff_target):
+    def set_latency_tracker(self, tracker):
+        _set_latency_tracker(self, tracker)
+
+    def ctrl_dual_arm(self, q_target, tauff_target, trace_seq = None):
         '''Set control target values q & tau of the left and right arm motors.'''
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
     
     def get_current_motor_q(self):
         '''Return current state q of all body motors.'''
@@ -1162,6 +1211,7 @@ class H2_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+        _init_latency_trace_fields(self)
         
         if self.motion_mode:
             self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Motion, hg_LowCmd)
@@ -1254,6 +1304,7 @@ class H2_ArmController:
             with self.ctrl_lock:
                 arm_q_target = self.q_target
                 arm_tauff_target = self.tauff_target
+                trace_seq = self._pending_trace_seq
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -1267,6 +1318,7 @@ class H2_ArmController:
 
             self.msg.crc = self.crc.Crc(self.msg)
             self.lowcmd_publisher.Write(self.msg)
+            _mark_trace_published(self, trace_seq)
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1277,11 +1329,15 @@ class H2_ArmController:
             sleep_time = max(0, (self.control_dt - all_t_elapsed))
             time.sleep(sleep_time)
 
-    def ctrl_dual_arm(self, q_target, tauff_target):
+    def set_latency_tracker(self, tracker):
+        _set_latency_tracker(self, tracker)
+
+    def ctrl_dual_arm(self, q_target, tauff_target, trace_seq = None):
         """Set control target values q & tau of the left and right arm motors."""
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
 
     def get_mode_machine(self):
         """Return current dds mode machine."""

@@ -37,6 +37,7 @@ from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.xr_robotics_wrapper import XRRoboticsWrapper
 from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
+from teleop.utils.simple_latency_trace import SimpleLatencyTracker
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -264,6 +265,20 @@ if __name__ == '__main__':
                         help='Enable periodic timing / staleness logs for diagnosing wireless lag and runtime stalls.')
     parser.add_argument('--timing-debug-interval', type=float, default=2.0,
                         help='Seconds between timing debug reports when --timing-debug is enabled.')
+    parser.add_argument('--latency-trace', action='store_true',
+                        help='Enable simple arm latency tracing: 收到输入 -> DDS下发 -> 执行响应.')
+    parser.add_argument('--latency-trace-path', type=str, default='./utils/data/latency_trace.jsonl',
+                        help='Path to save latency trace jsonl records.')
+    parser.add_argument('--latency-command-threshold', type=float, default=0.02,
+                        help='Minimum max joint delta (rad) to start a new latency trace sample.')
+    parser.add_argument('--latency-exec-q-threshold', type=float, default=0.01,
+                        help='Execution-detected threshold on joint position delta (rad).')
+    parser.add_argument('--latency-exec-dq-threshold', type=float, default=0.05,
+                        help='Execution-detected threshold on joint velocity magnitude (rad/s).')
+    parser.add_argument('--latency-timeout', type=float, default=2.0,
+                        help='Timeout in seconds for one latency trace sample.')
+    parser.add_argument('--latency-summary-every', type=int, default=10,
+                        help='Print percentile summary every N completed/timeout latency samples.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
@@ -453,6 +468,24 @@ if __name__ == '__main__':
                                      frequency = args.frequency, 
                                      rerun_log = not args.headless)
 
+        latency_tracker = None
+        if args.latency_trace:
+            latency_tracker = SimpleLatencyTracker(
+                output_path=args.latency_trace_path,
+                summary_every=args.latency_summary_every,
+                log_each_trace=True,
+                timeout_s=args.latency_timeout,
+            )
+            if hasattr(arm_ctrl, 'set_latency_tracker'):
+                arm_ctrl.set_latency_tracker(latency_tracker)
+            logger_mp.info(
+                "[LATENCY] tracing enabled: output=%s, command_threshold=%.4f rad, exec_q_threshold=%.4f rad, exec_dq_threshold=%.4f rad/s",
+                args.latency_trace_path,
+                args.latency_command_threshold,
+                args.latency_exec_q_threshold,
+                args.latency_exec_dq_threshold,
+            )
+
         logger_mp.info("Move arms to home pose before entering teleop wait state...")
         arm_ctrl.ctrl_dual_arm_go_home()
 
@@ -558,6 +591,14 @@ if __name__ == '__main__':
             # grip takeover to the *current* robot wrist pose instead of a fixed home pose.
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
+            if latency_tracker is not None:
+                latency_tracker.maybe_timeout()
+                latency_tracker.maybe_mark_execute(
+                    current_lr_arm_q,
+                    current_lr_arm_dq,
+                    q_threshold=args.latency_exec_q_threshold,
+                    dq_threshold=args.latency_exec_dq_threshold,
+                )
             current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, current_lr_arm_q)
 
             # get xr's tele data
@@ -571,6 +612,7 @@ if __name__ == '__main__':
                 timing_debugger.maybe_report(arm_ctrl=arm_ctrl, gripper_ctrl=gripper_ctrl)
                 time.sleep(0.01)
                 continue
+            tele_data_recv_ts_ns = time.perf_counter_ns()
 
             home_button_pressed = bool(tele_data.left_ctrl_bButton)
             if home_button_pressed and not prev_home_button_pressed:
@@ -755,7 +797,16 @@ if __name__ == '__main__':
             current_hold_q = sol_q.copy()
             current_hold_tauff = sol_tauff.copy()
 
-            arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff)
+            trace_seq = None
+            if latency_tracker is not None and latency_tracker.can_start_new_trace():
+                max_command_delta = float(np.max(np.abs(sol_q - current_lr_arm_q)))
+                if max_command_delta >= args.latency_command_threshold:
+                    trace_seq = latency_tracker.begin_trace(
+                        recv_ts_ns=tele_data_recv_ts_ns,
+                        recv_q=current_lr_arm_q,
+                    )
+
+            arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff, trace_seq=trace_seq)
             if home_return_active and np.all(np.abs(sol_q - home_target_q) < 0.05):
                 home_return_active = False
                 calibration_hold_q = current_hold_q.copy()
