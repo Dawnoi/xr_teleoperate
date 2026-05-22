@@ -29,7 +29,7 @@ python teleop/teleop_hand_and_arm.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --max-arm-joint-speed 3.5 \
+  --max-arm-joint-speed 5.0 \
   --base-max-vx 0.20 \
   --base-max-wz 0.60 \
   --base-max-z 1.0 \
@@ -51,7 +51,7 @@ python teleop/teleop_hand_and_arm.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --max-arm-joint-speed 3.5 \
+  --max-arm-joint-speed 5.0 \
   --base-max-vx 0.20 \
   --base-max-wz 0.60 \
   --base-max-z 1.0 \
@@ -77,14 +77,20 @@ python teleop/teleop_hand_and_arm.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
+  --max-arm-joint-speed 5.0 \
+  --home-return-speed 1.0 \
   --latency-trace \
-  --latency-trace-path ./utils/data/latency_trace.jsonl
+  --latency-trace-path ./utils/data/latency_trace.jsonl \
+  --timing-debug \
+  --timing-debug-interval 2.0
 ```
 
 运行时会打印：
 
 ```text
 [LATENCY] seq=7 收到输入->DDS下发=8.31 ms | DDS下发->执行响应=22.12 ms | 收到输入->执行响应=30.43 ms
+[TIMING] loop avg/p95/max=12.0/18.4/24.7 ms, tele avg/p95/max=3.2/5.1/6.0 ms, ik avg/p95/max=4.8/8.9/10.2 ms (53 calls), agv avg/p95/max=0.4/0.7/0.9 ms (53 calls)
+[TIMING_DDS] publish_hz=249.8, ctrl_loop avg/p95/max=0.18/0.31/0.52 ms, dds_write avg/p95/max=0.042/0.066/0.091 ms, enqueue->publish avg/p95/max=3.21/6.87/9.15 ms
 ```
 
 生成图：
@@ -119,7 +125,7 @@ python teleop/teleop_hand_and_arm.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --max-arm-joint-speed 3.5
+  --max-arm-joint-speed 5.0
 ```
 
 ---
@@ -137,7 +143,7 @@ python teleop/teleop_hand_and_arm.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --max-arm-joint-speed 3.5
+  --max-arm-joint-speed 5.0
 ```
 
 ---
@@ -157,7 +163,7 @@ python teleop/teleop_hand_and_arm.py \
   --head-reference-mode live_head_reference \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --max-arm-joint-speed 3.5 \
+  --max-arm-joint-speed 5.0 \
   --base-max-vx 0.20 \
   --base-max-wz 0.60 \
   --base-max-z 1.0 \
@@ -366,7 +372,7 @@ MuJoCo G1D 场景下：
   - 摇杆死区
   - 越大越不容易轻微漂移
 
-- `--max-arm-joint-speed 3.5`
+- `--max-arm-joint-speed 5.0`
   - 真机推荐值
   - 这是外层关节目标限速，单位 rad/s
   - 如果太小会感觉跟手慢、迟滞明显
@@ -431,7 +437,9 @@ G1D 当前链路不要使用：
     --controller-mapping-mode anchored_safe \
     --controller-orientation-mode relative \
     --latency-trace \
-    --latency-trace-path ./utils/data/latency_trace.jsonl
+    --latency-trace-path ./utils/data/latency_trace.jsonl \
+  --timing-debug \
+  --timing-debug-interval 2.0
 
   ### 2）运行时会打印这种日志
 
@@ -442,4 +450,3 @@ G1D 当前链路不要使用：
   python teleop/utils/plot_latency_trace.py \
     ./utils/data/latency_trace.jsonl \
     --output ./utils/data/latency_trace.png
-
