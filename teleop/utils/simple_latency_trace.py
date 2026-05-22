@@ -2,8 +2,8 @@ import json
 import os
 import threading
 import time
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Dict, Optional
 
 import numpy as np
 import logging_mp
@@ -15,18 +15,20 @@ logger_mp = logging_mp.getLogger(__name__)
 class TraceRecord:
     seq: int
     t_recv_ns: int
+    recv_q: np.ndarray
     t_pub_ns: Optional[int] = None
     t_exec_ns: Optional[int] = None
-    recv_q: Optional[np.ndarray] = None
     status: str = "pending"
+    fields: Dict[str, object] = field(default_factory=dict)
 
 
 class SimpleLatencyTracker:
     """
-    Minimal single-flight latency tracker.
+    Single-flight latency tracker with per-stage breakdown fields.
 
-    One trace is tracked at a time so the reported path is easy to interpret:
-        收到输入 -> DDS下发 -> 执行响应
+    The active sample tracks one command path at a time so recorded timings are
+    easy to attribute:
+        receive -> per-stage processing -> DDS publish -> motion detected
     """
 
     def __init__(
@@ -54,7 +56,7 @@ class SimpleLatencyTracker:
         with self._lock:
             return self._active is None
 
-    def begin_trace(self, recv_ts_ns: int, recv_q) -> Optional[int]:
+    def begin_trace(self, recv_ts_ns: int, recv_q, extra: Optional[Dict[str, object]] = None) -> Optional[int]:
         recv_q = np.asarray(recv_q, dtype=float).copy()
         with self._lock:
             if self._active is not None:
@@ -64,17 +66,34 @@ class SimpleLatencyTracker:
                 seq=self._next_seq,
                 t_recv_ns=int(recv_ts_ns),
                 recv_q=recv_q,
+                fields=dict(extra or {}),
             )
             return self._active.seq
 
-    def mark_publish(self, seq: Optional[int]) -> None:
+    def set_fields(self, seq: Optional[int], **fields) -> None:
+        if not seq:
+            return
+        with self._lock:
+            if self._active is None or self._active.seq != int(seq):
+                return
+            for key, value in fields.items():
+                self._active.fields[key] = value
+
+    def mark_publish(
+        self,
+        seq: Optional[int],
+        publish_ts_ns: Optional[int] = None,
+        **fields,
+    ) -> None:
         if not seq:
             return
         with self._lock:
             if self._active is None or self._active.seq != int(seq):
                 return
             if self._active.t_pub_ns is None:
-                self._active.t_pub_ns = time.perf_counter_ns()
+                self._active.t_pub_ns = int(publish_ts_ns) if publish_ts_ns is not None else time.perf_counter_ns()
+            for key, value in fields.items():
+                self._active.fields[key] = value
 
     def maybe_mark_execute(self, current_q, current_dq, q_threshold: float, dq_threshold: float):
         current_q = np.asarray(current_q, dtype=float)
@@ -90,11 +109,13 @@ class SimpleLatencyTracker:
                 return None
             active.t_exec_ns = time.perf_counter_ns()
             active.status = "completed"
+            active.fields["q_delta_trigger"] = q_delta
+            active.fields["dq_peak_trigger"] = dq_peak
             record = active
             self._active = None
             self._completed += 1
         if record is not None:
-            self._finalize_record(record, q_delta=q_delta, dq_peak=dq_peak)
+            self._finalize_record(record)
         return record.seq if record is not None else None
 
     def maybe_timeout(self):
@@ -113,10 +134,10 @@ class SimpleLatencyTracker:
             self._active = None
             self._dropped += 1
         if record is not None:
-            self._finalize_record(record, q_delta=None, dq_peak=None)
+            self._finalize_record(record)
         return record.seq if record is not None else None
 
-    def _finalize_record(self, record: TraceRecord, q_delta, dq_peak):
+    def _finalize_record(self, record: TraceRecord):
         payload = {
             "seq": int(record.seq),
             "status": record.status,
@@ -126,24 +147,78 @@ class SimpleLatencyTracker:
             "recv_to_pub_ms": self._delta_ms(record.t_recv_ns, record.t_pub_ns),
             "pub_to_exec_ms": self._delta_ms(record.t_pub_ns, record.t_exec_ns),
             "recv_to_exec_ms": self._delta_ms(record.t_recv_ns, record.t_exec_ns),
-            "q_delta_trigger": q_delta,
-            "dq_peak_trigger": dq_peak,
         }
+        payload.update(record.fields)
+
+        enqueue_to_publish_ms = payload.get("enqueue_to_publish_ms")
+        dds_write_ms = payload.get("dds_write_ms")
+        if enqueue_to_publish_ms is not None:
+            if dds_write_ms is not None:
+                payload["controller_wait_ms"] = max(
+                    0.0,
+                    float(enqueue_to_publish_ms) - float(dds_write_ms),
+                )
+            else:
+                payload["controller_wait_ms"] = float(enqueue_to_publish_ms)
+        else:
+            payload["controller_wait_ms"] = None
+
+        # Derived breakdown helpers.
+        known_pre_publish_keys = [
+            "takeover_logic_ms",
+            "base_control_ms",
+            "ik_ms",
+            "safety_ms",
+            "gravity_ms",
+            "enqueue_to_publish_ms",
+        ]
+        known_pre_publish = 0.0
+        for key in known_pre_publish_keys:
+            value = payload.get(key)
+            if value is not None:
+                known_pre_publish += float(value)
+        payload["known_pre_publish_ms"] = known_pre_publish if payload["recv_to_pub_ms"] is not None else None
+        if payload["recv_to_pub_ms"] is not None:
+            payload["unaccounted_pre_publish_ms"] = max(
+                0.0,
+                float(payload["recv_to_pub_ms"]) - known_pre_publish,
+            )
+        else:
+            payload["unaccounted_pre_publish_ms"] = None
+        if payload["recv_to_exec_ms"] is not None:
+            known_post_receive = known_pre_publish + float(payload.get("pub_to_exec_ms") or 0.0)
+            payload["known_post_receive_ms"] = known_post_receive
+            payload["unaccounted_post_receive_ms"] = max(
+                0.0,
+                float(payload["recv_to_exec_ms"]) - known_post_receive,
+            )
+            tele_fetch = float(payload.get("tele_fetch_ms") or 0.0)
+            payload["fetch_to_exec_ms"] = tele_fetch + float(payload["recv_to_exec_ms"])
+        else:
+            payload["known_post_receive_ms"] = None
+            payload["unaccounted_post_receive_ms"] = None
+            payload["fetch_to_exec_ms"] = None
+
         with open(self.output_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
         if self.log_each_trace:
             if record.status == "completed":
                 logger_mp.info(
-                    "[LATENCY] seq=%s 收到输入->DDS下发=%.2f ms | DDS下发->执行响应=%.2f ms | 收到输入->执行响应=%.2f ms",
+                    "[LATENCY] seq=%s recv->pub=%.2f ms | pub->exec=%.2f ms | recv->exec=%.2f ms | tele=%.2f ik=%.2f queue=%.2f wait=%.2f dds=%.3f ms",
                     payload["seq"],
                     payload["recv_to_pub_ms"] or -1.0,
                     payload["pub_to_exec_ms"] or -1.0,
                     payload["recv_to_exec_ms"] or -1.0,
+                    float(payload.get("tele_fetch_ms") or 0.0),
+                    float(payload.get("ik_ms") or 0.0),
+                    float(payload.get("enqueue_to_publish_ms") or 0.0),
+                    float(payload.get("controller_wait_ms") or 0.0),
+                    float(payload.get("dds_write_ms") or 0.0),
                 )
             else:
                 logger_mp.warning(
-                    "[LATENCY] seq=%s 超时未完成，状态=%s recv_to_pub=%s ms recv_to_exec=%s ms",
+                    "[LATENCY] seq=%s timeout status=%s recv->pub=%s ms recv->exec=%s ms",
                     payload["seq"],
                     payload["status"],
                     "%.2f" % payload["recv_to_pub_ms"] if payload["recv_to_pub_ms"] is not None else "N/A",
@@ -167,19 +242,47 @@ class SimpleLatencyTracker:
                         completed.append(item)
             if not completed:
                 return
-            recv_to_exec = np.array([item["recv_to_exec_ms"] for item in completed], dtype=float)
-            recv_to_pub = np.array([item["recv_to_pub_ms"] for item in completed], dtype=float)
-            pub_to_exec = np.array([item["pub_to_exec_ms"] for item in completed], dtype=float)
+
+            def _p(arr_key):
+                arr = np.array([float(item[arr_key]) for item in completed if item.get(arr_key) is not None], dtype=float)
+                if arr.size == 0:
+                    return None
+                return arr
+
+            recv_to_pub = _p("recv_to_pub_ms")
+            pub_to_exec = _p("pub_to_exec_ms")
+            recv_to_exec = _p("recv_to_exec_ms")
+            tele_fetch = _p("tele_fetch_ms")
+            ik = _p("ik_ms")
+            takeover = _p("takeover_logic_ms")
+            base = _p("base_control_ms")
+            safety = _p("safety_ms")
+            gravity = _p("gravity_ms")
+            queue = _p("enqueue_to_publish_ms")
+            wait = _p("controller_wait_ms")
+            dds = _p("dds_write_ms")
+            unknown_pre = _p("unaccounted_pre_publish_ms")
             logger_mp.info(
                 "[LATENCY][SUMMARY] samples=%d recv->pub P50/P95=%.2f/%.2f ms | pub->exec P50/P95=%.2f/%.2f ms | recv->exec P50/P95=%.2f/%.2f ms",
                 len(completed),
-                np.percentile(recv_to_pub, 50),
-                np.percentile(recv_to_pub, 95),
-                np.percentile(pub_to_exec, 50),
-                np.percentile(pub_to_exec, 95),
-                np.percentile(recv_to_exec, 50),
-                np.percentile(recv_to_exec, 95),
+                np.percentile(recv_to_pub, 50), np.percentile(recv_to_pub, 95),
+                np.percentile(pub_to_exec, 50), np.percentile(pub_to_exec, 95),
+                np.percentile(recv_to_exec, 50), np.percentile(recv_to_exec, 95),
             )
+            if any(arr is not None for arr in [tele_fetch, takeover, base, ik, safety, gravity, queue, wait, dds, unknown_pre]):
+                logger_mp.info(
+                    "[LATENCY][BREAKDOWN] tele=%.2f | takeover=%.2f | base=%.2f | ik=%.2f | safety=%.2f | gravity=%.2f | queue=%.2f | wait=%.2f | dds=%.3f | unknown_pre=%.2f ms",
+                    float(np.mean(tele_fetch)) if tele_fetch is not None else 0.0,
+                    float(np.mean(takeover)) if takeover is not None else 0.0,
+                    float(np.mean(base)) if base is not None else 0.0,
+                    float(np.mean(ik)) if ik is not None else 0.0,
+                    float(np.mean(safety)) if safety is not None else 0.0,
+                    float(np.mean(gravity)) if gravity is not None else 0.0,
+                    float(np.mean(queue)) if queue is not None else 0.0,
+                    float(np.mean(wait)) if wait is not None else 0.0,
+                    float(np.mean(dds)) if dds is not None else 0.0,
+                    float(np.mean(unknown_pre)) if unknown_pre is not None else 0.0,
+                )
         except Exception as e:
             logger_mp.warning(f"[LATENCY] failed to summarize latency trace file: {e}")
 

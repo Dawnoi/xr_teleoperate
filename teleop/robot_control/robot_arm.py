@@ -87,14 +87,27 @@ def _set_latency_tracker(controller, tracker):
     controller._latency_tracker = tracker
 
 
-def _mark_trace_published(controller, trace_seq):
+def _mark_trace_published(
+    controller,
+    trace_seq,
+    publish_ts_ns=None,
+    dds_write_ms=None,
+    enqueue_to_publish_ms=None,
+    ctrl_loop_ms=None,
+):
     if not trace_seq:
         return
     tracker = getattr(controller, "_latency_tracker", None)
     if tracker is None:
         return
     try:
-        tracker.mark_publish(int(trace_seq))
+        tracker.mark_publish(
+            int(trace_seq),
+            publish_ts_ns=publish_ts_ns,
+            dds_write_ms=dds_write_ms,
+            enqueue_to_publish_ms=enqueue_to_publish_ms,
+            ctrl_loop_ms=ctrl_loop_ms,
+        )
     except Exception as e:
         logger_mp.warning(f"[LATENCY] failed to mark publish for seq={trace_seq}: {e}")
 
@@ -278,15 +291,24 @@ class G1_29_ArmController:
             write_start_ns = time.perf_counter_ns()
             self.lowcmd_publisher.Write(self.msg)
             publish_done_ns = time.perf_counter_ns()
-            _mark_trace_published(self, trace_seq)
+            dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
+            ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
             enqueue_to_publish_ms = None
             if cmd_version != self._last_published_cmd_version and target_set_ns:
                 enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
                 self._last_published_cmd_version = cmd_version
+            _mark_trace_published(
+                self,
+                trace_seq,
+                publish_ts_ns=publish_done_ns,
+                dds_write_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+                ctrl_loop_ms=ctrl_loop_ms,
+            )
             _record_controller_timing_sample(
                 self,
-                loop_dt_ms=(publish_done_ns - loop_start_ns) / 1e6,
-                write_dt_ms=(publish_done_ns - write_start_ns) / 1e6,
+                loop_dt_ms=ctrl_loop_ms,
+                write_dt_ms=dds_write_ms,
                 enqueue_to_publish_ms=enqueue_to_publish_ms,
             )
 
@@ -591,15 +613,24 @@ class G1_23_ArmController:
             write_start_ns = time.perf_counter_ns()
             self.lowcmd_publisher.Write(self.msg)
             publish_done_ns = time.perf_counter_ns()
-            _mark_trace_published(self, trace_seq)
+            dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
+            ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
             enqueue_to_publish_ms = None
             if cmd_version != self._last_published_cmd_version and target_set_ns:
                 enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
                 self._last_published_cmd_version = cmd_version
+            _mark_trace_published(
+                self,
+                trace_seq,
+                publish_ts_ns=publish_done_ns,
+                dds_write_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+                ctrl_loop_ms=ctrl_loop_ms,
+            )
             _record_controller_timing_sample(
                 self,
-                loop_dt_ms=(publish_done_ns - loop_start_ns) / 1e6,
-                write_dt_ms=(publish_done_ns - write_start_ns) / 1e6,
+                loop_dt_ms=ctrl_loop_ms,
+                write_dt_ms=dds_write_ms,
                 enqueue_to_publish_ms=enqueue_to_publish_ms,
             )
 
@@ -896,15 +927,24 @@ class H1_2_ArmController:
             write_start_ns = time.perf_counter_ns()
             self.lowcmd_publisher.Write(self.msg)
             publish_done_ns = time.perf_counter_ns()
-            _mark_trace_published(self, trace_seq)
+            dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
+            ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
             enqueue_to_publish_ms = None
             if cmd_version != self._last_published_cmd_version and target_set_ns:
                 enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
                 self._last_published_cmd_version = cmd_version
+            _mark_trace_published(
+                self,
+                trace_seq,
+                publish_ts_ns=publish_done_ns,
+                dds_write_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+                ctrl_loop_ms=ctrl_loop_ms,
+            )
             _record_controller_timing_sample(
                 self,
-                loop_dt_ms=(publish_done_ns - loop_start_ns) / 1e6,
-                write_dt_ms=(publish_done_ns - write_start_ns) / 1e6,
+                loop_dt_ms=ctrl_loop_ms,
+                write_dt_ms=dds_write_ms,
                 enqueue_to_publish_ms=enqueue_to_publish_ms,
             )
 
@@ -1192,15 +1232,24 @@ class H1_ArmController:
             write_start_ns = time.perf_counter_ns()
             self.lowcmd_publisher.Write(self.msg)
             publish_done_ns = time.perf_counter_ns()
-            _mark_trace_published(self, trace_seq)
+            dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
+            ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
             enqueue_to_publish_ms = None
             if cmd_version != self._last_published_cmd_version and target_set_ns:
                 enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
                 self._last_published_cmd_version = cmd_version
+            _mark_trace_published(
+                self,
+                trace_seq,
+                publish_ts_ns=publish_done_ns,
+                dds_write_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+                ctrl_loop_ms=ctrl_loop_ms,
+            )
             _record_controller_timing_sample(
                 self,
-                loop_dt_ms=(publish_done_ns - loop_start_ns) / 1e6,
-                write_dt_ms=(publish_done_ns - write_start_ns) / 1e6,
+                loop_dt_ms=ctrl_loop_ms,
+                write_dt_ms=dds_write_ms,
                 enqueue_to_publish_ms=enqueue_to_publish_ms,
             )
 
@@ -1458,15 +1507,24 @@ class H2_ArmController:
             write_start_ns = time.perf_counter_ns()
             self.lowcmd_publisher.Write(self.msg)
             publish_done_ns = time.perf_counter_ns()
-            _mark_trace_published(self, trace_seq)
+            dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
+            ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
             enqueue_to_publish_ms = None
             if cmd_version != self._last_published_cmd_version and target_set_ns:
                 enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
                 self._last_published_cmd_version = cmd_version
+            _mark_trace_published(
+                self,
+                trace_seq,
+                publish_ts_ns=publish_done_ns,
+                dds_write_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+                ctrl_loop_ms=ctrl_loop_ms,
+            )
             _record_controller_timing_sample(
                 self,
-                loop_dt_ms=(publish_done_ns - loop_start_ns) / 1e6,
-                write_dt_ms=(publish_done_ns - write_start_ns) / 1e6,
+                loop_dt_ms=ctrl_loop_ms,
+                write_dt_ms=dds_write_ms,
                 enqueue_to_publish_ms=enqueue_to_publish_ms,
             )
 

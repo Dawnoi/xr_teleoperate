@@ -88,7 +88,7 @@ python teleop/teleop_hand_and_arm.py \
 运行时会打印：
 
 ```text
-[LATENCY] seq=7 收到输入->DDS下发=8.31 ms | DDS下发->执行响应=22.12 ms | 收到输入->执行响应=30.43 ms
+[LATENCY] seq=7 recv->pub=8.31 ms | pub->exec=22.12 ms | recv->exec=30.43 ms | tele=3.20 ik=4.80 queue=3.21 wait=3.17 dds=0.042 ms
 [TIMING] loop avg/p95/max=12.0/18.4/24.7 ms, tele avg/p95/max=3.2/5.1/6.0 ms, ik avg/p95/max=4.8/8.9/10.2 ms (53 calls), agv avg/p95/max=0.4/0.7/0.9 ms (53 calls)
 [TIMING_DDS] publish_hz=249.8, ctrl_loop avg/p95/max=0.18/0.31/0.52 ms, dds_write avg/p95/max=0.042/0.066/0.091 ms, enqueue->publish avg/p95/max=3.21/6.87/9.15 ms
 ```
@@ -106,6 +106,9 @@ python teleop/utils/plot_latency_trace.py \
 - 收到输入 -> DDS下发
 - DDS下发 -> 执行响应
 - 收到输入 -> 执行响应
+- XR 取数 -> 执行响应（fetch_to_exec）
+- takeover / base_control / IK / safety / gravity / controller wait / DDS write / 未归因时间 的拆分
+- 最近若干条样本的“分段时间线”，0 点是 tele_data ready，黑线是 publish 时刻
 
 最近若干条样本还会画成时间线，方便直接看“从哪一点到哪一点”。
 
@@ -446,4 +449,3 @@ G1D 当前链路不要使用：
   python teleop/utils/plot_latency_trace.py \
     ./utils/data/latency_trace.jsonl \
     --output ./utils/data/latency_trace.png
-

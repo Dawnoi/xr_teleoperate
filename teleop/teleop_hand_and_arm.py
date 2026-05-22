@@ -652,12 +652,16 @@ if __name__ == '__main__':
                 current_left_robot_wrist_pose=current_left_wrist_pose,
                 current_right_robot_wrist_pose=current_right_wrist_pose,
             )
-            timing_debugger.add_tele_fetch(time.perf_counter() - tele_fetch_start, tele_data is not None)
+            tele_fetch_dt = time.perf_counter() - tele_fetch_start
+            timing_debugger.add_tele_fetch(tele_fetch_dt, tele_data is not None)
             if tele_data is None:
                 timing_debugger.maybe_report(arm_ctrl=arm_ctrl, gripper_ctrl=gripper_ctrl)
                 time.sleep(0.01)
                 continue
             tele_data_recv_ts_ns = time.perf_counter_ns()
+            tele_fetch_ms = tele_fetch_dt * 1000.0
+
+            takeover_logic_start = time.perf_counter()
 
             home_button_pressed = bool(tele_data.left_ctrl_bButton)
             if home_button_pressed and not prev_home_button_pressed:
@@ -709,6 +713,7 @@ if __name__ == '__main__':
             )
             prev_left_grip_pressed = left_grip_pressed
             prev_right_grip_pressed = right_grip_pressed
+            takeover_logic_ms = (time.perf_counter() - takeover_logic_start) * 1000.0
 
             if (args.ee == "dex3" or args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
@@ -731,6 +736,7 @@ if __name__ == '__main__':
                 pass
             
             # high level control
+            base_control_start = time.perf_counter()
             if args.input_mode == "controller" and args.motion:
                 # quit teleoperate
                 if tele_data.right_ctrl_aButton:
@@ -809,8 +815,10 @@ if __name__ == '__main__':
                     agv_bridge.move(base_vx, base_vy, base_wz)
                     agv_bridge.height_adjust(base_z)
                     timing_debugger.add_agv(time.perf_counter() - agv_send_start)
+            base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
+            ik_ms = 0.0
             if any_zero_takeover_this_frame:
                 if post_home_takeover_armed and normalized_head_mode in {"head_coupled", "hybrid"}:
                     tv_wrapper.sync_reference_to_current_live_pose(require_live=False)
@@ -818,11 +826,12 @@ if __name__ == '__main__':
                 post_home_takeover_armed = False
             if home_return_active:
                 sol_q = home_target_q.copy()
-                sol_tauff = compute_arm_gravity_tauff(arm_ik, sol_q)
+                sol_tauff = current_hold_tauff.copy()
             elif left_arm_enabled or right_arm_enabled:
                 time_ik_start = time.perf_counter()
                 sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
                 ik_dt = time.perf_counter() - time_ik_start
+                ik_ms = ik_dt * 1000.0
                 timing_debugger.add_ik(ik_dt)
                 logger_mp.debug(f"ik:\t{round(ik_dt, 6)}")
             else:
@@ -851,13 +860,17 @@ if __name__ == '__main__':
                     )
                 right_takeover_settle_frames -= 1
 
+            safety_start = time.perf_counter()
             sol_q = limit_arm_joint_target_velocity(
                 sol_q,
                 current_lr_arm_q,
                 max_joint_speed=(args.home_return_speed if home_return_active else args.max_arm_joint_speed),
                 control_frequency=args.frequency,
             )
+            safety_ms = (time.perf_counter() - safety_start) * 1000.0
+            gravity_start = time.perf_counter()
             sol_tauff = compute_arm_gravity_tauff(arm_ik, sol_q)
+            gravity_ms = (time.perf_counter() - gravity_start) * 1000.0
             current_hold_q = sol_q.copy()
             current_hold_tauff = sol_tauff.copy()
 
@@ -868,6 +881,24 @@ if __name__ == '__main__':
                     trace_seq = latency_tracker.begin_trace(
                         recv_ts_ns=tele_data_recv_ts_ns,
                         recv_q=current_lr_arm_q,
+                        extra={
+                            "tele_fetch_ms": tele_fetch_ms,
+                            "takeover_logic_ms": takeover_logic_ms,
+                            "base_control_ms": base_control_ms,
+                            "ik_ms": ik_ms,
+                            "safety_ms": safety_ms,
+                            "gravity_ms": gravity_ms,
+                            "left_arm_enabled": bool(left_arm_enabled),
+                            "right_arm_enabled": bool(right_arm_enabled),
+                            "home_return_active": bool(home_return_active),
+                            "left_takeover_rising_edge": bool(left_takeover_rising_edge),
+                            "right_takeover_rising_edge": bool(right_takeover_rising_edge),
+                            "left_zero_takeover_this_frame": bool(left_zero_takeover_this_frame),
+                            "right_zero_takeover_this_frame": bool(right_zero_takeover_this_frame),
+                            "max_command_delta": max_command_delta,
+                            "left_joint_delta_norm": float(np.linalg.norm(sol_q[:7] - current_lr_arm_q[:7])),
+                            "right_joint_delta_norm": float(np.linalg.norm(sol_q[-7:] - current_lr_arm_q[-7:])),
+                        },
                     )
 
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff, trace_seq=trace_seq)
