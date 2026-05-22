@@ -205,12 +205,16 @@ class SimpleLatencyTracker:
         if self.log_each_trace:
             if record.status == "completed":
                 logger_mp.info(
-                    "[LATENCY] seq=%s recv->pub=%.2f ms | pub->exec=%.2f ms | recv->exec=%.2f ms | tele=%.2f ik=%.2f queue=%.2f wait=%.2f dds=%.3f ms",
+                    "[LATENCY] seq=%s recv->pub=%.2f ms | pub->exec=%.2f ms | recv->exec=%.2f ms | tele=%.2f base=%.2f(move=%.2f,height=%.2f,misc=%.2f) ik=%.2f queue=%.2f wait=%.2f dds=%.3f ms",
                     payload["seq"],
                     payload["recv_to_pub_ms"] or -1.0,
                     payload["pub_to_exec_ms"] or -1.0,
                     payload["recv_to_exec_ms"] or -1.0,
                     float(payload.get("tele_fetch_ms") or 0.0),
+                    float(payload.get("base_control_ms") or 0.0),
+                    float(payload.get("base_move_ms") or 0.0),
+                    float(payload.get("base_height_ms") or 0.0),
+                    float(payload.get("base_misc_ms") or 0.0),
                     float(payload.get("ik_ms") or 0.0),
                     float(payload.get("enqueue_to_publish_ms") or 0.0),
                     float(payload.get("controller_wait_ms") or 0.0),
@@ -256,6 +260,9 @@ class SimpleLatencyTracker:
             ik = _p("ik_ms")
             takeover = _p("takeover_logic_ms")
             base = _p("base_control_ms")
+            base_move = _p("base_move_ms")
+            base_height = _p("base_height_ms")
+            base_misc = _p("base_misc_ms")
             safety = _p("safety_ms")
             gravity = _p("gravity_ms")
             queue = _p("enqueue_to_publish_ms")
@@ -271,10 +278,13 @@ class SimpleLatencyTracker:
             )
             if any(arr is not None for arr in [tele_fetch, takeover, base, ik, safety, gravity, queue, wait, dds, unknown_pre]):
                 logger_mp.info(
-                    "[LATENCY][BREAKDOWN] tele=%.2f | takeover=%.2f | base=%.2f | ik=%.2f | safety=%.2f | gravity=%.2f | queue=%.2f | wait=%.2f | dds=%.3f | unknown_pre=%.2f ms",
+                    "[LATENCY][BREAKDOWN] tele=%.2f | takeover=%.2f | base=%.2f(move=%.2f,height=%.2f,misc=%.2f) | ik=%.2f | safety=%.2f | gravity=%.2f | queue=%.2f | wait=%.2f | dds=%.3f | unknown_pre=%.2f ms",
                     float(np.mean(tele_fetch)) if tele_fetch is not None else 0.0,
                     float(np.mean(takeover)) if takeover is not None else 0.0,
                     float(np.mean(base)) if base is not None else 0.0,
+                    float(np.mean(base_move)) if base_move is not None else 0.0,
+                    float(np.mean(base_height)) if base_height is not None else 0.0,
+                    float(np.mean(base_misc)) if base_misc is not None else 0.0,
                     float(np.mean(ik)) if ik is not None else 0.0,
                     float(np.mean(safety)) if safety is not None else 0.0,
                     float(np.mean(gravity)) if gravity is not None else 0.0,

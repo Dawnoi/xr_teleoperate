@@ -737,7 +737,16 @@ if __name__ == '__main__':
             
             # high level control
             base_control_start = time.perf_counter()
+            base_control_mode = "none"
+            base_move_ms = 0.0
+            base_height_ms = 0.0
+            base_misc_ms = 0.0
+            base_vx = 0.0
+            base_vy = 0.0
+            base_wz = 0.0
+            base_z = 0.0
             if args.input_mode == "controller" and args.motion:
+                base_control_mode = "loco"
                 # quit teleoperate
                 if tele_data.right_ctrl_aButton:
                     START = False
@@ -771,8 +780,11 @@ if __name__ == '__main__':
                     base_vy = -left_stick_x * args.base_max_vy
                     base_wz = -right_stick_x * args.base_max_wz
 
+                base_move_start = time.perf_counter()
                 loco_wrapper.Move(base_vx, base_vy, base_wz)
+                base_move_ms = (time.perf_counter() - base_move_start) * 1000.0
             elif args.input_mode == "controller" and args.base_controller == "g1d_agv":
+                base_control_mode = "g1d_agv"
                 if tele_data.right_ctrl_aButton:
                     START = False
                     STOP = True
@@ -812,10 +824,15 @@ if __name__ == '__main__':
 
                 if agv_bridge is not None:
                     agv_send_start = time.perf_counter()
+                    base_move_start = time.perf_counter()
                     agv_bridge.move(base_vx, base_vy, base_wz)
+                    base_move_ms = (time.perf_counter() - base_move_start) * 1000.0
+                    base_height_start = time.perf_counter()
                     agv_bridge.height_adjust(base_z)
+                    base_height_ms = (time.perf_counter() - base_height_start) * 1000.0
                     timing_debugger.add_agv(time.perf_counter() - agv_send_start)
             base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
+            base_misc_ms = max(0.0, base_control_ms - base_move_ms - base_height_ms)
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
             ik_ms = 0.0
@@ -885,6 +902,14 @@ if __name__ == '__main__':
                             "tele_fetch_ms": tele_fetch_ms,
                             "takeover_logic_ms": takeover_logic_ms,
                             "base_control_ms": base_control_ms,
+                            "base_control_mode": base_control_mode,
+                            "base_move_ms": base_move_ms,
+                            "base_height_ms": base_height_ms,
+                            "base_misc_ms": base_misc_ms,
+                            "base_vx_cmd": float(base_vx),
+                            "base_vy_cmd": float(base_vy),
+                            "base_wz_cmd": float(base_wz),
+                            "base_z_cmd": float(base_z),
                             "ik_ms": ik_ms,
                             "safety_ms": safety_ms,
                             "gravity_ms": gravity_ms,
