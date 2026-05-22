@@ -30,6 +30,14 @@ python teleop/teleop_hand_and_arm.py \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
   --max-arm-joint-speed 5.0 \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
+  --arm-workspace-x-max-low 0.38 \
+  --arm-workspace-x-max-high 0.52 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
   --base-max-vx 0.20 \
   --base-max-wz 0.60 \
   --base-max-z 1.0 \
@@ -52,6 +60,14 @@ python teleop/teleop_hand_and_arm.py \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
   --max-arm-joint-speed 5.0 \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
+  --arm-workspace-x-max-low 0.38 \
+  --arm-workspace-x-max-high 0.52 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
   --base-max-vx 0.20 \
   --base-max-wz 0.60 \
   --base-max-z 1.0 \
@@ -78,6 +94,14 @@ python teleop/teleop_hand_and_arm.py \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
   --max-arm-joint-speed 5.0 \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
+  --arm-workspace-x-max-low 0.38 \
+  --arm-workspace-x-max-high 0.52 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
   --home-return-speed 1.0 \
   --latency-trace \
   --latency-trace-path ./utils/data/latency_trace.jsonl \
@@ -128,6 +152,14 @@ python teleop/teleop_hand_and_arm.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
+  --arm-workspace-x-max-low 0.38 \
+  --arm-workspace-x-max-high 0.52 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
   --max-arm-joint-speed 5.0
 ```
 
@@ -146,6 +178,14 @@ python teleop/teleop_hand_and_arm.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
+  --arm-workspace-x-max-low 0.38 \
+  --arm-workspace-x-max-high 0.52 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
   --max-arm-joint-speed 5.0
 ```
 
@@ -167,10 +207,85 @@ python teleop/teleop_hand_and_arm.py \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
   --max-arm-joint-speed 5.0 \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
+  --arm-workspace-x-max-low 0.38 \
+  --arm-workspace-x-max-high 0.52 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
   --base-max-vx 0.20 \
   --base-max-wz 0.60 \
   --base-max-z 1.0 \
   --base-stick-deadzone 0.10
+```
+
+---
+
+## 4.1 真机工作空间限制
+
+真机现在已经和 MuJoCo 同步支持两类工作空间：
+
+- `--arm-workspace-mode tapered`：**默认推荐**，下窄上宽，适合桌面 / 操作台
+- `--arm-workspace-mode box`：固定矩形范围，仅用于对比 / 简单调试
+
+### 推荐：倒梯形（tapered）工作空间
+
+```bash
+--arm-workspace-mode tapered \
+--arm-workspace-z-min -0.05 \
+--arm-workspace-z-max 0.45 \
+--arm-workspace-x-min 0.10 \
+--arm-workspace-x-max-low 0.38 \
+--arm-workspace-x-max-high 0.52 \
+--arm-workspace-y-max-low 0.24 \
+--arm-workspace-y-max-high 0.38
+```
+
+含义：
+
+- 低位（靠近桌面）更窄：
+  - `x: [0.10, 0.38]`
+  - `y: [-0.24, 0.24]`
+- 高位（抬臂后）更宽：
+  - `x: [0.10, 0.52]`
+  - `y: [-0.38, 0.38]`
+- `z: [-0.05, 0.45]`
+- `+z` 是抬臂方向
+
+### 调参建议
+
+如果桌面附近太窄：
+
+- 增大 `--arm-workspace-x-max-low`
+- 增大 `--arm-workspace-y-max-low`
+
+如果抬臂后还不够宽：
+
+- 增大 `--arm-workspace-x-max-high`
+- 增大 `--arm-workspace-y-max-high`
+
+如果抬不够高：
+
+- 增大 `--arm-workspace-z-max`
+
+如果太容易往下扎：
+
+- 增大 `--arm-workspace-z-min`
+
+### 固定 box 对比模式
+
+```bash
+--arm-workspace-mode box \
+--arm-workspace-min 0.10 -0.32 -0.08 \
+--arm-workspace-max 0.45 0.32 0.42
+```
+
+如果完全关闭工作空间限制：
+
+```bash
+--disable-arm-workspace-limit
 ```
 
 ---
@@ -192,6 +307,14 @@ python teleop/demo_xrobotics_mujoco.py \
   --base-max-z 1.0 \
   --max-arm-joint-speed 5.0 \
   --home-return-speed 0.5 \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
+  --arm-workspace-x-max-low 0.38 \
+  --arm-workspace-x-max-high 0.52 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
   --ee dex1
 ```
 
@@ -214,6 +337,14 @@ python teleop/demo_xrobotics_mujoco.py \
   --base-max-z 1.0 \
   --max-arm-joint-speed 5.0 \
   --home-return-speed 0.5 \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
+  --arm-workspace-x-max-low 0.38 \
+  --arm-workspace-x-max-high 0.52 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
   --ee dex1
 ```
 
@@ -236,12 +367,130 @@ python teleop/demo_xrobotics_mujoco.py \
   --base-max-z 1.0 \
   --max-arm-joint-speed 5.0 \
   --home-return-speed 0.5 \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
+  --arm-workspace-x-max-low 0.38 \
+  --arm-workspace-x-max-high 0.52 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
   --ee dex1
 ```
 
 ---
 
-## 8. 真机状态 MuJoCo 镜像
+## 8. MuJoCo 工作空间调试与可视化
+
+当前 MuJoCo 已支持两类工作空间：
+
+- `--arm-workspace-mode tapered`：**默认推荐**，下窄上宽，适合桌面 / 操作台
+- `--arm-workspace-mode box`：固定矩形范围，仅用于对比 / 简单调试
+
+### 8.1 推荐：倒梯形（tapered）工作空间 + 可视化点
+
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
+python teleop/demo_xrobotics_mujoco.py \
+  --frequency 30 \
+  --viewer-robot g1_d_mobile \
+  --controller-deadman grip \
+  --head-reference-mode fixed_per_grip \
+  --controller-mapping-mode anchored_safe \
+  --controller-orientation-mode relative \
+  --base-max-vx 0.15 \
+  --base-max-wz 0.45 \
+  --base-max-z 1.0 \
+  --max-arm-joint-speed 5.0 \
+  --home-return-speed 0.5 \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.15 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min -0.15 \
+  --arm-workspace-x-max-low 0.25 \
+  --arm-workspace-x-max-high 0.65 \
+  --arm-workspace-y-max-low 0.28 \
+  --arm-workspace-y-max-high 0.42 \
+  --arm-workspace-show-targets \
+  --ee dex1
+```
+
+含义：
+
+- 低位（靠近桌面）更窄：
+  - `x: [0.10, 0.38]`
+  - `y: [-0.24, 0.24]`
+- 高位（抬臂后）更宽：
+  - `x: [0.10, 0.52]`
+  - `y: [-0.38, 0.38]`
+- `z: [-0.05, 0.45]`
+- `+z` 是抬臂方向
+
+### 8.2 可视化含义
+
+- 半透明蓝色体：当前工作空间
+- 红 / 蓝实心点：**当前机械手真实 EE 位置**
+- 黄 / 青点：raw target（原始目标）
+- 粉 / 浅蓝点：clamped target（裁剪后目标）
+
+说明：
+
+- 真实 EE 点不是随便画的点，而是按 MuJoCo 中左右手真实 wrist 位姿再加 IK 同样的末端偏移得到
+- 所以可以直接拿来对照机械手实际位置
+
+### 8.3 调参建议
+
+如果桌面附近太窄：
+
+- 增大 `--arm-workspace-x-max-low`
+- 增大 `--arm-workspace-y-max-low`
+
+如果抬臂后还不够宽：
+
+- 增大 `--arm-workspace-x-max-high`
+- 增大 `--arm-workspace-y-max-high`
+
+如果抬不够高：
+
+- 增大 `--arm-workspace-z-max`
+
+如果太容易往下扎：
+
+- 增大 `--arm-workspace-z-min`
+
+### 8.4 固定 box 对比模式
+
+```bash
+python teleop/demo_xrobotics_mujoco.py \
+  --frequency 30 \
+  --viewer-robot g1_d_mobile \
+  --controller-deadman grip \
+  --head-reference-mode fixed_per_grip \
+  --controller-mapping-mode anchored_safe \
+  --controller-orientation-mode relative \
+  --arm-workspace-mode box \
+  --arm-workspace-min 0.10 -0.32 -0.08 \
+  --arm-workspace-max 0.45 0.32 0.42 \
+  --arm-workspace-show-targets \
+  --ee dex1
+```
+
+如果只想看工作空间体、不想看目标点：
+
+```bash
+--hide-arm-workspace-visualization
+```
+
+如果完全关闭工作空间限制：
+
+```bash
+--disable-arm-workspace-limit
+```
+
+---
+
+## 9. 真机状态 MuJoCo 镜像
 
 用途：
 

@@ -38,6 +38,10 @@ from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.xr_robotics_wrapper import XRRoboticsWrapper
 from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
+from teleop.utils.arm_workspace_safety import (
+    clamp_dual_wrist_poses_to_box,
+    clamp_dual_wrist_poses_to_tapered_workspace,
+)
 from teleop.utils.simple_latency_trace import SimpleLatencyTracker
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -304,6 +308,30 @@ if __name__ == '__main__':
                         help='"legacy_main" reproduces the original main-branch controller mapping semantics as closely as possible. "anchored_safe" uses the newer grip-anchor based takeover-safe mapping.')
     parser.add_argument('--calibration-mode', type=str, choices=['manual', 'auto'], default='manual',
                         help='Calibration trigger in head_coupled/hybrid mode. "manual" waits for key c after r; "auto" calibrates once live pose data is available. fixed_per_grip/live_head_reference do not require manual calibration.')
+    parser.add_argument('--disable-arm-workspace-limit', action='store_true',
+                        help='Disable wrist workspace clamping before IK.')
+    parser.add_argument('--arm-workspace-mode', type=str, choices=['tapered', 'box'], default='tapered',
+                        help='Workspace shape before IK. "tapered" = lower narrow / upper wide inverted-trapezoid prism. "box" = fixed rectangular box.')
+    parser.add_argument('--arm-workspace-min', type=float, nargs=3, default=[0.10, -0.32, -0.08],
+                        metavar=('XMIN', 'YMIN', 'ZMIN'),
+                        help='Forward box workspace lower bound in the arm IK/base frame, applied before IK when --arm-workspace-mode box.')
+    parser.add_argument('--arm-workspace-max', type=float, nargs=3, default=[0.45, 0.32, 0.42],
+                        metavar=('XMAX', 'YMAX', 'ZMAX'),
+                        help='Forward box workspace upper bound in the arm IK/base frame, applied before IK when --arm-workspace-mode box.')
+    parser.add_argument('--arm-workspace-z-min', type=float, default=-0.05,
+                        help='Tapered workspace lower z bound in the arm IK/base frame.')
+    parser.add_argument('--arm-workspace-z-max', type=float, default=0.45,
+                        help='Tapered workspace upper z bound in the arm IK/base frame.')
+    parser.add_argument('--arm-workspace-x-min', type=float, default=0.10,
+                        help='Tapered workspace minimum forward x bound.')
+    parser.add_argument('--arm-workspace-x-max-low', type=float, default=0.38,
+                        help='Tapered workspace forward x upper bound at z_min.')
+    parser.add_argument('--arm-workspace-x-max-high', type=float, default=0.52,
+                        help='Tapered workspace forward x upper bound at z_max.')
+    parser.add_argument('--arm-workspace-y-max-low', type=float, default=0.24,
+                        help='Tapered workspace lateral |y| bound at z_min.')
+    parser.add_argument('--arm-workspace-y-max-high', type=float, default=0.38,
+                        help='Tapered workspace lateral |y| bound at z_max.')
     parser.add_argument('--timing-debug', action='store_true',
                         help='Enable periodic timing / staleness logs for diagnosing wireless lag and runtime stalls.')
     parser.add_argument('--timing-debug-interval', type=float, default=2.0,
@@ -341,6 +369,19 @@ if __name__ == '__main__':
     normalized_head_mode = "head_coupled" if args.head_reference_mode == "calibrated" else (
         "live_head_reference" if args.head_reference_mode in {"live", "head_decoupled_live"} else args.head_reference_mode
     )
+    workspace_limit_enabled = not args.disable_arm_workspace_limit
+    workspace_mode = args.arm_workspace_mode
+    workspace_min = np.asarray(args.arm_workspace_min, dtype=float)
+    workspace_max = np.asarray(args.arm_workspace_max, dtype=float)
+    tapered_workspace_params = {
+        "z_min": float(args.arm_workspace_z_min),
+        "z_max": float(args.arm_workspace_z_max),
+        "x_min": float(args.arm_workspace_x_min),
+        "x_max_low": float(args.arm_workspace_x_max_low),
+        "x_max_high": float(args.arm_workspace_x_max_high),
+        "y_max_low": float(args.arm_workspace_y_max_low),
+        "y_max_high": float(args.arm_workspace_y_max_high),
+    }
     timing_debugger = TimingDebugger(enabled=args.timing_debug, interval_sec=args.timing_debug_interval)
     if args.base_controller == "g1d_agv" and args.motion:
         raise ValueError("Do not combine --base-controller g1d_agv with --motion. G1D AGV base control should run with the arms kept in debug mode.")
@@ -382,6 +423,28 @@ if __name__ == '__main__':
             controller_mapping_mode=args.controller_mapping_mode,
         )
         logger_mp.info("Using XR-Robotics as the only Pico input source.")
+        if workspace_limit_enabled:
+            if workspace_mode == "box":
+                logger_mp.info(
+                    "[ARM_WORKSPACE] enabled: forward box, min=(%.3f, %.3f, %.3f), max=(%.3f, %.3f, %.3f)",
+                    workspace_min[0], workspace_min[1], workspace_min[2],
+                    workspace_max[0], workspace_max[1], workspace_max[2],
+                )
+            else:
+                logger_mp.info(
+                    "[ARM_WORKSPACE] enabled: tapered prism, z=[%.3f, %.3f], x_min=%.3f, "
+                    "x_max(low->high)=(%.3f -> %.3f), |y|max(low->high)=(%.3f -> %.3f)",
+                    tapered_workspace_params["z_min"],
+                    tapered_workspace_params["z_max"],
+                    tapered_workspace_params["x_min"],
+                    tapered_workspace_params["x_max_low"],
+                    tapered_workspace_params["x_max_high"],
+                    tapered_workspace_params["y_max_low"],
+                    tapered_workspace_params["y_max_high"],
+                )
+            logger_mp.info("[ARM_WORKSPACE] +z is arm-up in the IK/base frame.")
+        else:
+            logger_mp.info("[ARM_WORKSPACE] disabled.")
         if args.timing_debug:
             logger_mp.info(f"[TIMING] debug enabled, report interval = {args.timing_debug_interval:.1f}s")
         
@@ -861,8 +924,30 @@ if __name__ == '__main__':
                 sol_q = home_target_q.copy()
                 sol_tauff = current_hold_tauff.copy()
             elif left_arm_enabled or right_arm_enabled:
+                left_target_pose = tele_data.left_wrist_pose
+                right_target_pose = tele_data.right_wrist_pose
+                if workspace_limit_enabled:
+                    if workspace_mode == "box":
+                        left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_box(
+                            left_target_pose,
+                            right_target_pose,
+                            workspace_min,
+                            workspace_max,
+                        )
+                    else:
+                        left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_tapered_workspace(
+                            left_target_pose,
+                            right_target_pose,
+                            tapered_workspace_params["z_min"],
+                            tapered_workspace_params["z_max"],
+                            tapered_workspace_params["x_min"],
+                            tapered_workspace_params["x_max_low"],
+                            tapered_workspace_params["x_max_high"],
+                            tapered_workspace_params["y_max_low"],
+                            tapered_workspace_params["y_max_high"],
+                        )
                 time_ik_start = time.perf_counter()
-                sol_q, sol_tauff  = arm_ik.solve_ik(tele_data.left_wrist_pose, tele_data.right_wrist_pose, current_lr_arm_q, current_lr_arm_dq)
+                sol_q, sol_tauff  = arm_ik.solve_ik(left_target_pose, right_target_pose, current_lr_arm_q, current_lr_arm_dq)
                 ik_dt = time.perf_counter() - time_ik_start
                 ik_ms = ik_dt * 1000.0
                 timing_debugger.add_ik(ik_dt)

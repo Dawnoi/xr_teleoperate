@@ -106,3 +106,109 @@ def clamp_dual_wrist_poses_to_box(left_pose, right_pose, min_bound, max_bound):
         max_bound,
     )
     return left_clamped_pose, right_clamped_pose, (left_clamped or right_clamped)
+
+
+def _lerp(a, b, t):
+    return float(a) + (float(b) - float(a)) * float(t)
+
+
+def clamp_point_to_tapered_workspace(
+    point,
+    z_min,
+    z_max,
+    x_min,
+    x_max_low,
+    x_max_high,
+    y_max_low,
+    y_max_high,
+):
+    """
+    Clamp a 3D point into a z-dependent forward workspace:
+
+      z in [z_min, z_max]
+      x in [x_min, x_max(z)]
+      y in [-y_max(z), y_max(z)]
+
+    where x_max(z) and y_max(z) expand linearly from the low-z slice to the
+    high-z slice, forming an "inverted trapezoid" / tapered prism.
+    """
+    point = np.asarray(point, dtype=float).reshape(3)
+
+    if z_max <= z_min:
+        z = float(z_min)
+        x_max = float(x_max_low)
+        y_max = float(y_max_low)
+    else:
+        z = float(np.clip(point[2], z_min, z_max))
+        t = (z - float(z_min)) / (float(z_max) - float(z_min))
+        x_max = _lerp(x_max_low, x_max_high, t)
+        y_max = _lerp(y_max_low, y_max_high, t)
+
+    clamped = np.array(
+        [
+            np.clip(float(point[0]), float(x_min), x_max),
+            np.clip(float(point[1]), -y_max, y_max),
+            z,
+        ],
+        dtype=float,
+    )
+    return clamped, bool(np.any(np.abs(clamped - point) > 1e-12))
+
+
+def clamp_wrist_pose_to_tapered_workspace(
+    pose,
+    z_min,
+    z_max,
+    x_min,
+    x_max_low,
+    x_max_high,
+    y_max_low,
+    y_max_high,
+):
+    clamped_pose = np.asarray(pose, dtype=float).copy()
+    clamped_point, was_clamped = clamp_point_to_tapered_workspace(
+        clamped_pose[:3, 3],
+        z_min,
+        z_max,
+        x_min,
+        x_max_low,
+        x_max_high,
+        y_max_low,
+        y_max_high,
+    )
+    clamped_pose[:3, 3] = clamped_point
+    return clamped_pose, was_clamped
+
+
+def clamp_dual_wrist_poses_to_tapered_workspace(
+    left_pose,
+    right_pose,
+    z_min,
+    z_max,
+    x_min,
+    x_max_low,
+    x_max_high,
+    y_max_low,
+    y_max_high,
+):
+    left_clamped_pose, left_clamped = clamp_wrist_pose_to_tapered_workspace(
+        left_pose,
+        z_min,
+        z_max,
+        x_min,
+        x_max_low,
+        x_max_high,
+        y_max_low,
+        y_max_high,
+    )
+    right_clamped_pose, right_clamped = clamp_wrist_pose_to_tapered_workspace(
+        right_pose,
+        z_min,
+        z_max,
+        x_min,
+        x_max_low,
+        x_max_high,
+        y_max_low,
+        y_max_high,
+    )
+    return left_clamped_pose, right_clamped_pose, (left_clamped or right_clamped)

@@ -17,6 +17,7 @@ DEX1_CLOSED_Q = 0.0
 G1D_MAX_VX = 1.5
 G1D_MAX_WZ = 0.6
 G1D_MAX_COLUMN_VZ = 0.0765
+G1_IK_EE_OFFSET = np.array([0.05, 0.0, 0.0], dtype=float)
 
 
 def bootstrap():
@@ -46,7 +47,10 @@ import pinocchio as pin
 
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK
 from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
-from teleop.utils.arm_workspace_safety import clamp_dual_wrist_poses_to_box
+from teleop.utils.arm_workspace_safety import (
+    clamp_dual_wrist_poses_to_box,
+    clamp_dual_wrist_poses_to_tapered_workspace,
+)
 from teleop.utils.g1d_mujoco_builder import prepare_g1d_mobile_scene
 from teleop.utils.xr_robotics_wrapper import XRRoboticsWrapper
 
@@ -143,10 +147,17 @@ def parse_args():
         help="Disable the MuJoCo-side wrist workspace clamp before IK.",
     )
     parser.add_argument(
+        "--arm-workspace-mode",
+        type=str,
+        choices=["tapered", "box"],
+        default="tapered",
+        help='Workspace shape before IK. "tapered" = lower narrow / upper wide inverted-trapezoid prism. "box" = fixed rectangular box.',
+    )
+    parser.add_argument(
         "--arm-workspace-min",
         type=float,
         nargs=3,
-        default=[0.0, -0.45, -0.20],
+        default=[0.10, -0.32, -0.08],
         metavar=("XMIN", "YMIN", "ZMIN"),
         help="Forward box workspace lower bound in the arm IK/base frame, applied before IK.",
     )
@@ -154,9 +165,26 @@ def parse_args():
         "--arm-workspace-max",
         type=float,
         nargs=3,
-        default=[0.50, 0.45, 0.55],
+        default=[0.45, 0.32, 0.42],
         metavar=("XMAX", "YMAX", "ZMAX"),
         help="Forward box workspace upper bound in the arm IK/base frame, applied before IK.",
+    )
+    parser.add_argument("--arm-workspace-z-min", type=float, default=-0.05, help="Tapered workspace lower z bound in the arm IK/base frame.")
+    parser.add_argument("--arm-workspace-z-max", type=float, default=0.45, help="Tapered workspace upper z bound in the arm IK/base frame.")
+    parser.add_argument("--arm-workspace-x-min", type=float, default=0.10, help="Tapered workspace minimum forward x bound.")
+    parser.add_argument("--arm-workspace-x-max-low", type=float, default=0.38, help="Tapered workspace forward x upper bound at z_min.")
+    parser.add_argument("--arm-workspace-x-max-high", type=float, default=0.52, help="Tapered workspace forward x upper bound at z_max.")
+    parser.add_argument("--arm-workspace-y-max-low", type=float, default=0.24, help="Tapered workspace lateral |y| bound at z_min.")
+    parser.add_argument("--arm-workspace-y-max-high", type=float, default=0.38, help="Tapered workspace lateral |y| bound at z_max.")
+    parser.add_argument(
+        "--hide-arm-workspace-visualization",
+        action="store_true",
+        help="Hide the MuJoCo debug visualization of the workspace box.",
+    )
+    parser.add_argument(
+        "--arm-workspace-show-targets",
+        action="store_true",
+        help="Visualize raw/clamped wrist target points inside the MuJoCo viewer for workspace debugging.",
     )
     return parser.parse_args()
 
@@ -269,6 +297,225 @@ def get_robot_wrist_poses(arm_ik, arm_q):
     return left_pose, right_pose
 
 
+def make_pose(R, t):
+    pose = np.eye(4, dtype=float)
+    pose[:3, :3] = np.asarray(R, dtype=float).reshape(3, 3)
+    pose[:3, 3] = np.asarray(t, dtype=float).reshape(3)
+    return pose
+
+
+def transform_pose(pose, T_world_local):
+    return T_world_local @ np.asarray(pose, dtype=float)
+
+
+def transform_point(point, T_world_local):
+    point = np.asarray(point, dtype=float).reshape(3)
+    return (T_world_local[:3, :3] @ point) + T_world_local[:3, 3]
+
+
+def make_world_from_local_transform(
+    torso_rot_world,
+    left_local_pose,
+    right_local_pose,
+    left_world_pose,
+    right_world_pose,
+):
+    R = np.asarray(torso_rot_world, dtype=float).reshape(3, 3)
+    t_left = left_world_pose[:3, 3] - R @ left_local_pose[:3, 3]
+    t_right = right_world_pose[:3, 3] - R @ right_local_pose[:3, 3]
+    t = 0.5 * (t_left + t_right)
+    return make_pose(R, t)
+
+
+def mujoco_body_pose(data, body_id):
+    xpos = np.asarray(data.xpos[body_id], dtype=float).copy()
+    xmat = np.asarray(data.xmat[body_id], dtype=float).reshape(3, 3).copy()
+    return make_pose(xmat, xpos)
+
+
+def wrist_body_pose_to_ee_pose(body_pose):
+    ee_pose = body_pose.copy()
+    ee_pose[:3, 3] = body_pose[:3, 3] + body_pose[:3, :3] @ G1_IK_EE_OFFSET
+    return ee_pose
+
+
+def add_debug_box_geom(scene, geom_idx, center, half_extents, rot_mat, rgba):
+    if geom_idx >= scene.maxgeom:
+        return geom_idx
+    mj.mjv_initGeom(
+        scene.geoms[geom_idx],
+        mj.mjtGeom.mjGEOM_BOX,
+        np.asarray(half_extents, dtype=float),
+        np.asarray(center, dtype=float),
+        np.asarray(rot_mat, dtype=float).reshape(-1),
+        np.asarray(rgba, dtype=float),
+    )
+    return geom_idx + 1
+
+
+def add_debug_sphere_geom(scene, geom_idx, pos, radius, rgba):
+    if geom_idx >= scene.maxgeom:
+        return geom_idx
+    mj.mjv_initGeom(
+        scene.geoms[geom_idx],
+        mj.mjtGeom.mjGEOM_SPHERE,
+        np.array([radius, radius, radius], dtype=float),
+        np.asarray(pos, dtype=float),
+        np.eye(3, dtype=float).reshape(-1),
+        np.asarray(rgba, dtype=float),
+    )
+    return geom_idx + 1
+
+
+def tapered_workspace_slice_specs(
+    z_min,
+    z_max,
+    x_min,
+    x_max_low,
+    x_max_high,
+    y_max_low,
+    y_max_high,
+    num_slices=6,
+):
+    z_min = float(z_min)
+    z_max = float(z_max)
+    if num_slices < 1:
+        num_slices = 1
+    if z_max <= z_min:
+        num_slices = 1
+    dz_total = max(1e-6, z_max - z_min)
+    slice_thickness = dz_total / float(num_slices)
+    specs = []
+    for i in range(num_slices):
+        z0 = z_min + i * slice_thickness
+        z1 = min(z_max, z0 + slice_thickness)
+        zc = 0.5 * (z0 + z1)
+        t = 0.0 if z_max <= z_min else (zc - z_min) / max(1e-6, (z_max - z_min))
+        x_max = float(x_max_low) + (float(x_max_high) - float(x_max_low)) * t
+        y_max = float(y_max_low) + (float(y_max_high) - float(y_max_low)) * t
+        center = np.array([0.5 * (float(x_min) + x_max), 0.0, zc], dtype=float)
+        half_extents = np.array([0.5 * (x_max - float(x_min)), y_max, 0.5 * (z1 - z0)], dtype=float)
+        specs.append((center, half_extents))
+    return specs
+
+
+def update_workspace_debug_scene(
+    viewer,
+    enabled,
+    workspace_mode,
+    show_box,
+    min_bound=None,
+    max_bound=None,
+    tapered_params=None,
+    T_world_local=None,
+    actual_left_pose=None,
+    actual_right_pose=None,
+    raw_left_pose=None,
+    raw_right_pose=None,
+    clamped_left_pose=None,
+    clamped_right_pose=None,
+    show_targets=False,
+):
+    scene = viewer.user_scn
+    scene.ngeom = 0
+    if not enabled:
+        return
+
+    geom_idx = 0
+    if show_box:
+        rot_world = T_world_local[:3, :3] if T_world_local is not None else np.eye(3, dtype=float)
+        if workspace_mode == "box":
+            center_local = 0.5 * (np.asarray(min_bound, dtype=float) + np.asarray(max_bound, dtype=float))
+            half_extents = 0.5 * (np.asarray(max_bound, dtype=float) - np.asarray(min_bound, dtype=float))
+            center_world = transform_point(center_local, T_world_local) if T_world_local is not None else center_local
+            geom_idx = add_debug_box_geom(
+                scene,
+                geom_idx,
+                center_world,
+                half_extents,
+                rot_world,
+                rgba=[0.20, 0.70, 1.00, 0.12],
+            )
+        elif workspace_mode == "tapered" and tapered_params is not None:
+            for center_local, half_extents in tapered_workspace_slice_specs(
+                tapered_params["z_min"],
+                tapered_params["z_max"],
+                tapered_params["x_min"],
+                tapered_params["x_max_low"],
+                tapered_params["x_max_high"],
+                tapered_params["y_max_low"],
+                tapered_params["y_max_high"],
+                num_slices=6,
+            ):
+                center_world = transform_point(center_local, T_world_local) if T_world_local is not None else center_local
+                geom_idx = add_debug_box_geom(
+                    scene,
+                    geom_idx,
+                    center_world,
+                    half_extents,
+                    rot_world,
+                    rgba=[0.20, 0.70, 1.00, 0.10],
+                )
+
+    if actual_left_pose is not None:
+        geom_idx = add_debug_sphere_geom(
+            scene,
+            geom_idx,
+            actual_left_pose[:3, 3],
+            radius=0.020,
+            rgba=[1.00, 0.10, 0.10, 0.95],
+        )
+    if actual_right_pose is not None:
+        geom_idx = add_debug_sphere_geom(
+            scene,
+            geom_idx,
+            actual_right_pose[:3, 3],
+            radius=0.020,
+            rgba=[0.10, 0.10, 1.00, 0.95],
+        )
+
+    if show_targets:
+        if T_world_local is not None:
+            raw_left_pose = None if raw_left_pose is None else transform_pose(raw_left_pose, T_world_local)
+            raw_right_pose = None if raw_right_pose is None else transform_pose(raw_right_pose, T_world_local)
+            clamped_left_pose = None if clamped_left_pose is None else transform_pose(clamped_left_pose, T_world_local)
+            clamped_right_pose = None if clamped_right_pose is None else transform_pose(clamped_right_pose, T_world_local)
+        if raw_left_pose is not None:
+            geom_idx = add_debug_sphere_geom(
+                scene,
+                geom_idx,
+                raw_left_pose[:3, 3],
+                radius=0.018,
+                rgba=[1.00, 0.75, 0.20, 0.90],
+            )
+        if raw_right_pose is not None:
+            geom_idx = add_debug_sphere_geom(
+                scene,
+                geom_idx,
+                raw_right_pose[:3, 3],
+                radius=0.018,
+                rgba=[0.20, 0.90, 1.00, 0.90],
+            )
+        if clamped_left_pose is not None:
+            geom_idx = add_debug_sphere_geom(
+                scene,
+                geom_idx,
+                clamped_left_pose[:3, 3],
+                radius=0.012,
+                rgba=[1.00, 0.45, 0.45, 0.95],
+            )
+        if clamped_right_pose is not None:
+            geom_idx = add_debug_sphere_geom(
+                scene,
+                geom_idx,
+                clamped_right_pose[:3, 3],
+                radius=0.012,
+                rgba=[0.45, 0.45, 1.00, 0.95],
+            )
+
+    scene.ngeom = geom_idx
+
+
 def main():
     args = parse_args()
     normalized_head_mode = "head_coupled" if args.head_reference_mode == "calibrated" else (
@@ -288,8 +535,19 @@ def main():
     os.chdir(Path(__file__).resolve().parent)
     arm_ik = G1_29_ArmIK()
     workspace_limit_enabled = not args.disable_arm_workspace_limit
+    workspace_mode = args.arm_workspace_mode
     workspace_min = np.asarray(args.arm_workspace_min, dtype=float)
     workspace_max = np.asarray(args.arm_workspace_max, dtype=float)
+    tapered_workspace_params = {
+        "z_min": float(args.arm_workspace_z_min),
+        "z_max": float(args.arm_workspace_z_max),
+        "x_min": float(args.arm_workspace_x_min),
+        "x_max_low": float(args.arm_workspace_x_max_low),
+        "x_max_high": float(args.arm_workspace_x_max_high),
+        "y_max_low": float(args.arm_workspace_y_max_low),
+        "y_max_high": float(args.arm_workspace_y_max_high),
+    }
+    workspace_visualization_enabled = not args.hide_arm_workspace_visualization
 
     model = mj.MjModel.from_xml_path(str(xml_path))
     data = mj.MjData(model)
@@ -304,6 +562,9 @@ def main():
     arm_joint_qpos_indices = joint_qpos_indices(model, ARM_JOINT_NAMES)
     left_wheel_actuator_id = actuator_id_if_present(model, "left_wheel_drive")
     right_wheel_actuator_id = actuator_id_if_present(model, "right_wheel_drive")
+    torso_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "torso_link")
+    left_wrist_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "left_wrist_yaw_link")
+    right_wrist_body_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_BODY, "right_wrist_yaw_link")
     root_freejoint_id = joint_id_if_present(model, "g1d_freejoint")
     lz_mt_joint_id = joint_id_if_present(model, "LZ_mt_Joint")
     lz_it_joint_id = joint_id_if_present(model, "LZ_it_Joint")
@@ -391,11 +652,25 @@ def main():
                 "(locks roll/pitch so the two-wheel viewer does not tip over at startup)."
             )
     if workspace_limit_enabled:
-        print(
-            "[ARM_WORKSPACE] enabled: forward box, "
-            f"min=({workspace_min[0]:.3f}, {workspace_min[1]:.3f}, {workspace_min[2]:.3f}), "
-            f"max=({workspace_max[0]:.3f}, {workspace_max[1]:.3f}, {workspace_max[2]:.3f})"
-        )
+        if workspace_mode == "box":
+            print(
+                "[ARM_WORKSPACE] enabled: forward box, "
+                f"min=({workspace_min[0]:.3f}, {workspace_min[1]:.3f}, {workspace_min[2]:.3f}), "
+                f"max=({workspace_max[0]:.3f}, {workspace_max[1]:.3f}, {workspace_max[2]:.3f})"
+            )
+        else:
+            print(
+                "[ARM_WORKSPACE] enabled: tapered prism, "
+                f"z=[{tapered_workspace_params['z_min']:.3f}, {tapered_workspace_params['z_max']:.3f}], "
+                f"x_min={tapered_workspace_params['x_min']:.3f}, "
+                f"x_max(low->high)=({tapered_workspace_params['x_max_low']:.3f} -> {tapered_workspace_params['x_max_high']:.3f}), "
+                f"|y|max(low->high)=({tapered_workspace_params['y_max_low']:.3f} -> {tapered_workspace_params['y_max_high']:.3f})"
+            )
+        print("[ARM_WORKSPACE] +z is arm-up in the IK/base frame.")
+        if workspace_visualization_enabled:
+            print("[ARM_WORKSPACE] MuJoCo workspace visualization enabled.")
+        if args.arm_workspace_show_targets:
+            print("[ARM_WORKSPACE] markers: solid red/blue = actual robot EE, yellow/cyan = raw target, pink/light-blue = clamped target.")
     else:
         print("[ARM_WORKSPACE] disabled.")
     calibration_required = normalized_head_mode in {"head_coupled", "hybrid"}
@@ -461,6 +736,32 @@ def main():
                         for qpos_idx in dex1_qpos_indices["right"]:
                             data.qpos[qpos_idx] = right_dex1_q
                     mj.mj_forward(model, data)
+                    current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, arm_q)
+                    torso_world_pose = mujoco_body_pose(data, torso_body_id) if torso_body_id >= 0 else None
+                    actual_left_world_pose = wrist_body_pose_to_ee_pose(mujoco_body_pose(data, left_wrist_body_id)) if left_wrist_body_id >= 0 else None
+                    actual_right_world_pose = wrist_body_pose_to_ee_pose(mujoco_body_pose(data, right_wrist_body_id)) if right_wrist_body_id >= 0 else None
+                    T_world_local = None
+                    if torso_world_pose is not None and actual_left_world_pose is not None and actual_right_world_pose is not None:
+                        T_world_local = make_world_from_local_transform(
+                            torso_world_pose[:3, :3],
+                            current_left_wrist_pose,
+                            current_right_wrist_pose,
+                            actual_left_world_pose,
+                            actual_right_world_pose,
+                        )
+                    update_workspace_debug_scene(
+                        viewer,
+                        enabled=(workspace_limit_enabled and workspace_visualization_enabled),
+                        workspace_mode=workspace_mode,
+                        show_box=True,
+                        min_bound=workspace_min,
+                        max_bound=workspace_max,
+                        tapered_params=tapered_workspace_params,
+                        T_world_local=T_world_local,
+                        actual_left_pose=actual_left_world_pose,
+                        actual_right_pose=actual_right_world_pose,
+                        show_targets=False,
+                    )
                     viewer.sync()
                     time.sleep(dt)
                     continue
@@ -490,11 +791,25 @@ def main():
                         continue
 
                 current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, arm_q)
+                torso_world_pose = mujoco_body_pose(data, torso_body_id) if torso_body_id >= 0 else None
+                actual_left_world_pose = wrist_body_pose_to_ee_pose(mujoco_body_pose(data, left_wrist_body_id)) if left_wrist_body_id >= 0 else None
+                actual_right_world_pose = wrist_body_pose_to_ee_pose(mujoco_body_pose(data, right_wrist_body_id)) if right_wrist_body_id >= 0 else None
+                T_world_local = None
+                if torso_world_pose is not None and actual_left_world_pose is not None and actual_right_world_pose is not None:
+                    T_world_local = make_world_from_local_transform(
+                        torso_world_pose[:3, :3],
+                        current_left_wrist_pose,
+                        current_right_wrist_pose,
+                        actual_left_world_pose,
+                        actual_right_world_pose,
+                    )
                 tele_data = xr_wrapper.get_tele_data(
                     current_left_robot_wrist_pose=current_left_wrist_pose,
                     current_right_robot_wrist_pose=current_right_wrist_pose,
                 )
                 if tele_data is not None:
+                    raw_left_target_pose = np.asarray(tele_data.left_wrist_pose, dtype=float).copy()
+                    raw_right_target_pose = np.asarray(tele_data.right_wrist_pose, dtype=float).copy()
                     left_stick_x = apply_deadzone(float(tele_data.left_ctrl_thumbstickValue[0]), args.base_stick_deadzone)
                     left_stick_y = apply_deadzone(float(tele_data.left_ctrl_thumbstickValue[1]), args.base_stick_deadzone)
                     right_stick_y = apply_deadzone(float(tele_data.right_ctrl_thumbstickValue[1]), args.base_stick_deadzone)
@@ -561,12 +876,42 @@ def main():
                     left_target_pose = tele_data.left_wrist_pose
                     right_target_pose = tele_data.right_wrist_pose
                     if workspace_limit_enabled:
-                        left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_box(
-                            left_target_pose,
-                            right_target_pose,
-                            workspace_min,
-                            workspace_max,
-                        )
+                        if workspace_mode == "box":
+                            left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_box(
+                                left_target_pose,
+                                right_target_pose,
+                                workspace_min,
+                                workspace_max,
+                            )
+                        else:
+                            left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_tapered_workspace(
+                                left_target_pose,
+                                right_target_pose,
+                                tapered_workspace_params["z_min"],
+                                tapered_workspace_params["z_max"],
+                                tapered_workspace_params["x_min"],
+                                tapered_workspace_params["x_max_low"],
+                                tapered_workspace_params["x_max_high"],
+                                tapered_workspace_params["y_max_low"],
+                                tapered_workspace_params["y_max_high"],
+                            )
+                    update_workspace_debug_scene(
+                        viewer,
+                        enabled=(workspace_limit_enabled and workspace_visualization_enabled),
+                        workspace_mode=workspace_mode,
+                        show_box=True,
+                        min_bound=workspace_min,
+                        max_bound=workspace_max,
+                        tapered_params=tapered_workspace_params,
+                        T_world_local=T_world_local,
+                        actual_left_pose=actual_left_world_pose,
+                        actual_right_pose=actual_right_world_pose,
+                        raw_left_pose=raw_left_target_pose,
+                        raw_right_pose=raw_right_target_pose,
+                        clamped_left_pose=left_target_pose,
+                        clamped_right_pose=right_target_pose,
+                        show_targets=args.arm_workspace_show_targets,
+                    )
                     if home_return_active:
                         sol_q = home_target_q.copy()
                     elif left_arm_enabled or right_arm_enabled:
@@ -701,6 +1046,19 @@ def main():
                         home_return_active = False
                         print("[HOME] reached ready/calibration pose. Waiting for both grips to release before teleop resumes.")
                 else:
+                    update_workspace_debug_scene(
+                        viewer,
+                        enabled=(workspace_limit_enabled and workspace_visualization_enabled),
+                        workspace_mode=workspace_mode,
+                        show_box=True,
+                        min_bound=workspace_min,
+                        max_bound=workspace_max,
+                        tapered_params=tapered_workspace_params,
+                        T_world_local=T_world_local,
+                        actual_left_pose=actual_left_world_pose,
+                        actual_right_pose=actual_right_world_pose,
+                        show_targets=False,
+                    )
                     if left_wheel_actuator_id is not None and right_wheel_actuator_id is not None:
                         data.ctrl[left_wheel_actuator_id] = 0.0
                         data.ctrl[right_wheel_actuator_id] = 0.0
