@@ -573,9 +573,11 @@ if __name__ == '__main__':
         home_return_active = False
         home_target_q = np.zeros_like(current_hold_q)
         home_wait_grip_release = False
-        prev_any_grip_pressed = False
         post_home_takeover_armed = False
-        takeover_settle_frames = 0
+        prev_left_grip_pressed = False
+        prev_right_grip_pressed = False
+        left_takeover_settle_frames = 0
+        right_takeover_settle_frames = 0
         TAKEOVER_SETTLE_FRAMES = 0 if args.controller_mapping_mode == "legacy_main" else 2
 
         # main loop. robot start to follow VR user's motion
@@ -692,12 +694,21 @@ if __name__ == '__main__':
                 prev_left_arm_enabled = left_arm_enabled
                 prev_right_arm_enabled = right_arm_enabled
 
-            any_grip_pressed = bool(tele_data.left_ctrl_squeeze) or bool(tele_data.right_ctrl_squeeze)
-            takeover_rising_edge = any_grip_pressed and (not prev_any_grip_pressed)
-            if takeover_rising_edge:
-                takeover_settle_frames = TAKEOVER_SETTLE_FRAMES
-            zero_takeover_this_frame = takeover_settle_frames > 0
-            prev_any_grip_pressed = any_grip_pressed
+            left_grip_pressed = bool(tele_data.left_ctrl_squeeze)
+            right_grip_pressed = bool(tele_data.right_ctrl_squeeze)
+            left_takeover_rising_edge = left_grip_pressed and (not prev_left_grip_pressed)
+            right_takeover_rising_edge = right_grip_pressed and (not prev_right_grip_pressed)
+            if left_takeover_rising_edge:
+                left_takeover_settle_frames = TAKEOVER_SETTLE_FRAMES
+            if right_takeover_rising_edge:
+                right_takeover_settle_frames = TAKEOVER_SETTLE_FRAMES
+            left_zero_takeover_this_frame = left_takeover_settle_frames > 0
+            right_zero_takeover_this_frame = right_takeover_settle_frames > 0
+            any_zero_takeover_this_frame = (
+                left_zero_takeover_this_frame or right_zero_takeover_this_frame
+            )
+            prev_left_grip_pressed = left_grip_pressed
+            prev_right_grip_pressed = right_grip_pressed
 
             if (args.ee == "dex3" or args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
@@ -800,17 +811,12 @@ if __name__ == '__main__':
                     timing_debugger.add_agv(time.perf_counter() - agv_send_start)
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
-            if zero_takeover_this_frame:
+            if any_zero_takeover_this_frame:
                 if post_home_takeover_armed and normalized_head_mode in {"head_coupled", "hybrid"}:
                     tv_wrapper.sync_reference_to_current_live_pose(require_live=False)
                 reset_arm_ik_state(arm_ik, current_lr_arm_q)
-                sol_q = current_lr_arm_q.copy()
-                sol_tauff = compute_arm_gravity_tauff(arm_ik, sol_q)
                 post_home_takeover_armed = False
-                if takeover_rising_edge:
-                    logger_mp.info(f"[TAKEOVER] grip rising edge -> zero-delta hold for {TAKEOVER_SETTLE_FRAMES} frames.")
-                takeover_settle_frames -= 1
-            elif home_return_active:
+            if home_return_active:
                 sol_q = home_target_q.copy()
                 sol_tauff = compute_arm_gravity_tauff(arm_ik, sol_q)
             elif left_arm_enabled or right_arm_enabled:
@@ -823,12 +829,27 @@ if __name__ == '__main__':
                 sol_q = current_hold_q.copy()
                 sol_tauff = current_hold_tauff.copy()
 
-            if (not left_arm_enabled) and (not home_return_active):
+            if ((not left_arm_enabled) or left_zero_takeover_this_frame) and (not home_return_active):
                 sol_q[:7] = current_hold_q[:7]
                 sol_tauff[:7] = current_hold_tauff[:7]
-            if (not right_arm_enabled) and (not home_return_active):
+            if ((not right_arm_enabled) or right_zero_takeover_this_frame) and (not home_return_active):
                 sol_q[-7:] = current_hold_q[-7:]
                 sol_tauff[-7:] = current_hold_tauff[-7:]
+
+            if left_zero_takeover_this_frame:
+                if left_takeover_rising_edge:
+                    logger_mp.info(
+                        f"[TAKEOVER][LEFT] grip rising edge -> zero-delta hold for "
+                        f"{TAKEOVER_SETTLE_FRAMES} frames."
+                    )
+                left_takeover_settle_frames -= 1
+            if right_zero_takeover_this_frame:
+                if right_takeover_rising_edge:
+                    logger_mp.info(
+                        f"[TAKEOVER][RIGHT] grip rising edge -> zero-delta hold for "
+                        f"{TAKEOVER_SETTLE_FRAMES} frames."
+                    )
+                right_takeover_settle_frames -= 1
 
             sol_q = limit_arm_joint_target_velocity(
                 sol_q,
