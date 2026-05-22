@@ -402,7 +402,7 @@ if __name__ == '__main__':
             if args.base_controller == "g1d_agv":
                 agv_bridge = G1DAgvBridge(network_interface=args.network_interface, auto_build=True)
                 logger_mp.info(
-                    "[BASE_CTRL] enabled: official G1D AgvClient bridge "
+                    "[BASE_CTRL] enabled: official G1D AgvClient bridge (async target queue) "
                     f"(left stick Y -> x(vx), left stick X -> yaw(wz), right stick Y -> z, "
                     f"max_vx={args.base_max_vx:.2f}, "
                     f"max_wz={args.base_max_wz:.2f}, max_z={args.base_max_z:.2f})"
@@ -741,6 +741,11 @@ if __name__ == '__main__':
             base_move_ms = 0.0
             base_height_ms = 0.0
             base_misc_ms = 0.0
+            base_async_cycle_avg_ms = None
+            base_async_move_avg_ms = None
+            base_async_height_avg_ms = None
+            base_async_queue_avg_ms = None
+            base_async_publish_hz = None
             base_vx = 0.0
             base_vy = 0.0
             base_wz = 0.0
@@ -784,7 +789,7 @@ if __name__ == '__main__':
                 loco_wrapper.Move(base_vx, base_vy, base_wz)
                 base_move_ms = (time.perf_counter() - base_move_start) * 1000.0
             elif args.input_mode == "controller" and args.base_controller == "g1d_agv":
-                base_control_mode = "g1d_agv"
+                base_control_mode = "g1d_agv_async"
                 if tele_data.right_ctrl_aButton:
                     START = False
                     STOP = True
@@ -825,12 +830,23 @@ if __name__ == '__main__':
                 if agv_bridge is not None:
                     agv_send_start = time.perf_counter()
                     base_move_start = time.perf_counter()
-                    agv_bridge.move(base_vx, base_vy, base_wz)
+                    agv_bridge.set_target(base_vx, base_vy, base_wz, base_z)
                     base_move_ms = (time.perf_counter() - base_move_start) * 1000.0
-                    base_height_start = time.perf_counter()
-                    agv_bridge.height_adjust(base_z)
-                    base_height_ms = (time.perf_counter() - base_height_start) * 1000.0
                     timing_debugger.add_agv(time.perf_counter() - agv_send_start)
+                    try:
+                        agv_timing_snapshot = agv_bridge.get_timing_snapshot()
+                    except Exception:
+                        agv_timing_snapshot = None
+                    if agv_timing_snapshot is not None:
+                        base_async_publish_hz = float(agv_timing_snapshot.get("publish_hz", 0.0))
+                        move_stats = agv_timing_snapshot.get("move_stats") or {}
+                        height_stats = agv_timing_snapshot.get("height_stats") or {}
+                        cycle_stats = agv_timing_snapshot.get("cycle_stats") or {}
+                        queue_stats = agv_timing_snapshot.get("queue_delay_stats") or {}
+                        base_async_move_avg_ms = move_stats.get("avg_ms")
+                        base_async_height_avg_ms = height_stats.get("avg_ms")
+                        base_async_cycle_avg_ms = cycle_stats.get("avg_ms")
+                        base_async_queue_avg_ms = queue_stats.get("avg_ms")
             base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
             base_misc_ms = max(0.0, base_control_ms - base_move_ms - base_height_ms)
 
@@ -910,6 +926,11 @@ if __name__ == '__main__':
                             "base_vy_cmd": float(base_vy),
                             "base_wz_cmd": float(base_wz),
                             "base_z_cmd": float(base_z),
+                            "base_async_publish_hz": base_async_publish_hz,
+                            "base_async_move_avg_ms": base_async_move_avg_ms,
+                            "base_async_height_avg_ms": base_async_height_avg_ms,
+                            "base_async_cycle_avg_ms": base_async_cycle_avg_ms,
+                            "base_async_queue_avg_ms": base_async_queue_avg_ms,
                             "ik_ms": ik_ms,
                             "safety_ms": safety_ms,
                             "gravity_ms": gravity_ms,
