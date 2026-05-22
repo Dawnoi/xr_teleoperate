@@ -363,10 +363,10 @@ class XRRoboticsWrapper:
         else:
             left_wrist_pose = left_Brobot_head_arm.copy()
             right_wrist_pose = right_Brobot_head_arm.copy()
-            left_wrist_pose[0, 3] += 0.10
-            right_wrist_pose[0, 3] += 0.10
-            left_wrist_pose[2, 3] += 0.40
-            right_wrist_pose[2, 3] += 0.40
+            left_wrist_pose[0, 3] += 0.15
+            right_wrist_pose[0, 3] += 0.15
+            left_wrist_pose[2, 3] += 0.42
+            right_wrist_pose[2, 3] += 0.42
 
         self._prev_left_grip_pressed = left_grip_pressed
         self._prev_right_grip_pressed = right_grip_pressed
