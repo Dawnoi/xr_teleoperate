@@ -98,8 +98,24 @@ python teleop/teleop_hand_and_arm.py \
   --base-max-z 1.0 \
   --base-stick-deadzone 0.10
 ```
-data collect
-```
+### 1.0 数据采集（带本地 RGB 相机）
+
+当前录制链路支持把本地 `cv2.VideoCapture` 相机一起写入 episode：
+
+- `--head-camera-id`
+- `--left-camera-id`
+- `--right-camera-id`
+- `--camera-width`
+- `--camera-height`
+- `--camera-fps`
+- `--camera-fourcc`
+- `--camera-buffer-size`
+
+示例（假设本地三路相机分别是 `/dev/video0 /dev/video2 /dev/video4`）：
+
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
 python teleop/teleop_hand_and_arm.py \
     --input-mode controller \
     --arm G1_29 \
@@ -124,12 +140,75 @@ python teleop/teleop_hand_and_arm.py \
     --base-max-z 1.0 \
     --base-stick-deadzone 0.10 \
     --record \
+    --headless \
     --task-dir ./utils/data \
     --task-name pick_cube \
     --task-goal "pick up cube" \
     --task-desc "xr teleop data collection" \
-    --task-steps "reach; grasp; lift; place"
+    --task-steps "reach; grasp; lift; place" \
+    --head-camera-id 0 \
+    --left-camera-id 2 \
+    --right-camera-id 4 \
+    --camera-width 640 \
+    --camera-height 480 \
+    --camera-fps 30 \
+    --camera-fourcc MJPG \
+    --camera-buffer-size 1
 ```
+
+说明：
+
+- `camera-id < 0` 表示禁用该路相机。
+- 推荐采集时加 `--headless`，避免 Rerun Viewer 依赖影响录制。
+- 当前写入的是 RGB 图像到 `episode_xxxx/colors/`，key 为：
+  - `head`
+  - `left_wrist`
+  - `right_wrist`
+- 当前录制的 `states/actions` 只保留：
+  - `left_arm`
+  - `right_arm`
+  - `left_ee`
+  - `right_ee`
+- 不再录制 `body` / 全身数据。
+- 当前 `depths/` 仍未接本地深度相机链路。
+
+### 1.0.1 录制操作
+
+- `r`：启动 teleop
+- `s`：开始录制当前 episode
+- 再按一次 `s`：停止并保存当前 episode
+- `q`：退出
+
+### 1.0.2 时间戳字段
+
+每条 `data.json` item 新增：
+
+```json
+"timestamps": {
+  "sample_wall_time_ns": ...,
+  "sample_monotonic_ns": ...,
+  "teleop_input_perf_counter_ns": ...,
+  "camera": {
+    "head": {
+      "camera_name": "head",
+      "camera_id": 0,
+      "frame_seq": 123,
+      "host_wall_time_ns": ...,
+      "host_monotonic_ns": ...,
+      "read_latency_ms": ...,
+      "shape": [640, 480, 3]
+    }
+  }
+}
+```
+
+含义：
+
+- `sample_wall_time_ns`：该条样本写入前的主机墙钟时间。
+- `sample_monotonic_ns`：该条样本写入前的主机单调时钟，适合做时差计算。
+- `teleop_input_perf_counter_ns`：本轮 teleop 输入到达主循环的高精度计时点。
+- `camera.*`：对应相机最新帧的主机侧采样时间与读取耗时。
+
 一键脚本：
 
 ```bash
@@ -153,6 +232,7 @@ NETWORK_INTERFACE=wlan0  bash scripts/start_real_robot_wifi.sh
 
 ```bash
 bash scripts/start_real_robot_wifi.sh --timing-debug --timing-debug-interval 2.0
+bash scripts/start_real_robot_wired.sh --record --headless --task-dir ./utils/data --task-name test_record --head-camera-id 0 --left-camera-id 2 --right-camera-id 4
 ```
 
 底盘语义：

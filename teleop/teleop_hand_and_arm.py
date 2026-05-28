@@ -4,6 +4,7 @@ from multiprocessing import Value, Array, Lock
 import threading
 from collections import deque
 import numpy as np
+import cv2
 import logging_mp
 logging_mp.basicConfig(level=logging_mp.INFO)
 logger_mp = logging_mp.getLogger(__name__)
@@ -42,6 +43,7 @@ from teleop.utils.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,
     clamp_dual_wrist_poses_to_tapered_workspace,
 )
+from teleop.utils.local_camera import LocalCameraStream
 from teleop.utils.simple_latency_trace import SimpleLatencyTracker
 from sshkeyboard import listen_keyboard, stop_listening
 
@@ -278,6 +280,9 @@ if __name__ == '__main__':
     recorder = None
     ipc_server = None
     sim_state_subscriber = None
+    head_camera = None
+    left_camera = None
+    right_camera = None
     parser = argparse.ArgumentParser()
     # basic control parameters
     parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
@@ -366,6 +371,14 @@ if __name__ == '__main__':
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
     parser.add_argument('--task-desc', type = str, default = 'task description', help = 'task description for recording at json file')
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
+    parser.add_argument('--head-camera-id', type=int, default=-1, help='Local head RGB camera id for cv2.VideoCapture, e.g. 0. <0 disables.')
+    parser.add_argument('--left-camera-id', type=int, default=-1, help='Local left wrist RGB camera id for cv2.VideoCapture. <0 disables.')
+    parser.add_argument('--right-camera-id', type=int, default=-1, help='Local right wrist RGB camera id for cv2.VideoCapture. <0 disables.')
+    parser.add_argument('--camera-width', type=int, default=640, help='Requested local camera frame width.')
+    parser.add_argument('--camera-height', type=int, default=480, help='Requested local camera frame height.')
+    parser.add_argument('--camera-fps', type=int, default=30, help='Requested local camera FPS.')
+    parser.add_argument('--camera-fourcc', type=str, default='MJPG', help='Requested local camera FOURCC, e.g. MJPG/YUYV.')
+    parser.add_argument('--camera-buffer-size', type=int, default=1, help='Requested local camera driver buffer size.')
 
     args = parser.parse_args()
     logger_mp.debug(f"args: {args}")
@@ -400,6 +413,23 @@ if __name__ == '__main__':
         except Exception as e:
             logger_mp.warning(f"[HOLD_TAUFF] failed to compute gravity compensation, fallback to zeros: {e}")
             return np.zeros_like(np.asarray(arm_q, dtype=float))
+
+    def maybe_open_local_camera(name: str, camera_id: int):
+        if int(camera_id) < 0:
+            return None
+        try:
+            return LocalCameraStream(
+                name=name,
+                camera_id=int(camera_id),
+                width=args.camera_width,
+                height=args.camera_height,
+                fps=args.camera_fps,
+                fourcc=args.camera_fourcc,
+                buffer_size=args.camera_buffer_size,
+            )
+        except Exception as e:
+            logger_mp.warning(f"[CAM] failed to open local camera '{name}' (id={camera_id}): {e}")
+            return None
 
     try:
         # setup dds communication domains id
@@ -574,8 +604,12 @@ if __name__ == '__main__':
                                      task_goal = args.task_goal,
                                      task_desc = args.task_desc,
                                      task_steps = args.task_steps,
-                                     frequency = args.frequency, 
+                                     frequency = args.frequency,
+                                     image_size = [args.camera_width, args.camera_height],
                                      rerun_log = not args.headless)
+            head_camera = maybe_open_local_camera("head", args.head_camera_id)
+            left_camera = maybe_open_local_camera("left_wrist", args.left_camera_id)
+            right_camera = maybe_open_local_camera("right_wrist", args.right_camera_id)
 
         latency_tracker = None
         if args.latency_trace:
@@ -1052,41 +1086,29 @@ if __name__ == '__main__':
                         right_ee_state = dual_hand_state_array[-7:]
                         left_hand_action = dual_hand_action_array[:7]
                         right_hand_action = dual_hand_action_array[-7:]
-                        current_body_state = []
-                        current_body_action = []
                 elif args.ee == "dex1" and args.input_mode == "hand":
                     with dual_gripper_data_lock:
                         left_ee_state = [dual_gripper_state_array[0]]
                         right_ee_state = [dual_gripper_state_array[1]]
                         left_hand_action = [dual_gripper_action_array[0]]
                         right_hand_action = [dual_gripper_action_array[1]]
-                        current_body_state = []
-                        current_body_action = []
                 elif args.ee == "dex1" and args.input_mode == "controller":
                     with dual_gripper_data_lock:
                         left_ee_state = [dual_gripper_state_array[0]]
                         right_ee_state = [dual_gripper_state_array[1]]
                         left_hand_action = [dual_gripper_action_array[0]]
                         right_hand_action = [dual_gripper_action_array[1]]
-                        current_body_state = arm_ctrl.get_current_motor_q().tolist()
-                        current_body_action = [-tele_data.left_ctrl_thumbstickValue[1]  * 0.3,
-                                               -tele_data.left_ctrl_thumbstickValue[0]  * 0.3,
-                                               -tele_data.right_ctrl_thumbstickValue[0] * 0.3]
                 elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
                     with dual_hand_data_lock:
                         left_ee_state = dual_hand_state_array[:6]
                         right_ee_state = dual_hand_state_array[-6:]
                         left_hand_action = dual_hand_action_array[:6]
                         right_hand_action = dual_hand_action_array[-6:]
-                        current_body_state = []
-                        current_body_action = []
                 else:
                     left_ee_state = []
                     right_ee_state = []
                     left_hand_action = []
                     right_hand_action = []
-                    current_body_state = []
-                    current_body_action = []
 
                 # arm state and action
                 left_arm_state  = current_lr_arm_q[:7]
@@ -1096,6 +1118,22 @@ if __name__ == '__main__':
                 if RECORD_RUNNING:
                     colors = {}
                     depths = {}
+                    camera_timestamps = {}
+                    if head_camera is not None:
+                        head_frame, head_meta = head_camera.get_latest(copy=True)
+                        if head_frame is not None:
+                            colors["head"] = head_frame
+                            camera_timestamps["head"] = head_meta
+                    if left_camera is not None:
+                        left_frame, left_meta = left_camera.get_latest(copy=True)
+                        if left_frame is not None:
+                            colors["left_wrist"] = left_frame
+                            camera_timestamps["left_wrist"] = left_meta
+                    if right_camera is not None:
+                        right_frame, right_meta = right_camera.get_latest(copy=True)
+                        if right_frame is not None:
+                            colors["right_wrist"] = right_frame
+                            camera_timestamps["right_wrist"] = right_meta
                     states = {
                         "left_arm": {                                                                    
                             "qpos":   left_arm_state.tolist(),    # numpy.array -> list
@@ -1116,9 +1154,6 @@ if __name__ == '__main__':
                             "qpos":   right_ee_state,       
                             "qvel":   [],                           
                             "torque": [],  
-                        }, 
-                        "body": {
-                            "qpos": current_body_state,
                         }, 
                     }
                     actions = {
@@ -1142,15 +1177,18 @@ if __name__ == '__main__':
                             "qvel":   [],       
                             "torque": [], 
                         }, 
-                        "body": {
-                            "qpos": current_body_action,
-                        }, 
+                    }
+                    timestamps = {
+                        "sample_wall_time_ns": int(time.time_ns()),
+                        "sample_monotonic_ns": int(time.monotonic_ns()),
+                        "teleop_input_perf_counter_ns": int(tele_data_recv_ts_ns),
+                        "camera": camera_timestamps,
                     }
                     if args.sim:
                         sim_state = sim_state_subscriber.read_data()            
-                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state)
+                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state, timestamps=timestamps)
                     else:
-                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions)
+                        recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, timestamps=timestamps)
 
             current_time = time.time()
             time_elapsed = current_time - start_time
@@ -1206,6 +1244,13 @@ if __name__ == '__main__':
                 sim_state_subscriber.stop_subscribe()
         except Exception as e:
             logger_mp.error(f"Failed to stop sim state subscriber: {e}")
+
+        for camera in [head_camera, left_camera, right_camera]:
+            try:
+                if camera is not None:
+                    camera.close()
+            except Exception as e:
+                logger_mp.error(f"Failed to close local camera: {e}")
         
         try:
             if args.record and recorder is not None:
