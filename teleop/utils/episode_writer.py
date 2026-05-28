@@ -6,6 +6,7 @@ import numpy as np
 import time
 import zmq
 import struct
+from collections import deque
 from .rerun_visualizer import RerunLogger
 from queue import Queue, Empty
 from threading import Thread, Lock
@@ -40,6 +41,7 @@ class ZMQRawCameraReceiver:
         self._running = True
         self._frame = None
         self._meta = None
+        self._history = deque(maxlen=240)
         self._frame_seq_local = -1
         self._lock = Lock()
 
@@ -71,6 +73,7 @@ class ZMQRawCameraReceiver:
                 with self._lock:
                     self._frame = frame
                     self._meta = meta
+                    self._history.append((frame, dict(meta)))
             except zmq.Again:
                 continue
             except Exception as e:
@@ -154,6 +157,38 @@ class ZMQRawCameraReceiver:
             frame = self._frame.copy() if copy else self._frame
             meta = dict(self._meta)
         return frame, meta
+
+    @staticmethod
+    def _meta_time_ns(meta):
+        value = meta.get("host_recv_monotonic_ns")
+        return int(value) if value is not None else None
+
+    def get_nearest(self, target_monotonic_ns: int, max_delta_ns=None, min_monotonic_ns=None, copy: bool = True):
+        target_monotonic_ns = int(target_monotonic_ns)
+        with self._lock:
+            best_frame = None
+            best_meta = None
+            best_abs_delta = None
+            for frame, meta in reversed(self._history):
+                meta_ts = self._meta_time_ns(meta)
+                if meta_ts is None:
+                    continue
+                if min_monotonic_ns is not None and meta_ts < int(min_monotonic_ns):
+                    continue
+                abs_delta = abs(meta_ts - target_monotonic_ns)
+                if max_delta_ns is not None and abs_delta > int(max_delta_ns):
+                    continue
+                if best_abs_delta is None or abs_delta < best_abs_delta:
+                    best_frame = frame
+                    best_meta = meta
+                    best_abs_delta = abs_delta
+            if best_frame is None or best_meta is None:
+                return None, None
+            frame_out = best_frame.copy() if copy else best_frame
+            meta_out = dict(best_meta)
+            meta_out["align_target_monotonic_ns"] = target_monotonic_ns
+            meta_out["delta_to_sample_ns"] = int(self._meta_time_ns(best_meta) - target_monotonic_ns)
+        return frame_out, meta_out
 
     def close(self):
         self._running = False
@@ -329,6 +364,7 @@ class EpisodeWriter():
         colors = item_data.get('colors', {})
         depths = item_data.get('depths', {})
         audios = item_data.get('audios', {})
+        timestamps = item_data.get('timestamps', {}) or {}
         rerun_colors = {}
         rerun_depths = {}
 
@@ -342,7 +378,17 @@ class EpisodeWriter():
         # Save images
         if colors:
             for idx_color, (color_key, color) in enumerate(colors.items()):
-                color_name = f'{str(idx).zfill(6)}_{color_key}.jpg'
+                camera_meta = ((timestamps.get('camera', {}) or {}).get(color_key, {}) or {})
+                color_time_ns = (
+                    camera_meta.get("host_recv_monotonic_ns")
+                    or camera_meta.get("host_monotonic_ns")
+                    or timestamps.get("sample_monotonic_ns")
+                )
+                color_name = (
+                    f'{str(idx).zfill(6)}_{color_key}_{int(color_time_ns)}.jpg'
+                    if color_time_ns is not None else
+                    f'{str(idx).zfill(6)}_{color_key}.jpg'
+                )
                 if not cv2.imwrite(os.path.join(self.color_dir, color_name), color):
                     logger_mp.info(f"Failed to save color image.")
                 item_data['colors'][color_key] = os.path.join('colors', color_name)

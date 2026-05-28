@@ -405,6 +405,14 @@ if __name__ == '__main__':
         "y_max_high": float(args.arm_workspace_y_max_high),
     }
     timing_debugger = TimingDebugger(enabled=args.timing_debug, interval_sec=args.timing_debug_interval)
+    state_history_size = max(32, int(args.frequency * 6))
+    action_history_size = max(32, int(args.frequency * 6))
+    state_history = deque(maxlen=state_history_size)
+    action_history = deque(maxlen=action_history_size)
+    record_start_monotonic_ns = None
+    camera_align_max_delta_ns = int(max(20_000_000, (1.5 / max(args.frequency, 1e-6)) * 1e9))
+    state_align_max_delta_ns = int(max(10_000_000, (0.75 / max(args.frequency, 1e-6)) * 1e9))
+    action_align_max_delta_ns = state_align_max_delta_ns
     if args.base_controller == "g1d_agv" and args.motion:
         raise ValueError("Do not combine --base-controller g1d_agv with --motion. G1D AGV base control should run with the arms kept in debug mode.")
 
@@ -419,6 +427,32 @@ if __name__ == '__main__':
         except Exception as e:
             logger_mp.warning(f"[HOLD_TAUFF] failed to compute gravity compensation, fallback to zeros: {e}")
             return np.zeros_like(np.asarray(arm_q, dtype=float))
+
+    def append_timed_sample(buffer: deque, timestamp_ns: int, **payload):
+        entry = {"t_ns": int(timestamp_ns)}
+        entry.update(payload)
+        buffer.append(entry)
+
+    def nearest_timed_sample(buffer: deque, target_ns: int, max_delta_ns: int | None = None, min_timestamp_ns: int | None = None):
+        best = None
+        best_abs_delta = None
+        target_ns = int(target_ns)
+        for entry in reversed(buffer):
+            t_ns = int(entry["t_ns"])
+            if min_timestamp_ns is not None and t_ns < int(min_timestamp_ns):
+                continue
+            abs_delta = abs(t_ns - target_ns)
+            if max_delta_ns is not None and abs_delta > int(max_delta_ns):
+                continue
+            if best_abs_delta is None or abs_delta < best_abs_delta:
+                best = entry
+                best_abs_delta = abs_delta
+        if best is None:
+            return None
+        result = dict(best)
+        result["delta_to_target_ns"] = int(best["t_ns"] - target_ns)
+        result["target_monotonic_ns"] = target_ns
+        return result
 
     def maybe_open_local_camera(name: str, camera_id: int):
         if int(camera_id) < 0:
@@ -709,10 +743,12 @@ if __name__ == '__main__':
                 if not RECORD_RUNNING:
                     if recorder.create_episode():
                         RECORD_RUNNING = True
+                        record_start_monotonic_ns = int(time.monotonic_ns())
                     else:
                         logger_mp.error("Failed to create episode. Recording not started.")
                 else:
                     RECORD_RUNNING = False
+                    record_start_monotonic_ns = None
                     recorder.save_episode()
                     if args.sim:
                         publish_reset_category(1, reset_pose_publisher)
@@ -753,8 +789,17 @@ if __name__ == '__main__':
 
             # get current robot state data first so XR wrapper can anchor each new
             # grip takeover to the *current* robot wrist pose instead of a fixed home pose.
+            state_read_t0_ns = time.monotonic_ns()
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
+            state_read_t1_ns = time.monotonic_ns()
+            current_state_sample_ns = int((state_read_t0_ns + state_read_t1_ns) // 2)
+            append_timed_sample(
+                state_history,
+                current_state_sample_ns,
+                q=current_lr_arm_q.copy(),
+                dq=current_lr_arm_dq.copy(),
+            )
             if latency_tracker is not None:
                 latency_tracker.maybe_timeout()
                 latency_tracker.maybe_mark_execute(
@@ -1088,6 +1133,13 @@ if __name__ == '__main__':
                         },
                     )
 
+            action_command_monotonic_ns = int(time.monotonic_ns())
+            append_timed_sample(
+                action_history,
+                action_command_monotonic_ns,
+                q=sol_q.copy(),
+                tauff=sol_tauff.copy(),
+            )
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff, trace_seq=trace_seq)
             if home_return_active and np.all(np.abs(sol_q - home_target_q) < 0.05):
                 home_return_active = False
@@ -1130,32 +1182,81 @@ if __name__ == '__main__':
                     right_hand_action = []
 
                 # arm state and action
-                left_arm_state  = current_lr_arm_q[:7]
-                right_arm_state = current_lr_arm_q[-7:]
-                left_arm_action = sol_q[:7]
-                right_arm_action = sol_q[-7:]
                 if RECORD_RUNNING:
+                    sample_monotonic_ns = int(time.monotonic_ns())
+                    record_min_timestamp_ns = int(record_start_monotonic_ns or sample_monotonic_ns)
+                    aligned_state = nearest_timed_sample(
+                        state_history,
+                        sample_monotonic_ns,
+                        max_delta_ns=state_align_max_delta_ns,
+                        min_timestamp_ns=record_min_timestamp_ns,
+                    )
+                    aligned_action = nearest_timed_sample(
+                        action_history,
+                        sample_monotonic_ns,
+                        max_delta_ns=action_align_max_delta_ns,
+                        min_timestamp_ns=record_min_timestamp_ns,
+                    )
+                    if aligned_state is None:
+                        logger_mp.warning("[RECORD_ALIGN] skip sample: no aligned state found near sample timestamp.")
+                        continue
+                    if aligned_action is None:
+                        logger_mp.warning("[RECORD_ALIGN] skip sample: no aligned action found near sample timestamp.")
+                        continue
+
+                    aligned_lr_arm_q = np.asarray(aligned_state["q"], dtype=float)
+                    aligned_sol_q = np.asarray(aligned_action["q"], dtype=float)
+                    left_arm_state  = aligned_lr_arm_q[:7]
+                    right_arm_state = aligned_lr_arm_q[-7:]
+                    left_arm_action = aligned_sol_q[:7]
+                    right_arm_action = aligned_sol_q[-7:]
+
                     colors = {}
                     depths = {}
                     camera_timestamps = {}
                     head_source = head_remote_camera if head_remote_camera is not None else head_camera
                     left_source = left_remote_camera if left_remote_camera is not None else left_camera
                     right_source = right_remote_camera if right_remote_camera is not None else right_camera
+                    required_camera_missing = False
                     if head_source is not None:
-                        head_frame, head_meta = head_source.get_latest(copy=True)
+                        head_frame, head_meta = head_source.get_nearest(
+                            sample_monotonic_ns,
+                            max_delta_ns=camera_align_max_delta_ns,
+                            min_monotonic_ns=record_min_timestamp_ns,
+                            copy=True,
+                        )
                         if head_frame is not None:
                             colors["head"] = head_frame
                             camera_timestamps["head"] = head_meta
+                        else:
+                            required_camera_missing = True
                     if left_source is not None:
-                        left_frame, left_meta = left_source.get_latest(copy=True)
+                        left_frame, left_meta = left_source.get_nearest(
+                            sample_monotonic_ns,
+                            max_delta_ns=camera_align_max_delta_ns,
+                            min_monotonic_ns=record_min_timestamp_ns,
+                            copy=True,
+                        )
                         if left_frame is not None:
                             colors["left_wrist"] = left_frame
                             camera_timestamps["left_wrist"] = left_meta
+                        else:
+                            required_camera_missing = True
                     if right_source is not None:
-                        right_frame, right_meta = right_source.get_latest(copy=True)
+                        right_frame, right_meta = right_source.get_nearest(
+                            sample_monotonic_ns,
+                            max_delta_ns=camera_align_max_delta_ns,
+                            min_monotonic_ns=record_min_timestamp_ns,
+                            copy=True,
+                        )
                         if right_frame is not None:
                             colors["right_wrist"] = right_frame
                             camera_timestamps["right_wrist"] = right_meta
+                        else:
+                            required_camera_missing = True
+                    if required_camera_missing:
+                        logger_mp.warning("[RECORD_ALIGN] skip sample: no aligned camera frame found after record start.")
+                        continue
                     states = {
                         "left_arm": {                                                                    
                             "qpos":   left_arm_state.tolist(),    # numpy.array -> list
@@ -1202,8 +1303,16 @@ if __name__ == '__main__':
                     }
                     timestamps = {
                         "sample_wall_time_ns": int(time.time_ns()),
-                        "sample_monotonic_ns": int(time.monotonic_ns()),
+                        "sample_monotonic_ns": sample_monotonic_ns,
                         "teleop_input_perf_counter_ns": int(tele_data_recv_ts_ns),
+                        "state": {
+                            "host_monotonic_ns": int(aligned_state["t_ns"]),
+                            "delta_to_sample_ns": int(aligned_state["delta_to_target_ns"]),
+                        },
+                        "action": {
+                            "host_monotonic_ns": int(aligned_action["t_ns"]),
+                            "delta_to_sample_ns": int(aligned_action["delta_to_target_ns"]),
+                        },
                         "camera": camera_timestamps,
                     }
                     if args.sim:

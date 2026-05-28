@@ -1,5 +1,6 @@
 import threading
 import time
+from collections import deque
 from typing import Optional, Tuple, Dict, Any
 
 import cv2
@@ -49,6 +50,7 @@ class LocalCameraStream:
         self._running = True
         self._frame = None
         self._meta = None
+        self._history = deque(maxlen=max(16, min(240, self.fps * 4)))
         self._frame_seq = -1
         self._thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._thread.start()
@@ -84,6 +86,12 @@ class LocalCameraStream:
             with self._lock:
                 self._frame = frame
                 self._meta = meta
+                self._history.append((frame, dict(meta)))
+
+    @staticmethod
+    def _meta_time_ns(meta: Dict[str, Any]) -> Optional[int]:
+        value = meta.get("host_monotonic_ns")
+        return int(value) if value is not None else None
 
     def get_latest(self, copy: bool = True) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
         with self._lock:
@@ -93,6 +101,39 @@ class LocalCameraStream:
             meta = dict(self._meta)
         return frame, meta
 
+    def get_nearest(
+        self,
+        target_monotonic_ns: int,
+        max_delta_ns: Optional[int] = None,
+        min_monotonic_ns: Optional[int] = None,
+        copy: bool = True,
+    ) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
+        target_monotonic_ns = int(target_monotonic_ns)
+        with self._lock:
+            best_frame = None
+            best_meta = None
+            best_abs_delta = None
+            for frame, meta in reversed(self._history):
+                meta_ts = self._meta_time_ns(meta)
+                if meta_ts is None:
+                    continue
+                if min_monotonic_ns is not None and meta_ts < int(min_monotonic_ns):
+                    continue
+                abs_delta = abs(meta_ts - target_monotonic_ns)
+                if max_delta_ns is not None and abs_delta > int(max_delta_ns):
+                    continue
+                if best_abs_delta is None or abs_delta < best_abs_delta:
+                    best_frame = frame
+                    best_meta = meta
+                    best_abs_delta = abs_delta
+            if best_frame is None or best_meta is None:
+                return None, None
+            frame_out = best_frame.copy() if copy else best_frame
+            meta_out = dict(best_meta)
+            meta_out["align_target_monotonic_ns"] = target_monotonic_ns
+            meta_out["delta_to_sample_ns"] = int(self._meta_time_ns(best_meta) - target_monotonic_ns)
+        return frame_out, meta_out
+
     def close(self):
         self._running = False
         if self._thread is not None:
@@ -101,4 +142,3 @@ class LocalCameraStream:
             self.cap.release()
         except Exception as e:
             logger_mp.warning(f"[LocalCameraStream:{self.name}] release failed: {e}")
-
