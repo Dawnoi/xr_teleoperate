@@ -35,8 +35,13 @@ class EpisodeWriter():
         self.rerun_log = rerun_log
         if self.rerun_log:
             logger_mp.info("==> RerunLogger initializing...\n")
-            self.rerun_logger = RerunLogger(prefix="online/", IdxRangeBoundary = 60, memory_limit = "300MB")
-            logger_mp.info("==> RerunLogger initializing ok.\n")
+            try:
+                self.rerun_logger = RerunLogger(prefix="online/", IdxRangeBoundary = 60, memory_limit = "300MB")
+                logger_mp.info("==> RerunLogger initializing ok.\n")
+            except Exception as e:
+                self.rerun_log = False
+                self.rerun_logger = None
+                logger_mp.warning(f"==> RerunLogger unavailable, disable live viewer logging: {e}\n")
         
         self.item_id = -1
         self.episode_id = -1
@@ -120,7 +125,12 @@ class EpisodeWriter():
         self.first_item = True   # Flag to handle commas in JSON array
 
         if self.rerun_log:
-            self.online_logger = RerunLogger(prefix="online/", IdxRangeBoundary = 60, memory_limit="300MB")
+            try:
+                self.online_logger = RerunLogger(prefix="online/", IdxRangeBoundary = 60, memory_limit="300MB")
+            except Exception as e:
+                self.rerun_log = False
+                self.online_logger = None
+                logger_mp.warning(f"==> Failed to create episode RerunLogger, disable live viewer logging: {e}")
 
         self.is_available = False  # After the episode is created, the class is marked as unavailable until the episode is successfully saved
         logger_mp.info(f"==> New episode created: {self.episode_dir}")
