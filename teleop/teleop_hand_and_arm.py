@@ -468,6 +468,14 @@ if __name__ == '__main__':
         result["target_monotonic_ns"] = target_ns
         return result
 
+    def camera_meta_monotonic_ns(meta):
+        if meta is None:
+            return None
+        value = meta.get("host_recv_monotonic_ns")
+        if value is None:
+            value = meta.get("host_monotonic_ns")
+        return int(value) if value is not None else None
+
     def maybe_open_local_camera(name: str, camera_id: int):
         if int(camera_id) < 0:
             return None
@@ -746,6 +754,8 @@ if __name__ == '__main__':
         left_takeover_settle_frames = 0
         right_takeover_settle_frames = 0
         TAKEOVER_SETTLE_FRAMES = 0 if args.controller_mapping_mode == "legacy_main" else 2
+        recording_waiting_for_first_frame = False
+        last_record_wait_log_ns = 0
 
         # main loop. robot start to follow VR user's motion
         while not STOP:
@@ -754,14 +764,16 @@ if __name__ == '__main__':
             # record mode
             if args.record and RECORD_TOGGLE:
                 RECORD_TOGGLE = False
-                if not RECORD_RUNNING:
+                if not RECORD_RUNNING and not recording_waiting_for_first_frame:
                     if recorder.create_episode():
-                        RECORD_RUNNING = True
                         record_start_monotonic_ns = int(time.monotonic_ns())
+                        recording_waiting_for_first_frame = True
+                        logger_mp.info("[RECORD_ALIGN] episode armed, waiting for first post-start camera frame before recording.")
                     else:
                         logger_mp.error("Failed to create episode. Recording not started.")
                 else:
                     RECORD_RUNNING = False
+                    recording_waiting_for_first_frame = False
                     record_start_monotonic_ns = None
                     recorder.save_episode()
                     if args.sim:
@@ -1196,7 +1208,53 @@ if __name__ == '__main__':
                     right_hand_action = []
 
                 # arm state and action
-                if RECORD_RUNNING:
+                if RECORD_RUNNING or recording_waiting_for_first_frame:
+                    head_source = head_remote_camera if head_remote_camera is not None else head_camera
+                    left_source = left_remote_camera if left_remote_camera is not None else left_camera
+                    right_source = right_remote_camera if right_remote_camera is not None else right_camera
+
+                    if recording_waiting_for_first_frame:
+                        wait_target_ns = int(time.monotonic_ns())
+                        source_entries = [
+                            ("head", head_source),
+                            ("left_wrist", left_source),
+                            ("right_wrist", right_source),
+                        ]
+                        required_sources = [(name, src) for name, src in source_entries if src is not None]
+                        if not required_sources:
+                            RECORD_RUNNING = True
+                            recording_waiting_for_first_frame = False
+                            logger_mp.info("[RECORD_ALIGN] no camera source configured, recording starts immediately.")
+                        else:
+                            first_frame_ready = True
+                            first_frame_times = []
+                            for camera_name, source in required_sources:
+                                _, meta = source.get_nearest(
+                                    wait_target_ns,
+                                    max_delta_ns=None,
+                                    min_monotonic_ns=record_start_monotonic_ns,
+                                    copy=False,
+                                )
+                                meta_ts = camera_meta_monotonic_ns(meta)
+                                if meta is None or meta_ts is None:
+                                    first_frame_ready = False
+                                    break
+                                first_frame_times.append(meta_ts)
+                            if not first_frame_ready:
+                                now_ns = time.monotonic_ns()
+                                if now_ns - last_record_wait_log_ns > 1_000_000_000:
+                                    logger_mp.info("[RECORD_ALIGN] waiting for first post-start camera frame...")
+                                    last_record_wait_log_ns = now_ns
+                                continue
+                            record_start_monotonic_ns = int(max(first_frame_times))
+                            RECORD_RUNNING = True
+                            recording_waiting_for_first_frame = False
+                            logger_mp.info(
+                                "[RECORD_ALIGN] first post-start camera frame received, recording begins at monotonic_ns=%d",
+                                record_start_monotonic_ns,
+                            )
+                            continue
+
                     sample_monotonic_ns = int(time.monotonic_ns())
                     record_min_timestamp_ns = int(record_start_monotonic_ns or sample_monotonic_ns)
                     aligned_state = nearest_timed_sample(
@@ -1235,9 +1293,6 @@ if __name__ == '__main__':
                     colors = {}
                     depths = {}
                     camera_timestamps = {}
-                    head_source = head_remote_camera if head_remote_camera is not None else head_camera
-                    left_source = left_remote_camera if left_remote_camera is not None else left_camera
-                    right_source = right_remote_camera if right_remote_camera is not None else right_camera
                     required_camera_missing = False
                     if head_source is not None:
                         head_frame, head_meta = head_source.get_nearest(
