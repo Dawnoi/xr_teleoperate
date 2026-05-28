@@ -272,6 +272,18 @@ def get_robot_wrist_poses(arm_ik, arm_q):
     right_pose[:3, 3] = right_se3.translation
     return left_pose, right_pose
 
+
+def pose_matrix_to_record(pose_mat):
+    pose = np.asarray(pose_mat, dtype=float)
+    from scipy.spatial.transform import Rotation as R
+    rpy = R.from_matrix(pose[:3, :3]).as_euler('xyz', degrees=False)
+    return {
+        "position": pose[:3, 3].tolist(),
+        "rpy": rpy.tolist(),
+        "rotation_matrix": pose[:3, :3].tolist(),
+        "matrix4x4": pose.tolist(),
+    }
+
 if __name__ == '__main__':
     arm_ctrl = None
     tv_wrapper = None
@@ -369,6 +381,8 @@ if __name__ == '__main__':
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     # record mode and task info
     parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
+    parser.add_argument('--record-arm-repr', type=str, choices=['qpos', 'pose', 'both'], default='qpos',
+                        help='Recording representation for arm data: joint angles (qpos), wrist pose, or both.')
     parser.add_argument('--task-dir', type = str, default = './utils/data/', help = 'path to save data')
     parser.add_argument('--task-name', type = str, default = 'pick cube', help = 'task file name for recording')
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
@@ -1210,6 +1224,13 @@ if __name__ == '__main__':
                     right_arm_state = aligned_lr_arm_q[-7:]
                     left_arm_action = aligned_sol_q[:7]
                     right_arm_action = aligned_sol_q[-7:]
+                    record_arm_repr = args.record_arm_repr
+                    need_arm_pose = record_arm_repr in {"pose", "both"}
+                    left_state_pose = right_state_pose = None
+                    left_action_pose = right_action_pose = None
+                    if need_arm_pose:
+                        left_state_pose, right_state_pose = get_robot_wrist_poses(arm_ik, aligned_lr_arm_q)
+                        left_action_pose, right_action_pose = get_robot_wrist_poses(arm_ik, aligned_sol_q)
 
                     colors = {}
                     depths = {}
@@ -1257,17 +1278,36 @@ if __name__ == '__main__':
                     if required_camera_missing:
                         logger_mp.warning("[RECORD_ALIGN] skip sample: no aligned camera frame found after record start.")
                         continue
+
+                    left_arm_state_entry = {
+                        "qpos": left_arm_state.tolist() if record_arm_repr in {"qpos", "both"} else [],
+                        "qvel": [],
+                        "torque": [],
+                    }
+                    right_arm_state_entry = {
+                        "qpos": right_arm_state.tolist() if record_arm_repr in {"qpos", "both"} else [],
+                        "qvel": [],
+                        "torque": [],
+                    }
+                    left_arm_action_entry = {
+                        "qpos": left_arm_action.tolist() if record_arm_repr in {"qpos", "both"} else [],
+                        "qvel": [],
+                        "torque": [],
+                    }
+                    right_arm_action_entry = {
+                        "qpos": right_arm_action.tolist() if record_arm_repr in {"qpos", "both"} else [],
+                        "qvel": [],
+                        "torque": [],
+                    }
+                    if need_arm_pose:
+                        left_arm_state_entry["pose"] = pose_matrix_to_record(left_state_pose)
+                        right_arm_state_entry["pose"] = pose_matrix_to_record(right_state_pose)
+                        left_arm_action_entry["pose"] = pose_matrix_to_record(left_action_pose)
+                        right_arm_action_entry["pose"] = pose_matrix_to_record(right_action_pose)
+
                     states = {
-                        "left_arm": {                                                                    
-                            "qpos":   left_arm_state.tolist(),    # numpy.array -> list
-                            "qvel":   [],                          
-                            "torque": [],                        
-                        }, 
-                        "right_arm": {                                                                    
-                            "qpos":   right_arm_state.tolist(),       
-                            "qvel":   [],                          
-                            "torque": [],                         
-                        },                        
+                        "left_arm": left_arm_state_entry,
+                        "right_arm": right_arm_state_entry,
                         "left_ee": {                                                                    
                             "qpos":   left_ee_state,           
                             "qvel":   [],                           
@@ -1280,16 +1320,8 @@ if __name__ == '__main__':
                         }, 
                     }
                     actions = {
-                        "left_arm": {                                   
-                            "qpos":   left_arm_action.tolist(),       
-                            "qvel":   [],       
-                            "torque": [],      
-                        }, 
-                        "right_arm": {                                   
-                            "qpos":   right_arm_action.tolist(),       
-                            "qvel":   [],       
-                            "torque": [],       
-                        },                         
+                        "left_arm": left_arm_action_entry,
+                        "right_arm": right_arm_action_entry,
                         "left_ee": {                                   
                             "qpos":   left_hand_action,       
                             "qvel":   [],       

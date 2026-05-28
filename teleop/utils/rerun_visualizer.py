@@ -74,6 +74,7 @@ class RerunLogger:
     def __init__(self, prefix = "", IdxRangeBoundary = 30, memory_limit = None):
         self.prefix = prefix
         self.IdxRangeBoundary = IdxRangeBoundary
+        self.blueprint = None
         rr.init(datetime.now().strftime("Runtime_%Y%m%d_%H%M%S"))
         if memory_limit:
             rr.spawn(memory_limit = memory_limit, hide_welcome_screen = True)
@@ -85,56 +86,95 @@ class RerunLogger:
             self.setup_blueprint()
 
     def setup_blueprint(self):
-        views = []
+        joint_curve_views = []
 
-        data_plot_paths = [
-                           f"{self.prefix}left_arm", 
-                           f"{self.prefix}right_arm", 
-                           f"{self.prefix}left_ee", 
-                           f"{self.prefix}right_ee"
-        ]
-        for plot_path in data_plot_paths:
-            view = rrb.TimeSeriesView(
-                origin = plot_path,
-                time_ranges=[
-                    rrb.VisibleTimeRange(
-                        "idx",
-                        start = rrb.TimeRangeBoundary.cursor_relative(seq = -self.IdxRangeBoundary),
-                        end = rrb.TimeRangeBoundary.cursor_relative(),
-                    )
-                ],
-                plot_legend = rrb.PlotLegend(visible = True),
+        for plot_path in [
+            f"{self.prefix}left_arm",
+            f"{self.prefix}right_arm",
+            f"{self.prefix}left_ee",
+            f"{self.prefix}right_ee",
+        ]:
+            joint_curve_views.append(
+                rrb.TimeSeriesView(
+                    origin=plot_path,
+                    name=plot_path.split("/")[-1],
+                    time_ranges=[
+                        rrb.VisibleTimeRange(
+                            "idx",
+                            start=rrb.TimeRangeBoundary.cursor_relative(seq=-self.IdxRangeBoundary),
+                            end=rrb.TimeRangeBoundary.cursor_relative(),
+                        )
+                    ],
+                    plot_legend=rrb.PlotLegend(visible=True),
+                )
             )
-            views.append(view)
 
-        image_plot_paths = [
-                            f"{self.prefix}colors/head",
-                            f"{self.prefix}colors/left_wrist",
-                            f"{self.prefix}colors/right_wrist",
-        ]
-        for plot_path in image_plot_paths:
-            view = rrb.Spatial2DView(
-                origin = plot_path,
-                time_ranges=[
-                    rrb.VisibleTimeRange(
-                        "idx",
-                        start = rrb.TimeRangeBoundary.cursor_relative(seq = -self.IdxRangeBoundary),
-                        end = rrb.TimeRangeBoundary.cursor_relative(),
-                    )
-                ],
+        pose_curve_views = []
+        for plot_path in [
+            f"{self.prefix}left_arm_pose",
+            f"{self.prefix}right_arm_pose",
+        ]:
+            pose_curve_views.append(
+                rrb.TimeSeriesView(
+                    origin=plot_path,
+                    name=plot_path.split("/")[-1],
+                    time_ranges=[
+                        rrb.VisibleTimeRange(
+                            "idx",
+                            start=rrb.TimeRangeBoundary.cursor_relative(seq=-self.IdxRangeBoundary),
+                            end=rrb.TimeRangeBoundary.cursor_relative(),
+                        )
+                    ],
+                    plot_legend=rrb.PlotLegend(visible=True),
+                )
             )
-            views.append(view)
 
-        grid = rrb.Grid(contents = views,
-                        grid_columns=2,
+        head_view = rrb.Spatial2DView(
+            origin=f"{self.prefix}colors/head",
+            name="head_rgb",
+            time_ranges=[
+                rrb.VisibleTimeRange(
+                    "idx",
+                    start=rrb.TimeRangeBoundary.cursor_relative(seq=-self.IdxRangeBoundary),
+                    end=rrb.TimeRangeBoundary.cursor_relative(),
+                )
+            ],
         )
-        views.append(rr.blueprint.SelectionPanel(state=rrb.PanelState.Collapsed))
-        views.append(rr.blueprint.TimePanel(state=rrb.PanelState.Collapsed))
-        rr.send_blueprint(grid)
 
+        curves_tabs = rrb.Tabs(
+            contents=[
+                rrb.Grid(contents=joint_curve_views, grid_columns=2, name="joint_curves"),
+                rrb.Grid(contents=pose_curve_views, grid_columns=2, name="pose_curves"),
+            ],
+            active_tab=0,
+            name="curves",
+        )
+        layout = rrb.Vertical(
+            contents=[head_view, curves_tabs],
+            row_shares=[2, 2],
+            name="teleop_recording",
+        )
+        self.blueprint = rrb.Blueprint(
+            layout,
+            rr.blueprint.SelectionPanel(state=rrb.PanelState.Collapsed),
+            rr.blueprint.TimePanel(state=rrb.PanelState.Expanded),
+            collapse_panels=False,
+        )
+        rr.send_blueprint(self.blueprint)
+    @staticmethod
+    def _log_pose_series(base_path: str, pose_info: dict):
+        position = pose_info.get("position", []) or []
+        rpy = pose_info.get("rpy", []) or []
+        for axis, value in zip(("x", "y", "z"), position):
+            rr.log(f"{base_path}/position/{axis}", rr.Scalar(float(value)))
+        for axis, value in zip(("roll", "pitch", "yaw"), rpy):
+            rr.log(f"{base_path}/rpy/{axis}", rr.Scalar(float(value)))
 
     def log_item_data(self, item_data: dict):
         rr.set_time_sequence("idx", item_data.get('idx', 0))
+        sample_ts = (((item_data.get("timestamps", {}) or {}).get("sample_monotonic_ns")))
+        if sample_ts is not None:
+            rr.set_time_nanos("sample_time", int(sample_ts))
 
         # Log states
         states = item_data.get('states', {}) or {}
@@ -143,6 +183,9 @@ class RerunLogger:
                 values = state_info.get('qpos', [])
                 for idx, val in enumerate(values):
                     rr.log(f"{self.prefix}{part}/states/qpos/{idx}", rr.Scalar(val))
+                pose_info = state_info.get("pose")
+                if pose_info:
+                    self._log_pose_series(f"{self.prefix}{part}_pose/states", pose_info)
 
         # Log actions
         actions = item_data.get('actions', {}) or {}
@@ -151,6 +194,9 @@ class RerunLogger:
                 values = action_info.get('qpos', [])
                 for idx, val in enumerate(values):
                     rr.log(f"{self.prefix}{part}/actions/qpos/{idx}", rr.Scalar(val))
+                pose_info = action_info.get("pose")
+                if pose_info:
+                    self._log_pose_series(f"{self.prefix}{part}_pose/actions", pose_info)
 
         # Log colors (images)
         colors = item_data.get('colors', {}) or {}
@@ -189,6 +235,15 @@ class RerunLogger:
     def log_episode_data(self, episode_data: list):
         for item_data in episode_data:
             self.log_item_data(item_data)
+
+    def save(self, path: str):
+        rr.save(path, default_blueprint=self.blueprint)
+
+    def close(self):
+        try:
+            rr.disconnect()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

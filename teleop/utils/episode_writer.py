@@ -319,6 +319,8 @@ class EpisodeWriter():
                 self.rerun_log = False
                 self.online_logger = None
                 logger_mp.warning(f"==> Failed to create episode RerunLogger, disable live viewer logging: {e}")
+        else:
+            self.online_logger = None
 
         self.is_available = False  # After the episode is created, the class is marked as unavailable until the episode is successfully saved
         logger_mp.info(f"==> New episode created: {self.episode_dir}")
@@ -422,7 +424,8 @@ class EpisodeWriter():
             rerun_item_data = dict(item_data)
             rerun_item_data['colors'] = rerun_colors
             rerun_item_data['depths'] = rerun_depths
-            self.rerun_logger.log_item_data(rerun_item_data)
+            logger = self.online_logger or self.rerun_logger
+            logger.log_item_data(rerun_item_data)
 
     def save_episode(self):
         """
@@ -437,6 +440,19 @@ class EpisodeWriter():
         """
         with open(self.json_path, "a", encoding="utf-8") as f:
             f.write("\n]\n}")      # Close the JSON array and object
+
+        if self.rerun_log and self.online_logger is not None:
+            try:
+                rrd_path = os.path.join(self.episode_dir, "rerun.rrd")
+                self.online_logger.save(rrd_path)
+                logger_mp.info(f"==> Rerun recording saved to {rrd_path}.")
+            except Exception as e:
+                logger_mp.warning(f"==> Failed to save Rerun recording: {e}")
+            try:
+                self.online_logger.close()
+            except Exception:
+                pass
+            self.online_logger = None
 
         self.need_save = False     # Reset the save flag
         self.is_available = True   # Mark the class as available after saving
@@ -453,3 +469,14 @@ class EpisodeWriter():
             time.sleep(0.01)
         self.stop_worker = True
         self.worker_thread.join()
+        if self.online_logger is not None:
+            try:
+                self.online_logger.close()
+            except Exception:
+                pass
+            self.online_logger = None
+        if self.rerun_logger is not None:
+            try:
+                self.rerun_logger.close()
+            except Exception:
+                pass

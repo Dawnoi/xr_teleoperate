@@ -637,10 +637,45 @@ teleop_hand_and_arm.py
   - 保存图片/深度/音频
   - 追加 JSON
   - 可选 `RerunLogger.log_item_data(...)`
-- `_save_episode()` 负责收尾写 JSON 尾部
+- `_save_episode()` 负责收尾写 JSON 尾部，并保存 `rerun.rrd`
 
 作用：
 - 异步录制，尽量不阻塞 teleop 主循环
+- 录制时会按 **host monotonic** 做近邻时间对齐，而不是简单拿 latest frame
+- 图像文件名现在会带相机 monotonic 时间戳，便于排查
+
+### 当前录制对齐策略
+
+当前数据采集链路已经改成“可靠版”：
+
+1. 主循环定义一个 `sample_monotonic_ns` 作为样本锚点
+2. arm state / action 各自维护环形缓冲
+3. 本地/远端相机也维护环形缓冲
+4. 录制时分别从三类缓冲中取 **最接近 `sample_monotonic_ns`** 的项
+5. 若相机在允许时间窗内没有对齐到帧，则跳过这条 sample
+
+因此 `data.json` 中的：
+
+- `timestamps.state`
+- `timestamps.action`
+- `timestamps.camera.*`
+
+才是离线对齐的正式依据。
+
+### 当前 Rerun 形态
+
+Rerun 现在分为两种用途：
+
+1. **在线监看**
+   - 顶部：`head` 图像
+   - 底部：曲线 tab
+     - `joint_curves`
+     - `pose_curves`
+   - 时间轴默认展开
+
+2. **离线回放**
+   - 每个 episode 保存后会生成 `rerun.rrd`
+   - 可直接用 `rerun episode_xxxx/rerun.rrd` 回放
 
 ---
 
@@ -818,4 +853,3 @@ XRRoboticsWrapper.get_tele_data()
 - `robot_arm_ik.py` 负责把手腕目标位姿变成关节角；
 - `robot_arm.py` / `robot_hand_*` 负责把这些目标持续下发到真机 DDS；
 - `demo_xrobotics_mujoco.py` 则把同一套控制逻辑映射到 MuJoCo 验证。
-

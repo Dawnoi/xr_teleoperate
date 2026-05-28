@@ -122,6 +122,12 @@ python teleop/teleop_hand_and_arm.py \
 - `--left-zmq-endpoint`
 - `--right-zmq-endpoint`
 
+机械臂录制表示参数：
+
+- `--record-arm-repr qpos`：只录关节角（默认）
+- `--record-arm-repr pose`：只录左右腕位姿
+- `--record-arm-repr both`：同时录关节角和左右腕位姿
+
 示例（假设本地三路相机分别是 `/dev/video0 /dev/video2 /dev/video4`）：
 
 ```bash
@@ -237,10 +243,12 @@ bash scripts/start_real_robot_wired.sh \
 说明：
 
 - **想看 Rerun 实时图像时不要加 `--headless`**。
-- 当前 Rerun 会显示：
-  - `online/colors/head`
-  - `online/colors/left_wrist`
-  - `online/colors/right_wrist`
+- 当前 Rerun 默认布局：
+  - 上半部分：`head` 实时图像（居中大图）
+  - 下半部分：曲线区
+    - `joint_curves` tab：`left/right_arm`、`left/right_ee`
+    - `pose_curves` tab：`left/right_arm` 的 `xyz/rpy`
+- 时间轴面板默认展开，可直接拖动回放。
 
 说明：
 
@@ -257,17 +265,43 @@ bash scripts/start_real_robot_wired.sh \
   - `right_arm`
   - `left_ee`
   - `right_ee`
+- 其中 `left_arm/right_arm` 默认写 `qpos`；若设置 `--record-arm-repr pose/both`，会额外或仅写：
+  - `pose.position`
+  - `pose.rpy`
+  - `pose.rotation_matrix`
+  - `pose.matrix4x4`
 - 不再录制 `body` / 全身数据。
 - 当前 `depths/` 仍未接深度相机录制链路。
 
-### 1.0.2 录制操作
+### 1.0.2 对齐机制（可靠版）
+
+当前录制不再简单取“latest frame”，而是按 **host monotonic clock** 做近邻对齐：
+
+- `sample_monotonic_ns`：当前样本锚点时间
+- `state.host_monotonic_ns`：离该锚点最近的一份 arm state
+- `action.host_monotonic_ns`：离该锚点最近的一份 arm action
+- `camera.*.host_recv_monotonic_ns` / `camera.*.host_monotonic_ns`：离该锚点最近的一帧图像
+
+具体行为：
+
+- 相机端维护环形缓冲，按 `get_nearest(sample_t)` 选最近帧
+- arm state / action 也维护时间缓冲，按 `sample_t` 选最近项
+- 录制开始后第一条样本不会吃录制前旧缓存帧
+- 若某路已启用相机在允许时间窗内没有找到匹配帧，该条 sample 会被跳过
+
+因此：
+
+- 图像文件名中的时间戳只是辅助排查
+- 真正的对齐依据以 `data.json` 中的 `timestamps` 字段为准
+
+### 1.0.3 录制操作
 
 - `r`：启动 teleop
 - `s`：开始录制当前 episode
 - 再按一次 `s`：停止并保存当前 episode
 - `q`：退出
 
-### 1.0.3 时间戳字段
+### 1.0.4 时间戳字段
 
 每条 `data.json` item 新增：
 
@@ -276,6 +310,14 @@ bash scripts/start_real_robot_wired.sh \
   "sample_wall_time_ns": ...,
   "sample_monotonic_ns": ...,
   "teleop_input_perf_counter_ns": ...,
+  "state": {
+    "host_monotonic_ns": ...,
+    "delta_to_sample_ns": ...
+  },
+  "action": {
+    "host_monotonic_ns": ...,
+    "delta_to_sample_ns": ...
+  },
   "camera": {
     "head": {
       "camera_name": "head",
@@ -283,6 +325,9 @@ bash scripts/start_real_robot_wired.sh \
       "frame_seq": 123,
       "host_wall_time_ns": ...,
       "host_monotonic_ns": ...,
+      "host_recv_monotonic_ns": ...,
+      "align_target_monotonic_ns": ...,
+      "delta_to_sample_ns": ...,
       "read_latency_ms": ...,
       "shape": [640, 480, 3]
     }
@@ -293,9 +338,31 @@ bash scripts/start_real_robot_wired.sh \
 含义：
 
 - `sample_wall_time_ns`：该条样本写入前的主机墙钟时间。
-- `sample_monotonic_ns`：该条样本写入前的主机单调时钟，适合做时差计算。
+- `sample_monotonic_ns`：该条样本的统一对齐锚点时间，适合做时差计算。
 - `teleop_input_perf_counter_ns`：本轮 teleop 输入到达主循环的高精度计时点。
-- `camera.*`：对应相机最新帧的主机侧采样时间与读取耗时。
+- `state/action.*.delta_to_sample_ns`：该状态 / 动作与样本锚点的时间差。
+- `camera.*.delta_to_sample_ns`：该图像帧与样本锚点的时间差。
+- `camera.*`：对应相机匹配帧的 host 侧接收时间与读取耗时。
+
+### 1.0.5 Rerun 回放
+
+每个 episode 保存完成后，目录下会额外生成：
+
+```text
+episode_xxxx/rerun.rrd
+```
+
+离线回放：
+
+```bash
+rerun ./utils/data/<task_name>/episode_0001/rerun.rrd
+```
+
+如果 `rerun` 不在 PATH，可直接用 conda 环境里的可执行文件：
+
+```bash
+/home/dx/miniconda3/envs/tv/bin/rerun ./utils/data/<task_name>/episode_0001/rerun.rrd
+```
 
 一键脚本：
 
