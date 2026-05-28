@@ -1,0 +1,20 @@
+[2026-05-25T10:57:31] Output dir: /home/dx/unitree_ws/src/xr_teleoperate/utils/data/dds_debug/20260525_105731_wlo1
+[2026-05-25T10:57:31] Initializing DDS: domain=0, iface=wlo1
+[2026-05-25T10:57:31] DDS init OK
+[2026-05-25T10:57:31] subscriber ready: lowstate -> rt/lowstate
+[2026-05-25T10:57:31] subscriber ready: lf_lowstate -> rt/lf/lowstate
+[2026-05-25T10:57:31] subscriber ready: dex1_left_state -> rt/dex1/left/state
+[2026-05-25T10:57:31] subscriber ready: dex1_right_state -> rt/dex1/right/state
+[2026-05-25T10:57:31] FIRST sample on lowstate at 0.017s: {'motor_count': 35, 'first_motor_q': 0.0, 'first_motor_dq': 0.0, 'sample_q_head': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 'sample_dq_head': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+[2026-05-25T10:57:31] FIRST sample on lf_lowstate at 0.060s: {'motor_count': 35, 'first_motor_q': 0.0, 'first_motor_dq': 0.0, 'sample_q_head': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 'sample_dq_head': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+[2026-05-25T10:57:31] FIRST sample on dex1_left_state at 0.060s: {'state_count': 1, 'first_q': 2.7015624046325684, 'sample_q_head': [2.7015624046325684]}
+[2026-05-25T10:57:31] FIRST sample on dex1_right_state at 0.061s: {'state_count': 1, 'first_q': 2.6946825981140137, 'sample_q_head': [2.6946825981140137]}
+[2026-05-25T10:57:32] heartbeat: lowstate=20, lf_lowstate=20, dex1_left_state=20, dex1_right_state=20
+[2026-05-25T10:57:33] heartbeat: lowstate=36, lf_lowstate=36, dex1_left_state=36, dex1_right_state=36
+[2026-05-25T10:57:34] heartbeat: lowstate=52, lf_lowstate=52, dex1_left_state=52, dex1_right_state=52
+[2026-05-25T10:57:35] heartbeat: lowstate=68, lf_lowstate=68, dex1_left_state=68, dex1_right_state=68
+[2026-05-25T10:57:36] heartbeat: lowstate=88, lf_lowstate=88, dex1_left_state=88, dex1_right_state=88
+[2026-05-25T10:57:37] heartbeat: lowstate=109, lf_lowstate=109, dex1_left_state=109, dex1_right_state=109
+[2026-05-25T10:57:38] heartbeat: lowstate=129, lf_lowstate=129, dex1_left_state=129, dex1_right_state=129
+[2026-05-25T10:57:39] copied CycloneDDS log to /home/dx/unitree_ws/src/xr_teleoperate/utils/data/dds_debug/20260525_105731_wlo1/cdds.LOG
+[2026-05-25T10:57:39] summary written to /home/dx/unitree_ws/src/xr_teleoperate/utils/data/dds_debug/20260525_105731_wlo1/summary.json

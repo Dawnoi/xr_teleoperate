@@ -1,0 +1,310 @@
+1779677851.399288 [0]     python: config: Domain/General/MulticastRecvNetworkInterfaceAddresses/#text: preferred {}
+1779677851.399303 [0]     python: config: Domain/General/Interfaces/NetworkInterface[@autodetermine]: false {}
+1779677851.399307 [0]     python: config: Domain/General/Interfaces/NetworkInterface[@name]: wlo1 {0}
+1779677851.399310 [0]     python: config: Domain/General/Interfaces/NetworkInterface[@address]:  {}
+1779677851.399313 [0]     python: config: Domain/General/Interfaces/NetworkInterface[@priority]: default {0}
+1779677851.399315 [0]     python: config: Domain/General/Interfaces/NetworkInterface[@prefer_multicast]: false {}
+1779677851.399318 [0]     python: config: Domain/General/Interfaces/NetworkInterface[@presence_required]: true {}
+1779677851.399321 [0]     python: config: Domain/General/Interfaces/NetworkInterface[@multicast]: default {0}
+1779677851.399323 [0]     python: config: Domain/General/ExternalNetworkAddress/#text: auto {}
+1779677851.399326 [0]     python: config: Domain/General/ExternalNetworkMask/#text: 0.0.0.0 {}
+1779677851.399328 [0]     python: config: Domain/General/AllowMulticast/#text: default {}
+1779677851.399331 [0]     python: config: Domain/General/MulticastTimeToLive/#text: 32 {}
+1779677851.399333 [0]     python: config: Domain/General/DontRoute/#text: false {}
+1779677851.399336 [0]     python: config: Domain/General/Transport/#text: udp {}
+1779677851.399338 [0]     python: config: Domain/General/EnableMulticastLoopback/#text: true {}
+1779677851.399341 [0]     python: config: Domain/General/MaxMessageSize/#text: 14720 B {}
+1779677851.399344 [0]     python: config: Domain/General/MaxRexmitMessageSize/#text: 1456 B {}
+1779677851.399346 [0]     python: config: Domain/General/FragmentSize/#text: 1344 B {}
+1779677851.399348 [0]     python: config: Domain/General/RedundantNetworking/#text: false {}
+1779677851.399351 [0]     python: config: Domain/General/EntityAutoNaming/#text: empty {}
+1779677851.399354 [0]     python: config: Domain/General/EntityAutoNaming[@seed]: 742855395 3567791012 1292726016 234022782 771435742 1574782171 1050751075 2095469634 {}
+1779677851.399358 [0]     python: config: Domain/Sizing/ReceiveBufferSize/#text: 1 MiB {}
+1779677851.399361 [0]     python: config: Domain/Sizing/ReceiveBufferChunkSize/#text: 128 KiB {}
+1779677851.399363 [0]     python: config: Domain/Compatibility/StandardsConformance/#text: lax {}
+1779677851.399366 [0]     python: config: Domain/Compatibility/ExplicitlyPublishQosSetToDefault/#text: false {}
+1779677851.399368 [0]     python: config: Domain/Compatibility/ManySocketsMode/#text: single {}
+1779677851.399371 [0]     python: config: Domain/Compatibility/AssumeRtiHasPmdEndpoints/#text: false {}
+1779677851.399373 [0]     python: config: Domain/Discovery/Tag/#text:  {}
+1779677851.399376 [0]     python: config: Domain/Discovery/ExternalDomainId/#text: 0 {}
+1779677851.399378 [0]     python: config: Domain/Discovery/DSGracePeriod/#text: 30 s {}
+1779677851.399381 [0]     python: config: Domain/Discovery/ParticipantIndex/#text: none {}
+1779677851.399384 [0]     python: config: Domain/Discovery/MaxAutoParticipantIndex/#text: 9 {}
+1779677851.399386 [0]     python: config: Domain/Discovery/SPDPMulticastAddress/#text: 239.255.0.1 {}
+1779677851.399388 [0]     python: config: Domain/Discovery/SPDPInterval/#text: 30 s {}
+1779677851.399391 [0]     python: config: Domain/Discovery/DefaultMulticastAddress/#text: auto {}
+1779677851.399394 [0]     python: config: Domain/Discovery/Ports/Base/#text: 7400 {}
+1779677851.399396 [0]     python: config: Domain/Discovery/Ports/DomainGain/#text: 250 {}
+1779677851.399399 [0]     python: config: Domain/Discovery/Ports/ParticipantGain/#text: 2 {}
+1779677851.399401 [0]     python: config: Domain/Discovery/Ports/MulticastMetaOffset/#text: 0 {}
+1779677851.399404 [0]     python: config: Domain/Discovery/Ports/UnicastMetaOffset/#text: 10 {}
+1779677851.399406 [0]     python: config: Domain/Discovery/Ports/MulticastDataOffset/#text: 1 {}
+1779677851.399409 [0]     python: config: Domain/Discovery/Ports/UnicastDataOffset/#text: 11 {}
+1779677851.399418 [0]     python: config: Domain/Discovery/EnableTopicDiscoveryEndpoints/#text: false {}
+1779677851.399421 [0]     python: config: Domain/Discovery/LeaseDuration/#text: 10 s {}
+1779677851.399427 [0]     python: config: Domain/Tracing/Category/#text: fatal,error,warning,info,config {0}
+1779677851.399430 [0]     python: config: Domain/Tracing/OutputFile/#text: /tmp/cdds.LOG {0}
+1779677851.399432 [0]     python: config: Domain/Tracing/AppendToFile/#text: false {}
+1779677851.399434 [0]     python: config: Domain/Tracing/PacketCaptureFile/#text:  {}
+1779677851.399437 [0]     python: config: Domain/Internal/DeliveryQueueMaxSamples/#text: 256 {}
+1779677851.399439 [0]     python: config: Domain/Internal/PrimaryReorderMaxSamples/#text: 128 {}
+1779677851.399442 [0]     python: config: Domain/Internal/SecondaryReorderMaxSamples/#text: 128 {}
+1779677851.399444 [0]     python: config: Domain/Internal/DefragUnreliableMaxSamples/#text: 4 {}
+1779677851.399446 [0]     python: config: Domain/Internal/DefragReliableMaxSamples/#text: 16 {}
+1779677851.399449 [0]     python: config: Domain/Internal/BuiltinEndpointSet/#text: writers {}
+1779677851.399451 [0]     python: config: Domain/Internal/MeasureHbToAckLatency/#text: false {}
+1779677851.399453 [0]     python: config: Domain/Internal/UnicastResponseToSPDPMessages/#text: true {}
+1779677851.399456 [0]     python: config: Domain/Internal/SynchronousDeliveryPriorityThreshold/#text: 0 {}
+1779677851.399458 [0]     python: config: Domain/Internal/SynchronousDeliveryLatencyBound/#text: inf {}
+1779677851.399461 [0]     python: config: Domain/Internal/MaxParticipants/#text: 0 {}
+1779677851.399463 [0]     python: config: Domain/Internal/AccelerateRexmitBlockSize/#text: 0 {}
+1779677851.399465 [0]     python: config: Domain/Internal/RetransmitMerging/#text: never {}
+1779677851.399468 [0]     python: config: Domain/Internal/RetransmitMergingPeriod/#text: 5 ms {}
+1779677851.399470 [0]     python: config: Domain/Internal/HeartbeatInterval/#text: 100 ms {}
+1779677851.399473 [0]     python: config: Domain/Internal/HeartbeatInterval[@min]: 5 ms {}
+1779677851.399475 [0]     python: config: Domain/Internal/HeartbeatInterval[@minsched]: 20 ms {}
+1779677851.399478 [0]     python: config: Domain/Internal/HeartbeatInterval[@max]: 8 s {}
+1779677851.399480 [0]     python: config: Domain/Internal/MaxQueuedRexmitBytes/#text: 512 KiB {}
+1779677851.399482 [0]     python: config: Domain/Internal/MaxQueuedRexmitMessages/#text: 200 {}
+1779677851.399485 [0]     python: config: Domain/Internal/WriterLingerDuration/#text: 1 s {}
+1779677851.399487 [0]     python: config: Domain/Internal/SocketReceiveBufferSize[@min]: default {}
+1779677851.399490 [0]     python: config: Domain/Internal/SocketReceiveBufferSize[@max]: default {}
+1779677851.399493 [0]     python: config: Domain/Internal/SocketSendBufferSize[@min]: 64 KiB {}
+1779677851.399495 [0]     python: config: Domain/Internal/SocketSendBufferSize[@max]: default {}
+1779677851.399497 [0]     python: config: Domain/Internal/NackDelay/#text: 100 ms {}
+1779677851.399500 [0]     python: config: Domain/Internal/AckDelay/#text: 10 ms {}
+1779677851.399502 [0]     python: config: Domain/Internal/AutoReschedNackDelay/#text: 3 s {}
+1779677851.399505 [0]     python: config: Domain/Internal/PreEmptiveAckDelay/#text: 10 ms {}
+1779677851.399507 [0]     python: config: Domain/Internal/ScheduleTimeRounding/#text: 0 s {}
+1779677851.399509 [0]     python: config: Domain/Internal/DDSI2DirectMaxThreads/#text: 1 {}
+1779677851.399512 [0]     python: config: Domain/Internal/SquashParticipants/#text: false {}
+1779677851.399514 [0]     python: config: Domain/Internal/SPDPResponseMaxDelay/#text: 0 s {}
+1779677851.399517 [0]     python: config: Domain/Internal/LateAckMode/#text: false {}
+1779677851.399519 [0]     python: config: Domain/Internal/RetryOnRejectBestEffort/#text: false {}
+1779677851.399521 [0]     python: config: Domain/Internal/GenerateKeyhash/#text: false {}
+1779677851.399524 [0]     python: config: Domain/Internal/MaxSampleSize/#text: 2147483647 B {}
+1779677851.399526 [0]     python: config: Domain/Internal/WriteBatch/#text: false {}
+1779677851.399532 [0]     python: config: Domain/Internal/LivelinessMonitoring/#text: false {}
+1779677851.399535 [0]     python: config: Domain/Internal/LivelinessMonitoring[@StackTraces]: true {}
+1779677851.399538 [0]     python: config: Domain/Internal/LivelinessMonitoring[@Interval]: 1 s {}
+1779677851.399540 [0]     python: config: Domain/Internal/MonitorPort/#text: -1 {}
+1779677851.399543 [0]     python: config: Domain/Internal/PrioritizeRetransmit/#text: true {}
+1779677851.399545 [0]     python: config: Domain/Internal/UseMulticastIfMreqn/#text: 0 {}
+1779677851.399547 [0]     python: config: Domain/Internal/RediscoveryBlacklistDuration/#text: 0 s {}
+1779677851.399550 [0]     python: config: Domain/Internal/RediscoveryBlacklistDuration[@enforce]: false {}
+1779677851.399552 [0]     python: config: Domain/Internal/MultipleReceiveThreads/#text: default {}
+1779677851.399555 [0]     python: config: Domain/Internal/MultipleReceiveThreads[@maxretries]: 4294967295 {}
+1779677851.399558 [0]     python: config: Domain/Internal/Test/XmitLossiness/#text: 0 {}
+1779677851.399561 [0]     python: config: Domain/Internal/Watermarks/WhcLow/#text: 1 KiB {}
+1779677851.399563 [0]     python: config: Domain/Internal/Watermarks/WhcHigh/#text: 500 KiB {}
+1779677851.399566 [0]     python: config: Domain/Internal/Watermarks/WhcHighInit/#text: 30 KiB {}
+1779677851.399568 [0]     python: config: Domain/Internal/Watermarks/WhcAdaptive/#text: true {}
+1779677851.399571 [0]     python: config: Domain/Internal/BurstSize/MaxRexmit/#text: 1 MiB {}
+1779677851.399574 [0]     python: config: Domain/Internal/BurstSize/MaxInitTransmit/#text: 4294967295 {}
+1779677851.399576 [0]     python: config: Domain/Internal/EnableExpensiveChecks/#text:  [ignored] {}
+1779677851.399579 [0]     python: config: Domain/TCP/NoDelay/#text: true {}
+1779677851.399582 [0]     python: config: Domain/TCP/Port/#text: -1 {}
+1779677851.399584 [0]     python: config: Domain/TCP/ReadTimeout/#text: 2 s {}
+1779677851.399586 [0]     python: config: Domain/TCP/WriteTimeout/#text: 2 s {}
+1779677851.399589 [0]     python: config: Domain/TCP/AlwaysUsePeeraddrForUnicast/#text: false {}
+1779677851.399591 [0]     python: config: Domain[@Id]: 0 {0}
+1779677851.399611 [0]     python: started at 1779677851.06399596 -- 2026-05-25 10:57:31+08:00
+1779677851.399614 [0]     python: udp initialized
+1779677851.401445 [0]     python: interfaces: lo udp/127.0.0.1(q1) wlo1 wireless udp/192.168.123.222(q9) docker0 udp/172.17.0.1(q9)
+1779677851.401461 [0]     python: selected interfaces: wlo1 (index 3 priority 0)
+1779677851.401464 [0]     python: presumed flaky multicast, use for SPDP only
+1779677851.401478 [0]     python: ownip: udp/192.168.123.222
+1779677851.401481 [0]     python: extmask: invalid/0 (not applicable)
+1779677851.401483 [0]     python: SPDP MC: udp/239.255.0.1
+1779677851.401485 [0]     python: default MC: udp/239.255.0.1
+1779677851.401487 [0]     python: SSM support included
+1779677851.401571 [0]     python: failed to increase socket receive buffer size to 1048576 bytes, continuing with 425984 bytes
+1779677851.401581 [0]     python: rtps_init: uc ports: disc 0 data 0
+1779677851.401584 [0]     python: rtps_init: domainid 0 participantid -2
+1779677851.401586 [0]     python: Unicast Ports: discovery 48379 data 48379
+1779677851.401594 [0]     python: failed to increase socket receive buffer size to 1048576 bytes, continuing with 425984 bytes
+1779677851.401605 [0]     python: failed to increase socket receive buffer size to 1048576 bytes, continuing with 425984 bytes
+1779677851.401610 [0]     python: Multicast Ports: discovery 7400 data 7401 
+1779677851.401617 [0]     python: failed to increase socket receive buffer size to 1048576 bytes, continuing with 425984 bytes
+1779677851.401625 [0]     python: interface wlo1: transmit port 48644
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        1779677851.402492 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.403560 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.403575 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.403580 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.403585 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.403590 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.403595 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.403599 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.403605 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.403608 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.412461 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.439936 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.164:39958 failed with retcode -1
+1779677851.503769 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.503829 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.503842 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.503858 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.503874 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.503886 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.503898 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.503913 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.503924 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.603850 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.603924 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.603943 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.603966 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.603986 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.604004 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.604019 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.604040 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.604057 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.703900 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.703945 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.703954 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.703967 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.703977 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.704004 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.704012 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.704022 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.704029 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.704038 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.704046 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.803988 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.804050 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.804061 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.804074 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.804089 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.804101 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.804116 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.804131 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.804140 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.904135 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.904202 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.904222 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.904237 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.904251 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.904262 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677851.904275 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677851.904292 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677851.904308 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.004228 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.004297 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677852.004310 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.004324 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.004338 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.004349 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677852.004364 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.004380 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.004392 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.204358 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.204430 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677852.204449 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.204468 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.204488 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.204504 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677852.204543 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.204562 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.204575 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.402708 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.404491 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.404542 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677852.404553 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.404565 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.404578 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.404587 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677852.404596 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.404609 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.404624 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.412627 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.804700 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.804760 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677852.804771 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.804784 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.804795 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.804806 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677852.804830 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677852.804844 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677852.804855 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677853.204864 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677853.204924 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677853.204934 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677853.204946 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677853.204957 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677853.204964 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677853.204971 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677853.204982 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677853.204992 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677853.402855 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677853.412830 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677854.004951 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677854.005019 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677854.005030 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677854.005041 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677854.005060 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677854.005097 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677854.005108 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677854.005129 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677854.005142 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677854.402992 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677854.412982 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677854.805108 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677854.805168 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677854.805178 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677854.805195 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677854.805211 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677854.805225 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677854.805238 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677854.805254 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677854.805263 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677855.413162 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677855.451595 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.164:42040 failed with retcode -1
+1779677855.737889 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.164:39958 failed with retcode -1
+1779677856.071793 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.071850 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677856.071859 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.171822 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.171872 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677856.171881 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.171889 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.171895 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677856.171901 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.272002 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.272054 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677856.272066 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.372085 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.372152 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677856.372168 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.405183 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.405224 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677856.405234 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.405245 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.405257 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.405264 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.413233 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.472186 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.472217 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677856.472222 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.572246 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.572298 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677856.572307 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.672363 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.672388 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677856.672393 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677856.872442 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677856.872498 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677856.872510 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677857.072566 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677857.072605 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677857.072613 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677857.413309 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677857.472620 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677857.472636 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677857.472641 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677857.872827 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677857.872884 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677857.872898 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677858.005249 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677858.005295 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.204:7412 failed with retcode -1
+1779677858.005302 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677858.005310 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1
+1779677858.005319 [0]        tev: ddsi_udp_conn_write to udp/239.255.0.1:7400 failed with retcode -1
+1779677858.005324 [0]        tev: ddsi_udp_conn_write to udp/192.168.123.222:48379 failed with retcode -1

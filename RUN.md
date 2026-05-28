@@ -73,7 +73,62 @@ python teleop/teleop_hand_and_arm.py \
   --base-max-z 1.0 \
   --base-stick-deadzone 0.10
 ```
-
+```
+python teleop/teleop_hand_and_arm.py \
+  --input-mode controller \
+  --arm G1_29 \
+  --ee dex1 \
+  --network-interface wlo1 \
+  --base-controller g1d_agv \
+  --controller-deadman grip \
+  --head-reference-mode fixed_per_grip \
+  --controller-mapping-mode anchored_safe \
+  --controller-orientation-mode absolute \
+  --max-arm-joint-speed 5.0 \
+  --arm-workspace-mode tapered \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
+  --arm-workspace-x-max-low 0.38 \
+  --arm-workspace-x-max-high 0.52 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
+  --base-max-vx 0.20 \
+  --base-max-wz 0.60 \
+  --base-max-z 1.0 \
+  --base-stick-deadzone 0.10
+```
+```
+python teleop/teleop_hand_and_arm.py \
+    --input-mode controller \
+    --arm G1_29 \
+    --ee dex1 \
+    --network-interface eno1 \
+    --base-controller g1d_agv \
+    --controller-deadman grip \
+    --head-reference-mode fixed_per_grip \
+    --controller-mapping-mode anchored_safe \
+    --controller-orientation-mode relative \
+    --max-arm-joint-speed 5.0 \
+    --arm-workspace-mode tapered \
+    --arm-workspace-z-min -0.05 \
+    --arm-workspace-z-max 0.45 \
+    --arm-workspace-x-min 0.10 \
+    --arm-workspace-x-max-low 0.38 \
+    --arm-workspace-x-max-high 0.52 \
+    --arm-workspace-y-max-low 0.24 \
+    --arm-workspace-y-max-high 0.38 \
+    --base-max-vx 0.20 \
+    --base-max-wz 0.60 \
+    --base-max-z 1.0 \
+    --base-stick-deadzone 0.10 \
+    --record \
+    --task-dir ./utils/data \
+    --task-name pick_cube \
+    --task-goal "pick up cube" \
+    --task-desc "xr teleop data collection" \
+    --task-steps "reach; grasp; lift; place"
+```
 一键脚本：
 
 ```bash
@@ -423,7 +478,7 @@ python teleop/demo_xrobotics_mujoco.py \
   --controller-deadman grip \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
-  --controller-orientation-mode relative \
+  --controller-orientation-mode absolute \
   --base-max-vx 0.15 \
   --base-max-wz 0.45 \
   --base-max-z 1.0 \
@@ -493,7 +548,7 @@ python teleop/demo_xrobotics_mujoco.py \
   --controller-deadman grip \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
-  --controller-orientation-mode relative \
+  --controller-orientation-mode  \
   --arm-workspace-mode box \
   --arm-workspace-min 0.10 -0.32 -0.08 \
   --arm-workspace-max 0.45 0.32 0.42 \

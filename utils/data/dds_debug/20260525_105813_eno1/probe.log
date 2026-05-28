@@ -1,0 +1,7 @@
+[2026-05-25T10:58:13] Output dir: /home/dx/unitree_ws/src/xr_teleoperate/utils/data/dds_debug/20260525_105813_eno1
+[2026-05-25T10:58:13] Initializing DDS: domain=0, iface=eno1
+[2026-05-25T10:58:13] DDS init OK
+[2026-05-25T10:58:13] subscriber ready: lowstate -> rt/lowstate
+[2026-05-25T10:58:13] subscriber ready: lf_lowstate -> rt/lf/lowstate
+[2026-05-25T10:58:13] subscriber ready: dex1_left_state -> rt/dex1/left/state
+[2026-05-25T10:58:13] subscriber ready: dex1_right_state -> rt/dex1/right/state
