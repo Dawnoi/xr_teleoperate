@@ -107,29 +107,26 @@ class RerunLogger:
             )
             views.append(view)
 
-        # image_plot_paths = [
-        #                     f"{self.prefix}colors/color_0",
-        #                     f"{self.prefix}colors/color_1",
-        #                     f"{self.prefix}colors/color_2",
-        #                     f"{self.prefix}colors/color_3"
-        # ]
-        # for plot_path in image_plot_paths:
-        #     view = rrb.Spatial2DView(
-        #         origin = plot_path,
-        #         time_ranges=[
-        #             rrb.VisibleTimeRange(
-        #                 "idx",
-        #                 start = rrb.TimeRangeBoundary.cursor_relative(seq = -self.IdxRangeBoundary),
-        #                 end = rrb.TimeRangeBoundary.cursor_relative(),
-        #             )
-        #         ],
-        #     )
-        #     views.append(view)
+        image_plot_paths = [
+                            f"{self.prefix}colors/head",
+                            f"{self.prefix}colors/left_wrist",
+                            f"{self.prefix}colors/right_wrist",
+        ]
+        for plot_path in image_plot_paths:
+            view = rrb.Spatial2DView(
+                origin = plot_path,
+                time_ranges=[
+                    rrb.VisibleTimeRange(
+                        "idx",
+                        start = rrb.TimeRangeBoundary.cursor_relative(seq = -self.IdxRangeBoundary),
+                        end = rrb.TimeRangeBoundary.cursor_relative(),
+                    )
+                ],
+            )
+            views.append(view)
 
         grid = rrb.Grid(contents = views,
-                        grid_columns=2,               
-                        column_shares=[1, 1],
-                        row_shares=[1, 1], 
+                        grid_columns=2,
         )
         views.append(rr.blueprint.SelectionPanel(state=rrb.PanelState.Collapsed))
         views.append(rr.blueprint.TimePanel(state=rrb.PanelState.Collapsed))
@@ -155,11 +152,20 @@ class RerunLogger:
                 for idx, val in enumerate(values):
                     rr.log(f"{self.prefix}{part}/actions/qpos/{idx}", rr.Scalar(val))
 
-        # # Log colors (images)
-        # colors = item_data.get('colors', {}) or {}
-        # for color_key, color_val in colors.items():
-        #     if color_val is not None:
-        #         rr.log(f"{self.prefix}colors/{color_key}", rr.Image(color_val))
+        # Log colors (images)
+        colors = item_data.get('colors', {}) or {}
+        for color_key, color_val in colors.items():
+            if color_val is None:
+                continue
+            if isinstance(color_val, str):
+                continue
+            if hasattr(color_val, "shape"):
+                image = color_val
+                if len(image.shape) == 3 and image.shape[2] == 3:
+                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                elif len(image.shape) == 3 and image.shape[2] == 4:
+                    image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+                rr.log(f"{self.prefix}colors/{color_key}", rr.Image(image))
 
         # # Log depths (images)
         # depths = item_data.get('depths', {}) or {}

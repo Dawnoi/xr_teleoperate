@@ -98,9 +98,14 @@ python teleop/teleop_hand_and_arm.py \
   --base-max-z 1.0 \
   --base-stick-deadzone 0.10
 ```
-### 1.0 数据采集（带本地 RGB 相机）
+### 1.0 数据采集（本地 RGB / 远端 ZMQ Raw）
 
-当前录制链路支持把本地 `cv2.VideoCapture` 相机一起写入 episode：
+当前录制链路支持两种相机接入方式：
+
+1. 本地 `cv2.VideoCapture`
+2. 远端 `ZMQ raw` 图像流
+
+本地相机参数：
 
 - `--head-camera-id`
 - `--left-camera-id`
@@ -110,6 +115,12 @@ python teleop/teleop_hand_and_arm.py \
 - `--camera-fps`
 - `--camera-fourcc`
 - `--camera-buffer-size`
+
+远端相机参数：
+
+- `--head-zmq-endpoint`
+- `--left-zmq-endpoint`
+- `--right-zmq-endpoint`
 
 示例（假设本地三路相机分别是 `/dev/video0 /dev/video2 /dev/video4`）：
 
@@ -156,10 +167,87 @@ python teleop/teleop_hand_and_arm.py \
     --camera-buffer-size 1
 ```
 
+### 1.0.1 远端单路 ZED 数采（推荐：取 LEFT 作为 RGB）
+
+当前推荐把远端 ZED 的 raw 数采链路配置为：
+
+- sender 侧输入是 ZED 双目图时，`--zmq-raw` 自动取 **LEFT half**
+- host 侧按单路 RGB 录入 `colors/head` / `colors/left_wrist` / `colors/right_wrist`
+
+#### 远端 sender（例如 `192.168.123.164`）
+
+目录：
+
+```bash
+cd ~/XRoboToolkit-Ubuntu-Video-Sender-Webcam-dev-test
+```
+
+编译：
+
+```bash
+make clean
+make
+```
+
+启动单路 ZED raw 发布（这里把它作为 `head` 相机）：
+
+```bash
+./OrinVideoSender \
+  --send \
+  --zmq-raw tcp://*:5556 \
+  --camera /dev/video0 \
+  --width 640 \
+  --height 480 \
+  --fps 30
+```
+
+说明：
+
+- `--zmq-raw` 现在发送的是与 `xr_teleoperate` 兼容的 `XRAW` 协议。
+- 若输入本身是 ZED 的左右拼接图，sender 会自动裁出 **LEFT** 半边用于数采。
+- 若要映射成左腕/右腕，只需在 host 侧改用 `--left-zmq-endpoint` 或 `--right-zmq-endpoint`。
+
+#### host 侧（录制 + 保存）
+
+无 Rerun 实时图像，仅录制：
+
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
+bash scripts/start_real_robot_wired.sh \
+  --record \
+  --headless \
+  --task-dir ./utils/data \
+  --task-name single_zed_record \
+  --head-zmq-endpoint tcp://192.168.123.164:5556
+```
+
+带 Rerun 实时图像显示：
+
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
+bash scripts/start_real_robot_wired.sh \
+  --record \
+  --task-dir ./utils/data \
+  --task-name single_zed_record \
+  --head-zmq-endpoint tcp://192.168.123.164:5556
+```
+
+说明：
+
+- **想看 Rerun 实时图像时不要加 `--headless`**。
+- 当前 Rerun 会显示：
+  - `online/colors/head`
+  - `online/colors/left_wrist`
+  - `online/colors/right_wrist`
+
 说明：
 
 - `camera-id < 0` 表示禁用该路相机。
+- ZMQ endpoint 为空字符串表示禁用该路远端相机。
 - 推荐采集时加 `--headless`，避免 Rerun Viewer 依赖影响录制。
+- 如果要查看实时采集图像，请去掉 `--headless`。
 - 当前写入的是 RGB 图像到 `episode_xxxx/colors/`，key 为：
   - `head`
   - `left_wrist`
@@ -170,16 +258,16 @@ python teleop/teleop_hand_and_arm.py \
   - `left_ee`
   - `right_ee`
 - 不再录制 `body` / 全身数据。
-- 当前 `depths/` 仍未接本地深度相机链路。
+- 当前 `depths/` 仍未接深度相机录制链路。
 
-### 1.0.1 录制操作
+### 1.0.2 录制操作
 
 - `r`：启动 teleop
 - `s`：开始录制当前 episode
 - 再按一次 `s`：停止并保存当前 episode
 - `q`：退出
 
-### 1.0.2 时间戳字段
+### 1.0.3 时间戳字段
 
 每条 `data.json` item 新增：
 

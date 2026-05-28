@@ -329,6 +329,15 @@ class EpisodeWriter():
         colors = item_data.get('colors', {})
         depths = item_data.get('depths', {})
         audios = item_data.get('audios', {})
+        rerun_colors = {}
+        rerun_depths = {}
+
+        if colors:
+            for color_key, color in colors.items():
+                rerun_colors[color_key] = color.copy() if hasattr(color, "copy") else color
+        if depths:
+            for depth_key, depth in depths.items():
+                rerun_depths[depth_key] = depth.copy() if hasattr(depth, "copy") else depth
 
         # Save images
         if colors:
@@ -364,7 +373,10 @@ class EpisodeWriter():
         if self.rerun_log:
             curent_record_time = time.time()
             logger_mp.info(f"==> episode_id:{self.episode_id}  item_id:{idx}  current_time:{curent_record_time}")
-            self.rerun_logger.log_item_data(item_data)
+            rerun_item_data = dict(item_data)
+            rerun_item_data['colors'] = rerun_colors
+            rerun_item_data['depths'] = rerun_depths
+            self.rerun_logger.log_item_data(rerun_item_data)
 
     def save_episode(self):
         """
