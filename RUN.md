@@ -98,6 +98,7 @@ python teleop/teleop_hand_and_arm.py \
   --base-max-z 1.0 \
   --base-stick-deadzone 0.10
 ```
+data collect
 ```
 python teleop/teleop_hand_and_arm.py \
     --input-mode controller \

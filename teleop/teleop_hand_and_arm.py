@@ -275,6 +275,9 @@ if __name__ == '__main__':
     tv_wrapper = None
     listen_keyboard_thread = None
     gripper_ctrl = None
+    recorder = None
+    ipc_server = None
+    sim_state_subscriber = None
     parser = argparse.ArgumentParser()
     # basic control parameters
     parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
@@ -1170,7 +1173,7 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
         
         try:
-            if args.ipc:
+            if args.ipc and ipc_server is not None:
                 ipc_server.stop()
             else:
                 stop_listening()
@@ -1199,13 +1202,13 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to exit debug mode: {e}")
 
         try:
-            if args.sim:
+            if args.sim and sim_state_subscriber is not None:
                 sim_state_subscriber.stop_subscribe()
         except Exception as e:
             logger_mp.error(f"Failed to stop sim state subscriber: {e}")
         
         try:
-            if args.record:
+            if args.record and recorder is not None:
                 recorder.close()
         except Exception as e:
             logger_mp.error(f"Failed to close recorder: {e}")
