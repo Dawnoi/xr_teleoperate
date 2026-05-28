@@ -4,11 +4,165 @@ import json
 import datetime
 import numpy as np
 import time
+import zmq
+import struct
 from .rerun_visualizer import RerunLogger
 from queue import Queue, Empty
-from threading import Thread
+from threading import Thread, Lock
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
+
+class ZMQRawCameraReceiver:
+    """Receive latest raw image frame from a remote ZMQ PUB endpoint.
+
+    Supported packet formats:
+
+    1) New protocol:
+       [4B magic='XRAW'][4B version=1]
+       [4B width][4B height][4B channels]
+       [8B frame_seq][8B source_wall_time_ns][8B source_monotonic_ns]
+       [raw image bytes]
+
+    2) Legacy protocol:
+       [4B width][4B height][4B channels][raw image bytes]
+    """
+
+    MAGIC = b"XRAW"
+    VERSION = 1
+    HEADER_FMT = ">4sIIIIQQQ"
+    HEADER_SIZE = struct.calcsize(HEADER_FMT)
+    LEGACY_HEADER_FMT = "<iii"
+    LEGACY_HEADER_SIZE = struct.calcsize(LEGACY_HEADER_FMT)
+
+    def __init__(self, endpoint: str, name: str = "camera"):
+        self.endpoint = endpoint
+        self.name = name
+        self._running = True
+        self._frame = None
+        self._meta = None
+        self._frame_seq_local = -1
+        self._lock = Lock()
+
+        self._ctx = zmq.Context.instance()
+        self._socket = self._ctx.socket(zmq.SUB)
+        self._socket.setsockopt(zmq.RCVHWM, 1)
+        self._socket.setsockopt(zmq.LINGER, 0)
+        self._socket.connect(self.endpoint)
+        self._socket.setsockopt(zmq.SUBSCRIBE, b"")
+
+        self._thread = Thread(target=self._recv_loop, daemon=True)
+        self._thread.start()
+        logger_mp.info(f"[ZMQRawCameraReceiver:{self.name}] connected to {self.endpoint}")
+
+    def _recv_loop(self):
+        poller = zmq.Poller()
+        poller.register(self._socket, zmq.POLLIN)
+        while self._running:
+            try:
+                socks = dict(poller.poll(timeout=100))
+                if self._socket not in socks:
+                    continue
+                recv_wall_ns = time.time_ns()
+                recv_mono_ns = time.monotonic_ns()
+                message = self._socket.recv(flags=zmq.NOBLOCK)
+                frame, meta = self._decode_message(message, recv_wall_ns, recv_mono_ns)
+                if frame is None:
+                    continue
+                with self._lock:
+                    self._frame = frame
+                    self._meta = meta
+            except zmq.Again:
+                continue
+            except Exception as e:
+                logger_mp.warning(f"[ZMQRawCameraReceiver:{self.name}] recv loop error: {e}")
+
+    def _decode_message(self, message: bytes, recv_wall_ns: int, recv_mono_ns: int):
+        if len(message) >= self.HEADER_SIZE and message[:4] == self.MAGIC:
+            try:
+                magic, version, width, height, channels, frame_seq, src_wall_ns, src_mono_ns = struct.unpack(
+                    self.HEADER_FMT, message[:self.HEADER_SIZE]
+                )
+                if magic != self.MAGIC or version != self.VERSION:
+                    return None, None
+                payload = message[self.HEADER_SIZE:]
+                expected_size = width * height * channels
+                if len(payload) != expected_size:
+                    logger_mp.warning(
+                        f"[ZMQRawCameraReceiver:{self.name}] payload size mismatch: "
+                        f"expected={expected_size}, got={len(payload)}"
+                    )
+                    return None, None
+                frame = self._payload_to_frame(payload, width, height, channels)
+                if frame is None:
+                    return None, None
+                meta = {
+                    "camera_name": self.name,
+                    "transport": "zmq_raw",
+                    "endpoint": self.endpoint,
+                    "frame_seq": int(frame_seq),
+                    "source_wall_time_ns": int(src_wall_ns),
+                    "source_monotonic_ns": int(src_mono_ns),
+                    "host_recv_wall_time_ns": int(recv_wall_ns),
+                    "host_recv_monotonic_ns": int(recv_mono_ns),
+                    "shape": [int(width), int(height), int(channels)],
+                    "protocol": "xraw_v1",
+                }
+                return frame, meta
+            except Exception as e:
+                logger_mp.warning(f"[ZMQRawCameraReceiver:{self.name}] failed to decode xraw packet: {e}")
+                return None, None
+
+        if len(message) >= self.LEGACY_HEADER_SIZE:
+            try:
+                width, height, channels = struct.unpack(self.LEGACY_HEADER_FMT, message[:self.LEGACY_HEADER_SIZE])
+                payload = message[self.LEGACY_HEADER_SIZE:]
+                expected_size = width * height * channels
+                if len(payload) != expected_size:
+                    return None, None
+                frame = self._payload_to_frame(payload, width, height, channels)
+                if frame is None:
+                    return None, None
+                self._frame_seq_local += 1
+                meta = {
+                    "camera_name": self.name,
+                    "transport": "zmq_raw",
+                    "endpoint": self.endpoint,
+                    "frame_seq": int(self._frame_seq_local),
+                    "host_recv_wall_time_ns": int(recv_wall_ns),
+                    "host_recv_monotonic_ns": int(recv_mono_ns),
+                    "shape": [int(width), int(height), int(channels)],
+                    "protocol": "legacy_raw_v0",
+                }
+                return frame, meta
+            except Exception:
+                return None, None
+        return None, None
+
+    def _payload_to_frame(self, payload: bytes, width: int, height: int, channels: int):
+        if channels not in (3, 4):
+            logger_mp.warning(f"[ZMQRawCameraReceiver:{self.name}] unsupported channels={channels}")
+            return None
+        frame = np.frombuffer(payload, dtype=np.uint8).reshape((height, width, channels))
+        if channels == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+        return frame
+
+    def get_latest(self, copy: bool = True):
+        with self._lock:
+            if self._frame is None or self._meta is None:
+                return None, None
+            frame = self._frame.copy() if copy else self._frame
+            meta = dict(self._meta)
+        return frame, meta
+
+    def close(self):
+        self._running = False
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
+        try:
+            self._socket.close()
+        except Exception:
+            pass
 
 class EpisodeWriter():
     def __init__(self, task_dir, task_goal=None, task_desc = None, task_steps = None, frequency=30, image_size=[640, 480], rerun_log = True):

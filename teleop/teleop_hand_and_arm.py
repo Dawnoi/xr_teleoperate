@@ -33,7 +33,7 @@ import pinocchio as pin
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize # dds 
 from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmController, H1_2_ArmController, H1_ArmController, H2_ArmController
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
-from teleop.utils.episode_writer import EpisodeWriter
+from teleop.utils.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
 from teleop.utils.g1d_agv_bridge import G1DAgvBridge
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
@@ -283,6 +283,9 @@ if __name__ == '__main__':
     head_camera = None
     left_camera = None
     right_camera = None
+    head_remote_camera = None
+    left_remote_camera = None
+    right_remote_camera = None
     parser = argparse.ArgumentParser()
     # basic control parameters
     parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
@@ -379,6 +382,9 @@ if __name__ == '__main__':
     parser.add_argument('--camera-fps', type=int, default=30, help='Requested local camera FPS.')
     parser.add_argument('--camera-fourcc', type=str, default='MJPG', help='Requested local camera FOURCC, e.g. MJPG/YUYV.')
     parser.add_argument('--camera-buffer-size', type=int, default=1, help='Requested local camera driver buffer size.')
+    parser.add_argument('--head-zmq-endpoint', type=str, default='', help='Remote ZMQ raw endpoint for head camera, e.g. tcp://192.168.1.10:5555')
+    parser.add_argument('--left-zmq-endpoint', type=str, default='', help='Remote ZMQ raw endpoint for left wrist camera.')
+    parser.add_argument('--right-zmq-endpoint', type=str, default='', help='Remote ZMQ raw endpoint for right wrist camera.')
 
     args = parser.parse_args()
     logger_mp.debug(f"args: {args}")
@@ -429,6 +435,16 @@ if __name__ == '__main__':
             )
         except Exception as e:
             logger_mp.warning(f"[CAM] failed to open local camera '{name}' (id={camera_id}): {e}")
+            return None
+
+    def maybe_open_remote_camera(name: str, endpoint: str):
+        endpoint = str(endpoint or "").strip()
+        if not endpoint:
+            return None
+        try:
+            return ZMQRawCameraReceiver(endpoint=endpoint, name=name)
+        except Exception as e:
+            logger_mp.warning(f"[CAM] failed to connect remote camera '{name}' ({endpoint}): {e}")
             return None
 
     try:
@@ -607,6 +623,9 @@ if __name__ == '__main__':
                                      frequency = args.frequency,
                                      image_size = [args.camera_width, args.camera_height],
                                      rerun_log = not args.headless)
+            head_remote_camera = maybe_open_remote_camera("head", args.head_zmq_endpoint)
+            left_remote_camera = maybe_open_remote_camera("left_wrist", args.left_zmq_endpoint)
+            right_remote_camera = maybe_open_remote_camera("right_wrist", args.right_zmq_endpoint)
             head_camera = maybe_open_local_camera("head", args.head_camera_id)
             left_camera = maybe_open_local_camera("left_wrist", args.left_camera_id)
             right_camera = maybe_open_local_camera("right_wrist", args.right_camera_id)
@@ -1119,18 +1138,21 @@ if __name__ == '__main__':
                     colors = {}
                     depths = {}
                     camera_timestamps = {}
-                    if head_camera is not None:
-                        head_frame, head_meta = head_camera.get_latest(copy=True)
+                    head_source = head_remote_camera if head_remote_camera is not None else head_camera
+                    left_source = left_remote_camera if left_remote_camera is not None else left_camera
+                    right_source = right_remote_camera if right_remote_camera is not None else right_camera
+                    if head_source is not None:
+                        head_frame, head_meta = head_source.get_latest(copy=True)
                         if head_frame is not None:
                             colors["head"] = head_frame
                             camera_timestamps["head"] = head_meta
-                    if left_camera is not None:
-                        left_frame, left_meta = left_camera.get_latest(copy=True)
+                    if left_source is not None:
+                        left_frame, left_meta = left_source.get_latest(copy=True)
                         if left_frame is not None:
                             colors["left_wrist"] = left_frame
                             camera_timestamps["left_wrist"] = left_meta
-                    if right_camera is not None:
-                        right_frame, right_meta = right_camera.get_latest(copy=True)
+                    if right_source is not None:
+                        right_frame, right_meta = right_source.get_latest(copy=True)
                         if right_frame is not None:
                             colors["right_wrist"] = right_frame
                             camera_timestamps["right_wrist"] = right_meta
@@ -1245,7 +1267,7 @@ if __name__ == '__main__':
         except Exception as e:
             logger_mp.error(f"Failed to stop sim state subscriber: {e}")
 
-        for camera in [head_camera, left_camera, right_camera]:
+        for camera in [head_remote_camera, left_remote_camera, right_remote_camera, head_camera, left_camera, right_camera]:
             try:
                 if camera is not None:
                     camera.close()
