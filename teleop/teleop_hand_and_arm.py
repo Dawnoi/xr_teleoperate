@@ -426,8 +426,11 @@ if __name__ == '__main__':
     pending_record_samples = deque()
     record_start_monotonic_ns = None
     camera_align_max_delta_ns = int(max(20_000_000, (1.5 / max(args.frequency, 1e-6)) * 1e9))
-    state_align_max_delta_ns = int(max(10_000_000, (0.75 / max(args.frequency, 1e-6)) * 1e9))
+    state_align_max_delta_ns = int(max(20_000_000, (1.25 / max(args.frequency, 1e-6)) * 1e9))
     action_align_max_delta_ns = state_align_max_delta_ns
+    state_nearest_fallback_max_delta_ns = int(max(80_000_000, (2.5 / max(args.frequency, 1e-6)) * 1e9))
+    action_nearest_fallback_max_delta_ns = state_nearest_fallback_max_delta_ns
+    record_future_wait_timeout_ns = int(max(120_000_000, (2.0 / max(args.frequency, 1e-6)) * 1e9))
     pending_sample_timeout_ns = int(1_000_000_000)
     if args.base_controller == "g1d_agv" and args.motion:
         raise ValueError("Do not combine --base-controller g1d_agv with --motion. G1D AGV base control should run with the arms kept in debug mode.")
@@ -1537,10 +1540,10 @@ if __name__ == '__main__':
                         if state_latest is None or action_latest is None:
                             break
 
-                        if sample_monotonic_ns > state_latest or sample_monotonic_ns > action_latest:
-                            if sample_age_ns > pending_sample_timeout_ns:
-                                logger_mp.warning("[RECORD_ALIGN] drop pending sample: waited too long for future state/action coverage.")
-                                pending_record_samples.popleft()
+                        waiting_for_future_coverage = (
+                            sample_monotonic_ns > state_latest or sample_monotonic_ns > action_latest
+                        )
+                        if waiting_for_future_coverage and sample_age_ns <= record_future_wait_timeout_ns:
                             break
 
                         aligned_state = interpolate_timed_sample_strict(
@@ -1555,6 +1558,24 @@ if __name__ == '__main__':
                             max_delta_ns=action_align_max_delta_ns,
                             min_timestamp_ns=record_min_timestamp_ns,
                         )
+                        if aligned_state is None:
+                            aligned_state = nearest_timed_sample(
+                                state_history,
+                                sample_monotonic_ns,
+                                max_delta_ns=state_nearest_fallback_max_delta_ns,
+                                min_timestamp_ns=record_min_timestamp_ns,
+                            )
+                            if aligned_state is not None:
+                                aligned_state["interpolation_mode"] = "nearest_fallback"
+                        if aligned_action is None:
+                            aligned_action = nearest_timed_sample(
+                                action_history,
+                                sample_monotonic_ns,
+                                max_delta_ns=action_nearest_fallback_max_delta_ns,
+                                min_timestamp_ns=record_min_timestamp_ns,
+                            )
+                            if aligned_action is not None:
+                                aligned_action["interpolation_mode"] = "nearest_fallback"
                         if aligned_state is None:
                             if sample_age_ns > pending_sample_timeout_ns:
                                 logger_mp.warning("[RECORD_ALIGN] drop pending sample: no interpolated state found at primary camera timestamp.")
