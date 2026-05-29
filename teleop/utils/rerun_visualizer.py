@@ -62,8 +62,8 @@ class RerunEpisodeReader:
 
     def _process_images(self, item_data, data_type, dir_path):
         images = {}
-
-        for key, file_name in item_data.get(data_type, {}).items():
+        data_entries = item_data.get(data_type, {}) or {}
+        for key, file_name in data_entries.items():
             if file_name:
                 file_path = os.path.join(dir_path, file_name)
                 if os.path.exists(file_path):
@@ -75,8 +75,8 @@ class RerunEpisodeReader:
     def _process_audio(self, item_data, data_type, episode_dir):
         audio_data = {}
         dir_path = os.path.join(episode_dir, data_type)
-
-        for key, file_name in item_data.get(data_type, {}).items():
+        data_entries = item_data.get(data_type, {}) or {}
+        for key, file_name in data_entries.items():
             if file_name:
                 file_path = os.path.join(dir_path, file_name)
                 if os.path.exists(file_path):
