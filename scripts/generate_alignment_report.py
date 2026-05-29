@@ -69,6 +69,51 @@ def summarize_ms_abs(values_ns):
     }
 
 
+def summarize_ms(values_ns):
+    ms = [float(v) / 1e6 for v in values_ns if v is not None]
+    if not ms:
+        return {
+            "count": 0,
+            "p50": None,
+            "p90": None,
+            "p99": None,
+            "max": None,
+            "mean": None,
+        }
+    return {
+        "count": len(ms),
+        "p50": round(percentile(ms, 50), 3),
+        "p90": round(percentile(ms, 90), 3),
+        "p99": round(percentile(ms, 99), 3),
+        "max": round(max(ms), 3),
+        "mean": round(sum(ms) / len(ms), 3),
+    }
+
+
+def extract_alignment_metrics(meta):
+    meta = meta or {}
+    raw_delta_ns = meta.get("delta_to_sample_ns")
+    support_max_abs_delta_ns = meta.get("support_max_abs_delta_ns")
+    support_span_ns = meta.get("support_span_ns")
+    support_prev_delta_ns = meta.get("support_prev_delta_to_sample_ns")
+    support_next_delta_ns = meta.get("support_next_delta_to_sample_ns")
+    source_count = meta.get("support_source_count")
+
+    effective_abs_delta_ns = (
+        int(support_max_abs_delta_ns)
+        if support_max_abs_delta_ns is not None
+        else (abs(int(raw_delta_ns)) if raw_delta_ns is not None else None)
+    )
+    return {
+        "raw_delta_ns": int(raw_delta_ns) if raw_delta_ns is not None else None,
+        "effective_abs_delta_ns": effective_abs_delta_ns,
+        "support_span_ns": int(support_span_ns) if support_span_ns is not None else None,
+        "support_prev_delta_ns": int(support_prev_delta_ns) if support_prev_delta_ns is not None else None,
+        "support_next_delta_ns": int(support_next_delta_ns) if support_next_delta_ns is not None else None,
+        "support_source_count": int(source_count) if source_count is not None else None,
+    }
+
+
 def infer_arm_repr_mode(samples):
     has_qpos = False
     has_pose = False
@@ -172,10 +217,20 @@ def write_csv(csv_path, rows, camera_names):
         "state_monotonic_ns",
         "state_delta_ms",
         "state_abs_delta_ms",
+        "state_effective_abs_delta_ms",
+        "state_support_span_ms",
+        "state_support_prev_delta_ms",
+        "state_support_next_delta_ms",
+        "state_support_source_count",
         "state_interpolation_mode",
         "action_monotonic_ns",
         "action_delta_ms",
         "action_abs_delta_ms",
+        "action_effective_abs_delta_ms",
+        "action_support_span_ms",
+        "action_support_prev_delta_ms",
+        "action_support_next_delta_ms",
+        "action_support_source_count",
         "action_interpolation_mode",
     ]
     for camera_name in camera_names:
@@ -231,8 +286,13 @@ def write_markdown(md_path, report):
         lines.append("- Retention: unavailable in current dataset schema")
     lines.append("")
     lines.append("## Alignment Quality")
-    lines.append(f"- State delta abs: {fmt_summary(align.get('state_delta_ms_abs'))}")
-    lines.append(f"- Action delta abs: {fmt_summary(align.get('action_delta_ms_abs'))}")
+    metric_note = align.get("metric_note")
+    if metric_note:
+        lines.append(f"- Metric note: {metric_note}")
+    lines.append(f"- State support max abs delta: {fmt_summary(align.get('state_delta_ms_abs'))}")
+    lines.append(f"- Action support max abs delta: {fmt_summary(align.get('action_delta_ms_abs'))}")
+    lines.append(f"- State support span: {fmt_summary(align.get('state_support_span_ms'))}")
+    lines.append(f"- Action support span: {fmt_summary(align.get('action_support_span_ms'))}")
     for camera_name, stats in (align.get("camera_delta_ms_abs", {}) or {}).items():
         lines.append(f"- {camera_name} camera residual abs: {fmt_summary(stats)}")
     lines.append("")
@@ -285,6 +345,8 @@ def main():
     sample_rows = []
     state_deltas_ns = []
     action_deltas_ns = []
+    state_support_spans_ns = []
+    action_support_spans_ns = []
     camera_deltas_ns = defaultdict(list)
     primary_camera_counts = Counter()
     camera_presence_counts = Counter()
@@ -311,15 +373,21 @@ def main():
 
         state_meta = timestamps.get("state", {}) or {}
         action_meta = timestamps.get("action", {}) or {}
-        state_delta_ns = state_meta.get("delta_to_sample_ns")
-        action_delta_ns = action_meta.get("delta_to_sample_ns")
+        state_metrics = extract_alignment_metrics(state_meta)
+        action_metrics = extract_alignment_metrics(action_meta)
+        state_delta_ns = state_metrics["raw_delta_ns"]
+        action_delta_ns = action_metrics["raw_delta_ns"]
         state_mode = state_meta.get("interpolation_mode", "unknown")
         action_mode = action_meta.get("interpolation_mode", "unknown")
 
-        if state_delta_ns is not None:
-            state_deltas_ns.append(int(state_delta_ns))
-        if action_delta_ns is not None:
-            action_deltas_ns.append(int(action_delta_ns))
+        if state_metrics["effective_abs_delta_ns"] is not None:
+            state_deltas_ns.append(int(state_metrics["effective_abs_delta_ns"]))
+        if action_metrics["effective_abs_delta_ns"] is not None:
+            action_deltas_ns.append(int(action_metrics["effective_abs_delta_ns"]))
+        if state_metrics["support_span_ns"] is not None:
+            state_support_spans_ns.append(int(state_metrics["support_span_ns"]))
+        if action_metrics["support_span_ns"] is not None:
+            action_support_spans_ns.append(int(action_metrics["support_span_ns"]))
         state_mode_counts[state_mode] += 1
         action_mode_counts[action_mode] += 1
 
@@ -333,10 +401,20 @@ def main():
             "state_monotonic_ns": state_meta.get("host_monotonic_ns"),
             "state_delta_ms": round(float(state_delta_ns) / 1e6, 3) if state_delta_ns is not None else None,
             "state_abs_delta_ms": round(abs(float(state_delta_ns)) / 1e6, 3) if state_delta_ns is not None else None,
+            "state_effective_abs_delta_ms": round(float(state_metrics["effective_abs_delta_ns"]) / 1e6, 3) if state_metrics["effective_abs_delta_ns"] is not None else None,
+            "state_support_span_ms": round(float(state_metrics["support_span_ns"]) / 1e6, 3) if state_metrics["support_span_ns"] is not None else None,
+            "state_support_prev_delta_ms": round(float(state_metrics["support_prev_delta_ns"]) / 1e6, 3) if state_metrics["support_prev_delta_ns"] is not None else None,
+            "state_support_next_delta_ms": round(float(state_metrics["support_next_delta_ns"]) / 1e6, 3) if state_metrics["support_next_delta_ns"] is not None else None,
+            "state_support_source_count": state_metrics["support_source_count"],
             "state_interpolation_mode": state_mode,
             "action_monotonic_ns": action_meta.get("host_monotonic_ns"),
             "action_delta_ms": round(float(action_delta_ns) / 1e6, 3) if action_delta_ns is not None else None,
             "action_abs_delta_ms": round(abs(float(action_delta_ns)) / 1e6, 3) if action_delta_ns is not None else None,
+            "action_effective_abs_delta_ms": round(float(action_metrics["effective_abs_delta_ns"]) / 1e6, 3) if action_metrics["effective_abs_delta_ns"] is not None else None,
+            "action_support_span_ms": round(float(action_metrics["support_span_ns"]) / 1e6, 3) if action_metrics["support_span_ns"] is not None else None,
+            "action_support_prev_delta_ms": round(float(action_metrics["support_prev_delta_ns"]) / 1e6, 3) if action_metrics["support_prev_delta_ns"] is not None else None,
+            "action_support_next_delta_ms": round(float(action_metrics["support_next_delta_ns"]) / 1e6, 3) if action_metrics["support_next_delta_ns"] is not None else None,
+            "action_support_source_count": action_metrics["support_source_count"],
             "action_interpolation_mode": action_mode,
         }
 
@@ -395,8 +473,11 @@ def main():
             "last_sample_monotonic_ns": sample_monotonic_values[-1] if sample_monotonic_values else None,
         },
         "alignment_summary": {
+            "metric_note": "state/action delta uses support_max_abs_delta_ns when available; for linear interpolation this is the larger absolute distance from sample time to the two support timestamps.",
             "state_delta_ms_abs": summarize_ms_abs(state_deltas_ns),
             "action_delta_ms_abs": summarize_ms_abs(action_deltas_ns),
+            "state_support_span_ms": summarize_ms(state_support_spans_ns),
+            "action_support_span_ms": summarize_ms(action_support_spans_ns),
             "camera_delta_ms_abs": {
                 camera_name: summarize_ms_abs(values)
                 for camera_name, values in sorted(camera_deltas_ns.items())

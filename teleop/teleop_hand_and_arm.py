@@ -588,6 +588,77 @@ if __name__ == '__main__':
             value = meta.get("host_monotonic_ns")
         return int(value) if value is not None else None
 
+    def camera_frame_identity(camera_name: str, meta):
+        if meta is None:
+            return None
+        frame_seq = meta.get("frame_seq")
+        if frame_seq is not None:
+            return (str(camera_name), "seq", int(frame_seq))
+        meta_ts = camera_meta_monotonic_ns(meta)
+        if meta_ts is not None:
+            return (str(camera_name), "ts", int(meta_ts))
+        return None
+
+    def build_alignment_timestamp_entry(aligned_entry: dict, sample_monotonic_ns: int):
+        sample_monotonic_ns = int(sample_monotonic_ns)
+        t_ns = int(aligned_entry["t_ns"])
+        delta_to_target_ns = int(aligned_entry.get("delta_to_target_ns", t_ns - sample_monotonic_ns))
+        interpolation_mode = str(aligned_entry.get("interpolation_mode", "unknown"))
+        entry = {
+            "host_monotonic_ns": t_ns,
+            "delta_to_sample_ns": delta_to_target_ns,
+            "interpolation_mode": interpolation_mode,
+        }
+
+        if interpolation_mode == "linear":
+            prev_t_ns = aligned_entry.get("interp_prev_t_ns")
+            next_t_ns = aligned_entry.get("interp_next_t_ns")
+            if prev_t_ns is not None:
+                prev_t_ns = int(prev_t_ns)
+            if next_t_ns is not None:
+                next_t_ns = int(next_t_ns)
+            prev_delta_ns = (prev_t_ns - sample_monotonic_ns) if prev_t_ns is not None else None
+            next_delta_ns = (next_t_ns - sample_monotonic_ns) if next_t_ns is not None else None
+            support_span_ns = (
+                int(next_t_ns - prev_t_ns)
+                if prev_t_ns is not None and next_t_ns is not None
+                else None
+            )
+            support_max_abs_delta_ns = max(
+                abs(prev_delta_ns) if prev_delta_ns is not None else 0,
+                abs(next_delta_ns) if next_delta_ns is not None else 0,
+            )
+            entry.update(
+                {
+                    "interp_prev_t_ns": prev_t_ns,
+                    "interp_next_t_ns": next_t_ns,
+                    "interp_alpha": float(aligned_entry.get("interp_alpha", 0.0)),
+                    "support_source_count": 2,
+                    "support_prev_t_ns": prev_t_ns,
+                    "support_next_t_ns": next_t_ns,
+                    "support_prev_delta_to_sample_ns": prev_delta_ns,
+                    "support_next_delta_to_sample_ns": next_delta_ns,
+                    "support_span_ns": support_span_ns,
+                    "support_max_abs_delta_ns": int(support_max_abs_delta_ns),
+                }
+            )
+        else:
+            source_t_ns = t_ns
+            source_delta_ns = delta_to_target_ns
+            entry.update(
+                {
+                    "support_source_count": 1,
+                    "support_source_t_ns": source_t_ns,
+                    "support_prev_t_ns": source_t_ns,
+                    "support_next_t_ns": source_t_ns,
+                    "support_prev_delta_to_sample_ns": source_delta_ns,
+                    "support_next_delta_to_sample_ns": source_delta_ns,
+                    "support_span_ns": 0,
+                    "support_max_abs_delta_ns": abs(source_delta_ns),
+                }
+            )
+        return entry
+
     def timed_buffer_bounds(buffer: deque, min_timestamp_ns: int | None = None):
         earliest = None
         latest = None
@@ -966,6 +1037,7 @@ if __name__ == '__main__':
         TAKEOVER_SETTLE_FRAMES = 0 if args.controller_mapping_mode == "legacy_main" else 2
         recording_waiting_for_first_frame = False
         last_record_wait_log_ns = 0
+        last_enqueued_primary_frame_id = None
 
         # main loop. robot start to follow VR user's motion
         while not STOP:
@@ -978,6 +1050,7 @@ if __name__ == '__main__':
                     if recorder.create_episode():
                         record_start_monotonic_ns = int(time.monotonic_ns())
                         pending_record_samples.clear()
+                        last_enqueued_primary_frame_id = None
                         recording_waiting_for_first_frame = True
                         logger_mp.info("[RECORD_ALIGN] episode armed, waiting for first post-start camera frame before recording.")
                     else:
@@ -987,6 +1060,7 @@ if __name__ == '__main__':
                     recording_waiting_for_first_frame = False
                     record_start_monotonic_ns = None
                     pending_record_samples.clear()
+                    last_enqueued_primary_frame_id = None
                     recorder.save_episode()
                     if args.sim:
                         publish_reset_category(1, reset_pose_publisher)
@@ -1468,9 +1542,7 @@ if __name__ == '__main__':
                             continue
 
                     record_min_timestamp_ns = int(record_start_monotonic_ns or time.monotonic_ns())
-                    primary_camera_name = None
-                    primary_frame = None
-                    primary_meta = None
+                    primary_source_entry = None
                     for camera_name, source in (
                         ("head", head_source),
                         ("left_wrist", left_source),
@@ -1478,20 +1550,21 @@ if __name__ == '__main__':
                     ):
                         if source is None:
                             continue
-                        frame, meta = source.get_latest(copy=True)
-                        meta_ts = camera_meta_monotonic_ns(meta)
-                        if frame is None or meta is None or meta_ts is None:
-                            continue
-                        if meta_ts < record_min_timestamp_ns:
-                            continue
-                        primary_camera_name = camera_name
-                        primary_frame = frame
-                        primary_meta = meta
+                        primary_source_entry = (camera_name, source)
                         break
+
+                    if primary_source_entry is not None:
+                        primary_camera_name, primary_source = primary_source_entry
+                        primary_frame, primary_meta = primary_source.get_latest(copy=True)
+                    else:
+                        primary_camera_name = None
+                        primary_frame = None
+                        primary_meta = None
 
                     if primary_frame is not None and primary_meta is not None:
                         primary_ts = int(camera_meta_monotonic_ns(primary_meta))
                         primary_frame_seq = (primary_meta or {}).get("frame_seq")
+                        primary_frame_id = camera_frame_identity(primary_camera_name, primary_meta)
                         already_pending = False
                         if pending_record_samples:
                             last_pending = pending_record_samples[-1]
@@ -1500,7 +1573,12 @@ if __name__ == '__main__':
                                 and last_pending.get("frame_seq") == primary_frame_seq
                                 and last_pending.get("sample_monotonic_ns") == primary_ts
                             )
-                        if not already_pending:
+                        if (
+                            not already_pending
+                            and primary_ts >= record_min_timestamp_ns
+                            and primary_frame_id is not None
+                            and primary_frame_id != last_enqueued_primary_frame_id
+                        ):
                             pending_record_samples.append(
                                 {
                                     "enqueue_wall_time_ns": int(time.time_ns()),
@@ -1516,6 +1594,7 @@ if __name__ == '__main__':
                                     "frame_seq": primary_frame_seq,
                                 }
                             )
+                            last_enqueued_primary_frame_id = primary_frame_id
 
                     while pending_record_samples:
                         pending = pending_record_samples[0]
@@ -1701,16 +1780,8 @@ if __name__ == '__main__':
                             "sample_monotonic_ns": sample_monotonic_ns,
                             "teleop_input_perf_counter_ns": int(pending["teleop_input_perf_counter_ns"]),
                             "primary_camera_name": pending["primary_camera_name"],
-                            "state": {
-                                "host_monotonic_ns": int(aligned_state["t_ns"]),
-                                "delta_to_sample_ns": int(aligned_state["delta_to_target_ns"]),
-                                "interpolation_mode": aligned_state.get("interpolation_mode", "unknown"),
-                            },
-                            "action": {
-                                "host_monotonic_ns": int(aligned_action["t_ns"]),
-                                "delta_to_sample_ns": int(aligned_action["delta_to_target_ns"]),
-                                "interpolation_mode": aligned_action.get("interpolation_mode", "unknown"),
-                            },
+                            "state": build_alignment_timestamp_entry(aligned_state, sample_monotonic_ns),
+                            "action": build_alignment_timestamp_entry(aligned_action, sample_monotonic_ns),
                             "camera": camera_timestamps,
                         }
                         if args.sim:
