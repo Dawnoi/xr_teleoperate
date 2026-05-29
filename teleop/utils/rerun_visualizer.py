@@ -7,6 +7,18 @@ import rerun.blueprint as rrb
 from datetime import datetime
 os.environ["RUST_LOG"] = "error"
 
+
+def canonical_color_key(color_key: str) -> str:
+    key = str(color_key or "").strip()
+    mapping = {
+        "left_wrist": "wrist_left",
+        "right_wrist": "wrist_right",
+        "wrist_left": "wrist_left",
+        "wrist_right": "wrist_right",
+        "head": "head",
+    }
+    return mapping.get(key, key)
+
 class RerunEpisodeReader:
     def __init__(self, task_dir = ".", json_file="data.json"):
         self.task_dir = task_dir
@@ -205,13 +217,14 @@ class RerunLogger:
                 continue
             if isinstance(color_val, str):
                 continue
+            canonical_key = canonical_color_key(color_key)
             if hasattr(color_val, "shape"):
                 image = color_val
                 if len(image.shape) == 3 and image.shape[2] == 3:
                     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
                 elif len(image.shape) == 3 and image.shape[2] == 4:
                     image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
-                rr.log(f"{self.prefix}colors/{color_key}", rr.Image(image))
+                rr.log(f"{self.prefix}colors/{canonical_key}", rr.Image(image))
 
         # # Log depths (images)
         # depths = item_data.get('depths', {}) or {}

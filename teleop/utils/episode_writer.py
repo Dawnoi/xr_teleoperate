@@ -13,6 +13,18 @@ from threading import Thread, Lock
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
 
+
+def canonical_color_key(color_key: str) -> str:
+    key = str(color_key or "").strip()
+    mapping = {
+        "left_wrist": "wrist_left",
+        "right_wrist": "wrist_right",
+        "wrist_left": "wrist_left",
+        "wrist_right": "wrist_right",
+        "head": "head",
+    }
+    return mapping.get(key, key)
+
 class ZMQRawCameraReceiver:
     """Receive latest raw image frame from a remote ZMQ PUB endpoint.
 
@@ -298,11 +310,17 @@ class EpisodeWriter():
         
         self.episode_dir = os.path.join(self.task_dir, f"episode_{str(self.episode_id).zfill(4)}")
         self.color_dir = os.path.join(self.episode_dir, 'colors')
+        self.color_head_dir = os.path.join(self.color_dir, 'head')
+        self.color_wrist_left_dir = os.path.join(self.color_dir, 'wrist_left')
+        self.color_wrist_right_dir = os.path.join(self.color_dir, 'wrist_right')
         self.depth_dir = os.path.join(self.episode_dir, 'depths')
         self.audio_dir = os.path.join(self.episode_dir, 'audios')
         self.json_path = os.path.join(self.episode_dir, 'data.json')
         os.makedirs(self.episode_dir, exist_ok=True)
         os.makedirs(self.color_dir, exist_ok=True)
+        os.makedirs(self.color_head_dir, exist_ok=True)
+        os.makedirs(self.color_wrist_left_dir, exist_ok=True)
+        os.makedirs(self.color_wrist_right_dir, exist_ok=True)
         os.makedirs(self.depth_dir, exist_ok=True)
         os.makedirs(self.audio_dir, exist_ok=True)
         with open(self.json_path, "w", encoding="utf-8") as f:
@@ -380,6 +398,7 @@ class EpisodeWriter():
         # Save images
         if colors:
             for idx_color, (color_key, color) in enumerate(colors.items()):
+                canonical_key = canonical_color_key(color_key)
                 camera_meta = ((timestamps.get('camera', {}) or {}).get(color_key, {}) or {})
                 color_time_ns = (
                     camera_meta.get("host_recv_monotonic_ns")
@@ -387,13 +406,15 @@ class EpisodeWriter():
                     or timestamps.get("sample_monotonic_ns")
                 )
                 color_name = (
-                    f'{str(idx).zfill(6)}_{color_key}_{int(color_time_ns)}.jpg'
+                    f'{str(idx).zfill(6)}_{canonical_key}_{int(color_time_ns)}.jpg'
                     if color_time_ns is not None else
-                    f'{str(idx).zfill(6)}_{color_key}.jpg'
+                    f'{str(idx).zfill(6)}_{canonical_key}.jpg'
                 )
-                if not cv2.imwrite(os.path.join(self.color_dir, color_name), color):
+                target_dir = os.path.join(self.color_dir, canonical_key)
+                os.makedirs(target_dir, exist_ok=True)
+                if not cv2.imwrite(os.path.join(target_dir, color_name), color):
                     logger_mp.info(f"Failed to save color image.")
-                item_data['colors'][color_key] = os.path.join('colors', color_name)
+                item_data['colors'][color_key] = os.path.join('colors', canonical_key, color_name)
 
         # Save depths
         if depths:
