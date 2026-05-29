@@ -328,7 +328,14 @@ class EpisodeWriter():
 
         if self.rerun_log:
             try:
-                self.online_logger = RerunLogger(prefix="online/", IdxRangeBoundary = 60, memory_limit="300MB")
+                rrd_path = os.path.join(self.episode_dir, "rerun.rrd")
+                self.online_logger = RerunLogger(
+                    prefix="online/",
+                    IdxRangeBoundary=60,
+                    memory_limit="300MB",
+                    rrd_path=rrd_path,
+                    spawn_viewer=True,
+                )
             except Exception as e:
                 self.rerun_log = False
                 self.online_logger = None
@@ -460,13 +467,8 @@ class EpisodeWriter():
 
         if self.rerun_log and self.online_logger is not None:
             try:
-                rrd_path = os.path.join(self.episode_dir, "rerun.rrd")
-                self.online_logger.save(rrd_path)
-                logger_mp.info(f"==> Rerun recording saved to {rrd_path}.")
-            except Exception as e:
-                logger_mp.warning(f"==> Failed to save Rerun recording: {e}")
-            try:
                 self.online_logger.close()
+                logger_mp.info(f"==> Rerun recording finalized at {os.path.join(self.episode_dir, 'rerun.rrd')}.")
             except Exception:
                 pass
             self.online_logger = None
