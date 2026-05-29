@@ -234,16 +234,12 @@ class EpisodeWriter():
         self.image_size = image_size
 
         self.rerun_log = rerun_log
+        self.rerun_logger = None
         if self.rerun_log:
-            logger_mp.info("==> RerunLogger initializing...\n")
-            try:
-                self.rerun_logger = RerunLogger(prefix="online/", IdxRangeBoundary = 60, memory_limit = "300MB")
-                logger_mp.info("==> RerunLogger initializing ok.\n")
-            except Exception as e:
-                self.rerun_log = False
-                self.rerun_logger = None
-                logger_mp.warning(f"==> RerunLogger unavailable, disable live viewer logging: {e}\n")
-        
+            logger_mp.info("==> Rerun live logging enabled; logger will be created per episode.\n")
+        else:
+            self.rerun_logger = None
+
         self.item_id = -1
         self.episode_id = -1
         if os.path.exists(self.task_dir):
@@ -445,8 +441,8 @@ class EpisodeWriter():
             rerun_item_data = dict(item_data)
             rerun_item_data['colors'] = rerun_colors
             rerun_item_data['depths'] = rerun_depths
-            logger = self.online_logger or self.rerun_logger
-            logger.log_item_data(rerun_item_data)
+            if self.online_logger is not None:
+                self.online_logger.log_item_data(rerun_item_data)
 
     def save_episode(self):
         """

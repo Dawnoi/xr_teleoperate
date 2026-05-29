@@ -468,6 +468,113 @@ if __name__ == '__main__':
         result["target_monotonic_ns"] = target_ns
         return result
 
+    def interpolate_timed_sample(
+        buffer: deque,
+        target_ns: int,
+        max_delta_ns: int | None = None,
+        min_timestamp_ns: int | None = None,
+    ):
+        target_ns = int(target_ns)
+        prev_entry = None
+        next_entry = None
+        for entry in reversed(buffer):
+            t_ns = int(entry["t_ns"])
+            if min_timestamp_ns is not None and t_ns < int(min_timestamp_ns):
+                continue
+            if t_ns <= target_ns:
+                prev_entry = entry
+                break
+        for entry in buffer:
+            t_ns = int(entry["t_ns"])
+            if min_timestamp_ns is not None and t_ns < int(min_timestamp_ns):
+                continue
+            if t_ns >= target_ns:
+                next_entry = entry
+                break
+
+        if prev_entry is None and next_entry is None:
+            return None
+
+        if prev_entry is not None and int(prev_entry["t_ns"]) == target_ns:
+            result = dict(prev_entry)
+            result["delta_to_target_ns"] = 0
+            result["target_monotonic_ns"] = target_ns
+            result["interpolation_mode"] = "exact"
+            return result
+        if next_entry is not None and int(next_entry["t_ns"]) == target_ns:
+            result = dict(next_entry)
+            result["delta_to_target_ns"] = 0
+            result["target_monotonic_ns"] = target_ns
+            result["interpolation_mode"] = "exact"
+            return result
+
+        if prev_entry is None or next_entry is None:
+            fallback = nearest_timed_sample(
+                buffer,
+                target_ns,
+                max_delta_ns=max_delta_ns,
+                min_timestamp_ns=min_timestamp_ns,
+            )
+            if fallback is not None:
+                fallback["interpolation_mode"] = "nearest_fallback"
+            return fallback
+
+        prev_t = int(prev_entry["t_ns"])
+        next_t = int(next_entry["t_ns"])
+        if next_t <= prev_t:
+            fallback = nearest_timed_sample(
+                buffer,
+                target_ns,
+                max_delta_ns=max_delta_ns,
+                min_timestamp_ns=min_timestamp_ns,
+            )
+            if fallback is not None:
+                fallback["interpolation_mode"] = "nearest_nonmonotonic"
+            return fallback
+
+        prev_delta = target_ns - prev_t
+        next_delta = next_t - target_ns
+        if max_delta_ns is not None and (
+            prev_delta > int(max_delta_ns) or next_delta > int(max_delta_ns)
+        ):
+            return None
+
+        alpha = float(target_ns - prev_t) / float(next_t - prev_t)
+        result = {
+            "t_ns": target_ns,
+            "target_monotonic_ns": target_ns,
+            "delta_to_target_ns": 0,
+            "interpolation_mode": "linear",
+            "interp_prev_t_ns": prev_t,
+            "interp_next_t_ns": next_t,
+            "interp_alpha": alpha,
+        }
+        all_keys = set(prev_entry.keys()) | set(next_entry.keys())
+        for key in all_keys:
+            if key == "t_ns":
+                continue
+            prev_val = prev_entry.get(key)
+            next_val = next_entry.get(key)
+            if prev_val is None and next_val is None:
+                continue
+            if prev_val is None:
+                result[key] = next_val
+                continue
+            if next_val is None:
+                result[key] = prev_val
+                continue
+            try:
+                prev_arr = np.asarray(prev_val, dtype=float)
+                next_arr = np.asarray(next_val, dtype=float)
+                if prev_arr.shape == next_arr.shape and prev_arr.ndim >= 1:
+                    interp_arr = prev_arr + alpha * (next_arr - prev_arr)
+                    result[key] = interp_arr
+                    continue
+            except Exception:
+                pass
+            result[key] = prev_val if abs(target_ns - prev_t) <= abs(next_t - target_ns) else next_val
+        return result
+
     def camera_meta_monotonic_ns(meta):
         if meta is None:
             return None
@@ -1255,25 +1362,88 @@ if __name__ == '__main__':
                             )
                             continue
 
-                    sample_monotonic_ns = int(time.monotonic_ns())
-                    record_min_timestamp_ns = int(record_start_monotonic_ns or sample_monotonic_ns)
-                    aligned_state = nearest_timed_sample(
+                    record_min_timestamp_ns = int(record_start_monotonic_ns or time.monotonic_ns())
+                    colors = {}
+                    depths = {}
+                    camera_timestamps = {}
+
+                    primary_camera_name = None
+                    primary_frame = None
+                    primary_meta = None
+                    for camera_name, source in (
+                        ("head", head_source),
+                        ("left_wrist", left_source),
+                        ("right_wrist", right_source),
+                    ):
+                        if source is None:
+                            continue
+                        frame, meta = source.get_latest(copy=True)
+                        meta_ts = camera_meta_monotonic_ns(meta)
+                        if frame is None or meta is None or meta_ts is None:
+                            continue
+                        if meta_ts < record_min_timestamp_ns:
+                            continue
+                        primary_camera_name = camera_name
+                        primary_frame = frame
+                        primary_meta = meta
+                        break
+
+                    if primary_frame is None or primary_meta is None:
+                        logger_mp.warning("[RECORD_ALIGN] skip sample: no primary camera frame available after record start.")
+                        continue
+
+                    sample_monotonic_ns = int(camera_meta_monotonic_ns(primary_meta))
+                    colors[primary_camera_name] = primary_frame
+                    camera_timestamps[primary_camera_name] = primary_meta
+
+                    if head_source is not None and primary_camera_name != "head":
+                        head_frame, head_meta = head_source.get_nearest(
+                            sample_monotonic_ns,
+                            max_delta_ns=camera_align_max_delta_ns,
+                            min_monotonic_ns=record_min_timestamp_ns,
+                            copy=True,
+                        )
+                        if head_frame is not None:
+                            colors["head"] = head_frame
+                            camera_timestamps["head"] = head_meta
+                    if left_source is not None and primary_camera_name != "left_wrist":
+                        left_frame, left_meta = left_source.get_nearest(
+                            sample_monotonic_ns,
+                            max_delta_ns=camera_align_max_delta_ns,
+                            min_monotonic_ns=record_min_timestamp_ns,
+                            copy=True,
+                        )
+                        if left_frame is not None:
+                            colors["left_wrist"] = left_frame
+                            camera_timestamps["left_wrist"] = left_meta
+                    if right_source is not None and primary_camera_name != "right_wrist":
+                        right_frame, right_meta = right_source.get_nearest(
+                            sample_monotonic_ns,
+                            max_delta_ns=camera_align_max_delta_ns,
+                            min_monotonic_ns=record_min_timestamp_ns,
+                            copy=True,
+                        )
+                        if right_frame is not None:
+                            colors["right_wrist"] = right_frame
+                            camera_timestamps["right_wrist"] = right_meta
+
+                    aligned_state = interpolate_timed_sample(
                         state_history,
                         sample_monotonic_ns,
                         max_delta_ns=state_align_max_delta_ns,
                         min_timestamp_ns=record_min_timestamp_ns,
                     )
-                    aligned_action = nearest_timed_sample(
+                    aligned_action = interpolate_timed_sample(
                         action_history,
                         sample_monotonic_ns,
                         max_delta_ns=action_align_max_delta_ns,
                         min_timestamp_ns=record_min_timestamp_ns,
                     )
                     if aligned_state is None:
-                        logger_mp.warning("[RECORD_ALIGN] skip sample: no aligned state found near sample timestamp.")
+                        logger_mp.warning("[RECORD_ALIGN] skip sample: no interpolated state found at primary camera timestamp.")
                         continue
                     if aligned_action is None:
-                        logger_mp.warning("[RECORD_ALIGN] skip sample: no aligned action found near sample timestamp.")
+                        logger_mp.warning("[RECORD_ALIGN] skip sample: no interpolated action found at primary camera timestamp.")
                         continue
 
                     aligned_lr_arm_q = np.asarray(aligned_state["q"], dtype=float)
@@ -1289,50 +1459,6 @@ if __name__ == '__main__':
                     if need_arm_pose:
                         left_state_pose, right_state_pose = get_robot_wrist_poses(arm_ik, aligned_lr_arm_q)
                         left_action_pose, right_action_pose = get_robot_wrist_poses(arm_ik, aligned_sol_q)
-
-                    colors = {}
-                    depths = {}
-                    camera_timestamps = {}
-                    required_camera_missing = False
-                    if head_source is not None:
-                        head_frame, head_meta = head_source.get_nearest(
-                            sample_monotonic_ns,
-                            max_delta_ns=camera_align_max_delta_ns,
-                            min_monotonic_ns=record_min_timestamp_ns,
-                            copy=True,
-                        )
-                        if head_frame is not None:
-                            colors["head"] = head_frame
-                            camera_timestamps["head"] = head_meta
-                        else:
-                            required_camera_missing = True
-                    if left_source is not None:
-                        left_frame, left_meta = left_source.get_nearest(
-                            sample_monotonic_ns,
-                            max_delta_ns=camera_align_max_delta_ns,
-                            min_monotonic_ns=record_min_timestamp_ns,
-                            copy=True,
-                        )
-                        if left_frame is not None:
-                            colors["left_wrist"] = left_frame
-                            camera_timestamps["left_wrist"] = left_meta
-                        else:
-                            required_camera_missing = True
-                    if right_source is not None:
-                        right_frame, right_meta = right_source.get_nearest(
-                            sample_monotonic_ns,
-                            max_delta_ns=camera_align_max_delta_ns,
-                            min_monotonic_ns=record_min_timestamp_ns,
-                            copy=True,
-                        )
-                        if right_frame is not None:
-                            colors["right_wrist"] = right_frame
-                            camera_timestamps["right_wrist"] = right_meta
-                        else:
-                            required_camera_missing = True
-                    if required_camera_missing:
-                        logger_mp.warning("[RECORD_ALIGN] skip sample: no aligned camera frame found after record start.")
-                        continue
 
                     left_arm_state_entry = {
                         "qpos": left_arm_state.tolist() if record_arm_repr in {"qpos", "both"} else [],
@@ -1392,13 +1518,16 @@ if __name__ == '__main__':
                         "sample_wall_time_ns": int(time.time_ns()),
                         "sample_monotonic_ns": sample_monotonic_ns,
                         "teleop_input_perf_counter_ns": int(tele_data_recv_ts_ns),
+                        "primary_camera_name": primary_camera_name,
                         "state": {
                             "host_monotonic_ns": int(aligned_state["t_ns"]),
                             "delta_to_sample_ns": int(aligned_state["delta_to_target_ns"]),
+                            "interpolation_mode": aligned_state.get("interpolation_mode", "unknown"),
                         },
                         "action": {
                             "host_monotonic_ns": int(aligned_action["t_ns"]),
                             "delta_to_sample_ns": int(aligned_action["delta_to_target_ns"]),
+                            "interpolation_mode": aligned_action.get("interpolation_mode", "unknown"),
                         },
                         "camera": camera_timestamps,
                     }
