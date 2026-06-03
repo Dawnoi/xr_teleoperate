@@ -25,6 +25,8 @@ UNITREE_TP_LIB_DIR = UNITREE_SDK2_ROOT / "thirdparty" / "lib" / "x86_64"
 
 MOVE_EPS = 1e-5
 HEIGHT_EPS = 1e-5
+MOVE_KEEPALIVE_SEC = 0.10
+HEIGHT_KEEPALIVE_SEC = 0.10
 
 
 
@@ -97,6 +99,8 @@ class G1DAgvBridge:
         self._has_pending = False
         self._last_sent_move = (None, None, None)
         self._last_sent_height = None
+        self._last_sent_move_ns = 0
+        self._last_sent_height_ns = 0
         self._move_send_ms = deque(maxlen=400)
         self._height_send_ms = deque(maxlen=400)
         self._cycle_ms = deque(maxlen=400)
@@ -198,12 +202,14 @@ class G1DAgvBridge:
                     self._send_sync(f"MOVE {move_tuple[0]:.6f} {move_tuple[1]:.6f} {move_tuple[2]:.6f}")
                     move_ms = (time.perf_counter_ns() - start_ns) / 1e6
                     self._last_sent_move = move_tuple
+                    self._last_sent_move_ns = time.perf_counter_ns()
 
                 if self._should_send_height(height_value):
                     start_ns = time.perf_counter_ns()
                     self._send_sync(f"HEIGHT {height_value:.6f}")
                     height_ms = (time.perf_counter_ns() - start_ns) / 1e6
                     self._last_sent_height = height_value
+                    self._last_sent_height_ns = time.perf_counter_ns()
             except Exception as exc:
                 with self._cmd_lock:
                     self._last_error = str(exc)
@@ -221,13 +227,23 @@ class G1DAgvBridge:
         prev = self._last_sent_move
         if prev[0] is None:
             return True
-        return any(abs(float(a) - float(b)) > MOVE_EPS for a, b in zip(move_tuple, prev))
+        changed = any(abs(float(a) - float(b)) > MOVE_EPS for a, b in zip(move_tuple, prev))
+        if changed:
+            return True
+        if self._last_sent_move_ns <= 0:
+            return True
+        return (time.perf_counter_ns() - self._last_sent_move_ns) >= int(MOVE_KEEPALIVE_SEC * 1e9)
 
     def _should_send_height(self, height_value: float) -> bool:
         prev = self._last_sent_height
         if prev is None:
             return True
-        return abs(float(height_value) - float(prev)) > HEIGHT_EPS
+        changed = abs(float(height_value) - float(prev)) > HEIGHT_EPS
+        if changed:
+            return True
+        if self._last_sent_height_ns <= 0:
+            return True
+        return (time.perf_counter_ns() - self._last_sent_height_ns) >= int(HEIGHT_KEEPALIVE_SEC * 1e9)
 
     def set_target(self, vx: float, vy: float, vyaw: float, vz: float = 0.0) -> str:
         stamp_ns = time.perf_counter_ns()
