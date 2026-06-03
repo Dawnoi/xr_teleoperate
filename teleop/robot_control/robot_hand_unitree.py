@@ -267,6 +267,10 @@ class Dex1_1_Gripper_Controller:
         self._last_warn_times = {}
         self._startup_time = time.time()
         self._health_monitor_thread = None
+        self._last_dual_gripper_action = None
+        self._last_dual_gripper_state = None
+        self._last_dual_gripper_state_prev = None
+        self._stall_start_time = None
         
         if filter and not self.simulation_mode:
             self.smooth_filter = WeightedMovingFilter(np.array([0.5, 0.3, 0.2]), 2)
@@ -372,6 +376,8 @@ class Dex1_1_Gripper_Controller:
                 "last_cmd_age_sec": None if self._last_gripper_cmd_timestamp is None else (time.time() - self._last_gripper_cmd_timestamp),
                 "last_control_loop_age_sec": None if self._last_control_loop_timestamp is None else (time.time() - self._last_control_loop_timestamp),
                 "last_error": self._last_error_message,
+                "last_dual_gripper_action": None if self._last_dual_gripper_action is None else list(self._last_dual_gripper_action),
+                "last_dual_gripper_state": None if self._last_dual_gripper_state is None else list(self._last_dual_gripper_state),
             }
 
     def _health_monitor_loop(self):
@@ -403,6 +409,37 @@ class Dex1_1_Gripper_Controller:
                     "Likely DDS topic stalled or hardware feedback is offline.",
                     interval_sec=1.0,
                 )
+            action = snapshot["last_dual_gripper_action"]
+            state = snapshot["last_dual_gripper_state"]
+            if (
+                state_age is not None
+                and state_age <= 0.2
+                and action is not None
+                and state is not None
+                and len(action) == 2
+                and len(state) == 2
+            ):
+                action_arr = np.asarray(action, dtype=float)
+                state_arr = np.asarray(state, dtype=float)
+                err = np.abs(action_arr - state_arr)
+                state_prev = None if self._last_dual_gripper_state_prev is None else np.asarray(self._last_dual_gripper_state_prev, dtype=float)
+                motion = 0.0 if state_prev is None else float(np.max(np.abs(state_arr - state_prev)))
+                large_error = float(np.max(err)) > 0.35
+                almost_still = motion < 0.01
+                if large_error and almost_still:
+                    if self._stall_start_time is None:
+                        self._stall_start_time = time.time()
+                    elif (time.time() - self._stall_start_time) > 0.4:
+                        self._warn_throttled(
+                            "possible_stall_or_protection",
+                            "[Dex1_1_Gripper_Controller] gripper state is still updating, but commanded closing/opening "
+                            "remains far from measured position while motion is nearly stalled. "
+                            "This looks like contact stall, motor current limit, or driver protection rather than pure DDS disconnect.",
+                            interval_sec=1.0,
+                        )
+                else:
+                    self._stall_start_time = None
+                self._last_dual_gripper_state_prev = state_arr.copy()
             time.sleep(0.2)
     
     def ctrl_dual_gripper(self, dual_gripper_action):
@@ -472,6 +509,9 @@ class Dex1_1_Gripper_Controller:
                     left_actual_action  = left_target_action
                     right_actual_action = right_target_action
                 dual_gripper_action = np.array([left_actual_action, right_actual_action])
+                with self._health_lock:
+                    self._last_dual_gripper_state = dual_gripper_state.copy()
+                    self._last_dual_gripper_action = dual_gripper_action.copy()
 
                 if self.smooth_filter:
                     self.smooth_filter.add_data(dual_gripper_action)
