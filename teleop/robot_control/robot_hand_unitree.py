@@ -270,10 +270,15 @@ class Dex1_1_Gripper_Controller:
         self._last_dual_gripper_action = None
         self._last_dual_gripper_state = None
         self._last_dual_gripper_state_prev = None
-        self._stall_start_time = None
-        self._contact_latch_active = [False, False]
-        self._contact_latch_position = [0.0, 0.0]
-        self._contact_latch_names = ["left", "right"]
+        self._last_dual_gripper_tau_est = None
+        self._last_dual_gripper_temperature = None
+        self._last_dual_gripper_lost = None
+        self._force_hold_active = [False, False]
+        self._force_hold_position = [0.0, 0.0]
+        self._force_hold_names = ["left", "right"]
+        self.force_hold_tau_thresh = float(os.getenv("DEX1_FORCE_HOLD_TAU_THRESH", "0.45"))
+        self.force_hold_close_margin = float(os.getenv("DEX1_FORCE_HOLD_CLOSE_MARGIN", "0.12"))
+        self.force_hold_release_margin = float(os.getenv("DEX1_FORCE_HOLD_RELEASE_MARGIN", "0.18"))
         
         if filter and not self.simulation_mode:
             self.smooth_filter = WeightedMovingFilter(np.array([0.5, 0.3, 0.2]), 2)
@@ -295,6 +300,12 @@ class Dex1_1_Gripper_Controller:
         # Shared Arrays for gripper states
         self.left_gripper_state_value = Value('d', 0.0, lock=True)
         self.right_gripper_state_value = Value('d', 0.0, lock=True)
+        self.left_gripper_tau_est_value = Value('d', 0.0, lock=True)
+        self.right_gripper_tau_est_value = Value('d', 0.0, lock=True)
+        self.left_gripper_temperature_value = Value('i', 0, lock=True)
+        self.right_gripper_temperature_value = Value('i', 0, lock=True)
+        self.left_gripper_lost_value = Value('i', 0, lock=True)
+        self.right_gripper_lost_value = Value('i', 0, lock=True)
 
         # initialize subscribe thread
         self.subscribe_state_thread = threading.Thread(target=self._subscribe_gripper_state)
@@ -323,6 +334,12 @@ class Dex1_1_Gripper_Controller:
         self._health_monitor_thread.start()
 
         logger_mp.info("Initialize Dex1_1_Gripper_Controller OK!")
+        logger_mp.info(
+            "[Dex1_1_Gripper_Controller] tau_est force-hold enabled: tau_thresh=%.3f close_margin=%.3f release_margin=%.3f",
+            self.force_hold_tau_thresh,
+            self.force_hold_close_margin,
+            self.force_hold_release_margin,
+        )
 
     def _set_error(self, msg: str):
         with self._health_lock:
@@ -346,6 +363,12 @@ class Dex1_1_Gripper_Controller:
                 if left_gripper_msg is not None and right_gripper_msg is not None:
                     self.left_gripper_state_value.value = left_gripper_msg.states[0].q
                     self.right_gripper_state_value.value = right_gripper_msg.states[0].q
+                    self.left_gripper_tau_est_value.value = left_gripper_msg.states[0].tau_est
+                    self.right_gripper_tau_est_value.value = right_gripper_msg.states[0].tau_est
+                    self.left_gripper_temperature_value.value = int(left_gripper_msg.states[0].temperature)
+                    self.right_gripper_temperature_value.value = int(right_gripper_msg.states[0].temperature)
+                    self.left_gripper_lost_value.value = int(left_gripper_msg.states[0].lost)
+                    self.right_gripper_lost_value.value = int(right_gripper_msg.states[0].lost)
                     self.last_gripper_state_timestamp = time.time()
                     self.gripper_state_ready = True
                 time.sleep(0.002)
@@ -381,6 +404,9 @@ class Dex1_1_Gripper_Controller:
                 "last_error": self._last_error_message,
                 "last_dual_gripper_action": None if self._last_dual_gripper_action is None else list(self._last_dual_gripper_action),
                 "last_dual_gripper_state": None if self._last_dual_gripper_state is None else list(self._last_dual_gripper_state),
+                "last_dual_gripper_tau_est": None if self._last_dual_gripper_tau_est is None else list(self._last_dual_gripper_tau_est),
+                "last_dual_gripper_temperature": None if self._last_dual_gripper_temperature is None else list(self._last_dual_gripper_temperature),
+                "last_dual_gripper_lost": None if self._last_dual_gripper_lost is None else list(self._last_dual_gripper_lost),
             }
 
     def _health_monitor_loop(self):
@@ -412,37 +438,47 @@ class Dex1_1_Gripper_Controller:
                     "Likely DDS topic stalled or hardware feedback is offline.",
                     interval_sec=1.0,
                 )
+            lost_flags = snapshot["last_dual_gripper_lost"]
+            if lost_flags is not None and any(int(v) != 0 for v in lost_flags):
+                self._warn_throttled(
+                    "lost_flag",
+                    f"[Dex1_1_Gripper_Controller] driver reported lost flags: {lost_flags}. "
+                    "Check dex1 driver state, power, and cabling.",
+                    interval_sec=1.0,
+                )
+            temps = snapshot["last_dual_gripper_temperature"]
+            if temps is not None and any(int(v) >= 75 for v in temps):
+                self._warn_throttled(
+                    "high_temp",
+                    f"[Dex1_1_Gripper_Controller] high gripper temperature detected: {temps} C.",
+                    interval_sec=2.0,
+                )
             action = snapshot["last_dual_gripper_action"]
             state = snapshot["last_dual_gripper_state"]
+            tau_est = snapshot["last_dual_gripper_tau_est"]
             if (
                 state_age is not None
                 and state_age <= 0.2
                 and action is not None
                 and state is not None
+                and tau_est is not None
                 and len(action) == 2
                 and len(state) == 2
+                and len(tau_est) == 2
             ):
                 action_arr = np.asarray(action, dtype=float)
                 state_arr = np.asarray(state, dtype=float)
+                tau_arr = np.abs(np.asarray(tau_est, dtype=float))
                 err = np.abs(action_arr - state_arr)
-                state_prev = None if self._last_dual_gripper_state_prev is None else np.asarray(self._last_dual_gripper_state_prev, dtype=float)
-                motion = 0.0 if state_prev is None else float(np.max(np.abs(state_arr - state_prev)))
                 large_error = float(np.max(err)) > 0.35
-                almost_still = motion < 0.01
-                if large_error and almost_still:
-                    if self._stall_start_time is None:
-                        self._stall_start_time = time.time()
-                    elif (time.time() - self._stall_start_time) > 0.4:
-                        self._warn_throttled(
-                            "possible_stall_or_protection",
-                            "[Dex1_1_Gripper_Controller] gripper state is still updating, but commanded closing/opening "
-                            "remains far from measured position while motion is nearly stalled. "
-                            "This looks like contact stall, motor current limit, or driver protection rather than pure DDS disconnect.",
-                            interval_sec=1.0,
-                        )
-                else:
-                    self._stall_start_time = None
-                self._last_dual_gripper_state_prev = state_arr.copy()
+                high_tau = float(np.max(tau_arr)) > self.force_hold_tau_thresh
+                if large_error and high_tau:
+                    self._warn_throttled(
+                        "contact_or_force_limit",
+                        f"[Dex1_1_Gripper_Controller] large command/state gap with elevated tau_est={tau_arr.tolist()}. "
+                        "This looks like hard contact, force limit, or motor protection rather than pure DDS disconnect.",
+                        interval_sec=1.0,
+                    )
             time.sleep(0.2)
     
     def ctrl_dual_gripper(self, dual_gripper_action):
@@ -499,6 +535,18 @@ class Dex1_1_Gripper_Controller:
                     right_gripper_value = right_gripper_value_in.value
                 # get current dual gripper motor state
                 dual_gripper_state = np.array([left_gripper_state_value.value, right_gripper_state_value.value])
+                dual_gripper_tau_est = np.array([
+                    self.left_gripper_tau_est_value.value,
+                    self.right_gripper_tau_est_value.value,
+                ], dtype=float)
+                dual_gripper_temperature = np.array([
+                    self.left_gripper_temperature_value.value,
+                    self.right_gripper_temperature_value.value,
+                ], dtype=float)
+                dual_gripper_lost = np.array([
+                    self.left_gripper_lost_value.value,
+                    self.right_gripper_lost_value.value,
+                ], dtype=int)
                 
                 if left_gripper_value != 0.0 or right_gripper_value != 0.0: # if input data has been initialized.
                     # Linear mapping from [0, THUMB_INDEX_DISTANCE_MAX] to gripper action range
@@ -515,47 +563,40 @@ class Dex1_1_Gripper_Controller:
                 dual_gripper_action = np.array([left_actual_action, right_actual_action])
 
                 if not self.simulation_mode:
-                    stall_err_thresh = 0.35
-                    stall_motion_thresh = 0.01
-                    close_intent_margin = 0.08
-                    release_open_margin = 0.12
-                    if self._last_dual_gripper_state_prev is None:
-                        motion_vec = np.zeros(2, dtype=float)
-                    else:
-                        motion_vec = np.abs(
-                            dual_gripper_state - np.asarray(self._last_dual_gripper_state_prev, dtype=float)
-                        )
                     err_vec = raw_target_action - dual_gripper_state
 
                     for idx in range(2):
-                        large_error = abs(err_vec[idx]) > stall_err_thresh
-                        almost_still = motion_vec[idx] < stall_motion_thresh
-                        closing_intent = raw_target_action[idx] < (dual_gripper_state[idx] - close_intent_margin)
+                        closing_intent = raw_target_action[idx] < (dual_gripper_state[idx] - self.force_hold_close_margin)
+                        contact_detected = abs(float(dual_gripper_tau_est[idx])) > self.force_hold_tau_thresh
+                        driver_ok = int(dual_gripper_lost[idx]) == 0
 
-                        if self._contact_latch_active[idx]:
-                            latched_pos = self._contact_latch_position[idx]
-                            reopen_requested = raw_target_action[idx] > (latched_pos + release_open_margin)
-                            if reopen_requested:
-                                self._contact_latch_active[idx] = False
+                        if self._force_hold_active[idx]:
+                            latched_pos = self._force_hold_position[idx]
+                            reopen_requested = raw_target_action[idx] > (latched_pos + self.force_hold_release_margin)
+                            if reopen_requested or not contact_detected or not driver_ok:
+                                self._force_hold_active[idx] = False
                                 logger_mp.info(
-                                    f"[Dex1_1_Gripper_Controller] {self._contact_latch_names[idx]} gripper contact latch released. "
-                                    "Operator requested reopening away from the contact point."
+                                    f"[Dex1_1_Gripper_Controller] {self._force_hold_names[idx]} gripper force-hold released. "
+                                    "Reopen requested or contact/load condition disappeared."
                                 )
                             else:
-                                dual_gripper_action[idx] = dual_gripper_state[idx]
-                        elif closing_intent and large_error and almost_still:
-                            self._contact_latch_active[idx] = True
-                            self._contact_latch_position[idx] = float(dual_gripper_state[idx])
-                            dual_gripper_action[idx] = dual_gripper_state[idx]
+                                dual_gripper_action[idx] = latched_pos
+                        elif closing_intent and contact_detected and driver_ok:
+                            self._force_hold_active[idx] = True
+                            self._force_hold_position[idx] = float(dual_gripper_state[idx])
+                            dual_gripper_action[idx] = self._force_hold_position[idx]
                             logger_mp.warning(
-                                f"[Dex1_1_Gripper_Controller] {self._contact_latch_names[idx]} gripper contact latch engaged at "
-                                f"q={dual_gripper_state[idx]:.3f}. Freezing command at current position to avoid "
-                                "continuous hard-contact pushing and motor protection. Open slightly to release."
+                                f"[Dex1_1_Gripper_Controller] {self._force_hold_names[idx]} gripper force-hold engaged at "
+                                f"q={dual_gripper_state[idx]:.3f}, tau_est={dual_gripper_tau_est[idx]:.3f}, temp={int(dual_gripper_temperature[idx])}. "
+                                "Holding current position after contact instead of continuing to push."
                             )
 
                 with self._health_lock:
                     self._last_dual_gripper_state = dual_gripper_state.copy()
                     self._last_dual_gripper_action = dual_gripper_action.copy()
+                    self._last_dual_gripper_tau_est = dual_gripper_tau_est.copy()
+                    self._last_dual_gripper_temperature = dual_gripper_temperature.copy()
+                    self._last_dual_gripper_lost = dual_gripper_lost.copy()
 
                 if self.smooth_filter:
                     self.smooth_filter.add_data(dual_gripper_action)
@@ -571,7 +612,6 @@ class Dex1_1_Gripper_Controller:
                     self._last_control_loop_timestamp = time.time()
                 current_time = time.time()
                 time_elapsed = current_time - start_time
-                self._last_dual_gripper_state_prev = dual_gripper_state.copy()
                 sleep_time = max(0, (1 / self.fps) - time_elapsed)
                 time.sleep(sleep_time)
             except Exception as e:
