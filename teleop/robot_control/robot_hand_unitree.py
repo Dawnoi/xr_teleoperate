@@ -257,7 +257,16 @@ class Dex1_1_Gripper_Controller:
         self.fps = fps
         self.Unit_Test = Unit_Test
         self.gripper_sub_ready = False
+        self.gripper_state_ready = False
         self.simulation_mode = simulation_mode
+        self.running = True
+        self._health_lock = threading.Lock()
+        self._last_gripper_cmd_timestamp = None
+        self._last_control_loop_timestamp = None
+        self._last_error_message = ""
+        self._last_warn_times = {}
+        self._startup_time = time.time()
+        self._health_monitor_thread = None
         
         if filter and not self.simulation_mode:
             self.smooth_filter = WeightedMovingFilter(np.array([0.5, 0.3, 0.2]), 2)
@@ -285,33 +294,116 @@ class Dex1_1_Gripper_Controller:
         self.subscribe_state_thread.daemon = True
         self.subscribe_state_thread.start()
 
-        while not self.gripper_sub_ready:
+        startup_wait_deadline = time.time() + 3.0
+        while not self.gripper_state_ready and time.time() < startup_wait_deadline:
             time.sleep(0.01)
             logger_mp.warning("[Dex1_1_Gripper_Controller] Waiting to subscribe dds...")
-        logger_mp.info("[Dex1_1_Gripper_Controller] Subscribe dds ok.")
+        if self.gripper_state_ready:
+            logger_mp.info("[Dex1_1_Gripper_Controller] Subscribe dds ok.")
+        else:
+            logger_mp.warning(
+                "[Dex1_1_Gripper_Controller] No valid gripper state received within 3s. "
+                "Controller will continue running with health monitoring enabled."
+            )
 
         self.gripper_control_thread = threading.Thread(target=self.control_thread, args=(left_gripper_value_in, right_gripper_value_in, self.left_gripper_state_value, self.right_gripper_state_value,
                                                                                          dual_gripper_data_lock, dual_gripper_state_out, dual_gripper_action_out))
         self.gripper_control_thread.daemon = True
         self.gripper_control_thread.start()
 
+        self._health_monitor_thread = threading.Thread(target=self._health_monitor_loop)
+        self._health_monitor_thread.daemon = True
+        self._health_monitor_thread.start()
+
         logger_mp.info("Initialize Dex1_1_Gripper_Controller OK!")
+
+    def _set_error(self, msg: str):
+        with self._health_lock:
+            self._last_error_message = str(msg)
+
+    def _warn_throttled(self, key: str, message: str, interval_sec: float = 2.0):
+        now = time.time()
+        with self._health_lock:
+            last = float(self._last_warn_times.get(key, 0.0))
+            if (now - last) < interval_sec:
+                return
+            self._last_warn_times[key] = now
+        logger_mp.warning(message)
 
     def _subscribe_gripper_state(self):
         while True:
-            left_gripper_msg  = self.LeftGripperState_subscriber.Read()
-            right_gripper_msg  = self.RightGripperState_subscriber.Read()
-            self.gripper_sub_ready = True
-            if left_gripper_msg is not None and right_gripper_msg is not None:
-                self.left_gripper_state_value.value = left_gripper_msg.states[0].q
-                self.right_gripper_state_value.value = right_gripper_msg.states[0].q
-                self.last_gripper_state_timestamp = time.time()
-            time.sleep(0.002)
+            try:
+                left_gripper_msg  = self.LeftGripperState_subscriber.Read()
+                right_gripper_msg  = self.RightGripperState_subscriber.Read()
+                self.gripper_sub_ready = True
+                if left_gripper_msg is not None and right_gripper_msg is not None:
+                    self.left_gripper_state_value.value = left_gripper_msg.states[0].q
+                    self.right_gripper_state_value.value = right_gripper_msg.states[0].q
+                    self.last_gripper_state_timestamp = time.time()
+                    self.gripper_state_ready = True
+                time.sleep(0.002)
+            except Exception as e:
+                self._set_error(f"gripper state subscribe exception: {e}")
+                self._warn_throttled(
+                    "subscribe_exception",
+                    f"[Dex1_1_Gripper_Controller] state subscriber exception: {e}",
+                    interval_sec=2.0,
+                )
+                time.sleep(0.05)
 
     def get_state_age(self):
         if self.last_gripper_state_timestamp is None:
             return None
         return time.time() - self.last_gripper_state_timestamp
+
+    def get_health_snapshot(self):
+        state_age = self.get_state_age()
+        with self._health_lock:
+            return {
+                "subscriber_ready": bool(self.gripper_sub_ready),
+                "state_ready": bool(self.gripper_state_ready),
+                "subscribe_thread_alive": bool(
+                    self.subscribe_state_thread.is_alive() if self.subscribe_state_thread is not None else False
+                ),
+                "control_thread_alive": bool(
+                    self.gripper_control_thread.is_alive() if self.gripper_control_thread is not None else False
+                ),
+                "state_age_sec": state_age,
+                "last_cmd_age_sec": None if self._last_gripper_cmd_timestamp is None else (time.time() - self._last_gripper_cmd_timestamp),
+                "last_control_loop_age_sec": None if self._last_control_loop_timestamp is None else (time.time() - self._last_control_loop_timestamp),
+                "last_error": self._last_error_message,
+            }
+
+    def _health_monitor_loop(self):
+        while self.running:
+            snapshot = self.get_health_snapshot()
+            if not snapshot["subscribe_thread_alive"]:
+                self._warn_throttled(
+                    "subscribe_thread_dead",
+                    "[Dex1_1_Gripper_Controller] state subscriber thread is not alive. DDS state updates are lost.",
+                    interval_sec=2.0,
+                )
+            if not snapshot["control_thread_alive"]:
+                self._warn_throttled(
+                    "control_thread_dead",
+                    "[Dex1_1_Gripper_Controller] control thread is not alive. Gripper command publishing has stopped.",
+                    interval_sec=2.0,
+                )
+            if not snapshot["state_ready"] and (time.time() - self._startup_time) > 3.0:
+                self._warn_throttled(
+                    "no_initial_state",
+                    "[Dex1_1_Gripper_Controller] still no valid gripper state after startup. Check rt/dex1/*/state DDS topics, power, and wiring.",
+                    interval_sec=2.0,
+                )
+            state_age = snapshot["state_age_sec"]
+            if state_age is not None and state_age > 0.5:
+                self._warn_throttled(
+                    "stale_state",
+                    f"[Dex1_1_Gripper_Controller] gripper state stale for {state_age:.2f}s. "
+                    "Likely DDS topic stalled or hardware feedback is offline.",
+                    interval_sec=1.0,
+                )
+            time.sleep(0.2)
     
     def ctrl_dual_gripper(self, dual_gripper_action):
         """set current left, right gripper motor cmd target q"""
@@ -320,6 +412,8 @@ class Dex1_1_Gripper_Controller:
 
         self.LeftGripperCmb_publisher.Write(self.left_gripper_msg)
         self.RightGripperCmb_publisher.Write(self.right_gripper_msg)
+        with self._health_lock:
+            self._last_gripper_cmd_timestamp = time.time()
         # logger_mp.debug("gripper ctrl publish ok.")
     
     def control_thread(self, left_gripper_value_in, right_gripper_value_in, left_gripper_state_value, right_gripper_state_value, dual_hand_data_lock = None, 
@@ -355,8 +449,8 @@ class Dex1_1_Gripper_Controller:
         self.right_gripper_msg.cmds[0].tau = tau
         self.right_gripper_msg.cmds[0].kp  = kp
         self.right_gripper_msg.cmds[0].kd  = kd
-        try:
-            while self.running:
+        while self.running:
+            try:
                 start_time = time.time()
                 # get dual hand skeletal point state from XR device
                 with left_gripper_value_in.get_lock():
@@ -389,12 +483,16 @@ class Dex1_1_Gripper_Controller:
                         dual_gripper_action_out[:] = dual_gripper_action - np.array([LEFT_MAPPED_MIN, RIGHT_MAPPED_MIN])
 
                 self.ctrl_dual_gripper(dual_gripper_action)
+                with self._health_lock:
+                    self._last_control_loop_timestamp = time.time()
                 current_time = time.time()
                 time_elapsed = current_time - start_time
                 sleep_time = max(0, (1 / self.fps) - time_elapsed)
                 time.sleep(sleep_time)
-        finally:
-            logger_mp.info("Dex1_1_Gripper_Controller has been closed.")
+            except Exception as e:
+                self._set_error(f"gripper control loop exception: {e}")
+                logger_mp.exception("[Dex1_1_Gripper_Controller] control loop exception")
+                time.sleep(0.05)
 
 class Gripper_JointIndex(IntEnum):
     kGripper = 0
