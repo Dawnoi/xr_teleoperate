@@ -271,6 +271,9 @@ class Dex1_1_Gripper_Controller:
         self._last_dual_gripper_state = None
         self._last_dual_gripper_state_prev = None
         self._stall_start_time = None
+        self._contact_latch_active = [False, False]
+        self._contact_latch_position = [0.0, 0.0]
+        self._contact_latch_names = ["left", "right"]
         
         if filter and not self.simulation_mode:
             self.smooth_filter = WeightedMovingFilter(np.array([0.5, 0.3, 0.2]), 2)
@@ -501,6 +504,7 @@ class Dex1_1_Gripper_Controller:
                     # Linear mapping from [0, THUMB_INDEX_DISTANCE_MAX] to gripper action range
                     left_target_action  = np.interp(left_gripper_value, [THUMB_INDEX_DISTANCE_MIN, THUMB_INDEX_DISTANCE_MAX], [LEFT_MAPPED_MIN, LEFT_MAPPED_MAX])
                     right_target_action = np.interp(right_gripper_value, [THUMB_INDEX_DISTANCE_MIN, THUMB_INDEX_DISTANCE_MAX], [RIGHT_MAPPED_MIN, RIGHT_MAPPED_MAX])
+                raw_target_action = np.array([left_target_action, right_target_action], dtype=float)
                 # clip dual gripper action to avoid overflow
                 if not self.simulation_mode:
                     left_actual_action  = np.clip(left_target_action,  dual_gripper_state[0] - DELTA_GRIPPER_CMD, dual_gripper_state[0] + DELTA_GRIPPER_CMD) 
@@ -509,6 +513,46 @@ class Dex1_1_Gripper_Controller:
                     left_actual_action  = left_target_action
                     right_actual_action = right_target_action
                 dual_gripper_action = np.array([left_actual_action, right_actual_action])
+
+                if not self.simulation_mode:
+                    stall_err_thresh = 0.35
+                    stall_motion_thresh = 0.01
+                    close_intent_margin = 0.08
+                    release_open_margin = 0.12
+                    if self._last_dual_gripper_state_prev is None:
+                        motion_vec = np.zeros(2, dtype=float)
+                    else:
+                        motion_vec = np.abs(
+                            dual_gripper_state - np.asarray(self._last_dual_gripper_state_prev, dtype=float)
+                        )
+                    err_vec = raw_target_action - dual_gripper_state
+
+                    for idx in range(2):
+                        large_error = abs(err_vec[idx]) > stall_err_thresh
+                        almost_still = motion_vec[idx] < stall_motion_thresh
+                        closing_intent = raw_target_action[idx] < (dual_gripper_state[idx] - close_intent_margin)
+
+                        if self._contact_latch_active[idx]:
+                            latched_pos = self._contact_latch_position[idx]
+                            reopen_requested = raw_target_action[idx] > (latched_pos + release_open_margin)
+                            if reopen_requested:
+                                self._contact_latch_active[idx] = False
+                                logger_mp.info(
+                                    f"[Dex1_1_Gripper_Controller] {self._contact_latch_names[idx]} gripper contact latch released. "
+                                    "Operator requested reopening away from the contact point."
+                                )
+                            else:
+                                dual_gripper_action[idx] = dual_gripper_state[idx]
+                        elif closing_intent and large_error and almost_still:
+                            self._contact_latch_active[idx] = True
+                            self._contact_latch_position[idx] = float(dual_gripper_state[idx])
+                            dual_gripper_action[idx] = dual_gripper_state[idx]
+                            logger_mp.warning(
+                                f"[Dex1_1_Gripper_Controller] {self._contact_latch_names[idx]} gripper contact latch engaged at "
+                                f"q={dual_gripper_state[idx]:.3f}. Freezing command at current position to avoid "
+                                "continuous hard-contact pushing and motor protection. Open slightly to release."
+                            )
+
                 with self._health_lock:
                     self._last_dual_gripper_state = dual_gripper_state.copy()
                     self._last_dual_gripper_action = dual_gripper_action.copy()
@@ -527,6 +571,7 @@ class Dex1_1_Gripper_Controller:
                     self._last_control_loop_timestamp = time.time()
                 current_time = time.time()
                 time_elapsed = current_time - start_time
+                self._last_dual_gripper_state_prev = dual_gripper_state.copy()
                 sleep_time = max(0, (1 / self.fps) - time_elapsed)
                 time.sleep(sleep_time)
             except Exception as e:
