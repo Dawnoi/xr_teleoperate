@@ -276,9 +276,12 @@ class Dex1_1_Gripper_Controller:
         self._force_hold_active = [False, False]
         self._force_hold_position = [0.0, 0.0]
         self._force_hold_names = ["left", "right"]
-        self.force_hold_tau_thresh = float(os.getenv("DEX1_FORCE_HOLD_TAU_THRESH", "0.45"))
+        self._force_hold_contact_lost_since = [None, None]
+        self.force_hold_tau_engage_thresh = float(os.getenv("DEX1_FORCE_HOLD_TAU_ENGAGE_THRESH", "0.55"))
+        self.force_hold_tau_release_thresh = float(os.getenv("DEX1_FORCE_HOLD_TAU_RELEASE_THRESH", "0.30"))
         self.force_hold_close_margin = float(os.getenv("DEX1_FORCE_HOLD_CLOSE_MARGIN", "0.12"))
         self.force_hold_release_margin = float(os.getenv("DEX1_FORCE_HOLD_RELEASE_MARGIN", "0.18"))
+        self.force_hold_release_grace_sec = float(os.getenv("DEX1_FORCE_HOLD_RELEASE_GRACE_SEC", "0.20"))
         
         if filter and not self.simulation_mode:
             self.smooth_filter = WeightedMovingFilter(np.array([0.5, 0.3, 0.2]), 2)
@@ -335,10 +338,12 @@ class Dex1_1_Gripper_Controller:
 
         logger_mp.info("Initialize Dex1_1_Gripper_Controller OK!")
         logger_mp.info(
-            "[Dex1_1_Gripper_Controller] tau_est force-hold enabled: tau_thresh=%.3f close_margin=%.3f release_margin=%.3f",
-            self.force_hold_tau_thresh,
+            "[Dex1_1_Gripper_Controller] tau_est force-hold enabled: engage_tau=%.3f release_tau=%.3f close_margin=%.3f release_margin=%.3f release_grace=%.3fs",
+            self.force_hold_tau_engage_thresh,
+            self.force_hold_tau_release_thresh,
             self.force_hold_close_margin,
             self.force_hold_release_margin,
+            self.force_hold_release_grace_sec,
         )
 
     def _set_error(self, msg: str):
@@ -471,7 +476,7 @@ class Dex1_1_Gripper_Controller:
                 tau_arr = np.abs(np.asarray(tau_est, dtype=float))
                 err = np.abs(action_arr - state_arr)
                 large_error = float(np.max(err)) > 0.35
-                high_tau = float(np.max(tau_arr)) > self.force_hold_tau_thresh
+                high_tau = float(np.max(tau_arr)) > self.force_hold_tau_engage_thresh
                 if large_error and high_tau:
                     self._warn_throttled(
                         "contact_or_force_limit",
@@ -563,26 +568,43 @@ class Dex1_1_Gripper_Controller:
                 dual_gripper_action = np.array([left_actual_action, right_actual_action])
 
                 if not self.simulation_mode:
-                    err_vec = raw_target_action - dual_gripper_state
+                    now = time.time()
 
                     for idx in range(2):
                         closing_intent = raw_target_action[idx] < (dual_gripper_state[idx] - self.force_hold_close_margin)
-                        contact_detected = abs(float(dual_gripper_tau_est[idx])) > self.force_hold_tau_thresh
+                        tau_abs = abs(float(dual_gripper_tau_est[idx]))
+                        contact_detected = tau_abs > self.force_hold_tau_engage_thresh
+                        contact_released = tau_abs < self.force_hold_tau_release_thresh
                         driver_ok = int(dual_gripper_lost[idx]) == 0
 
                         if self._force_hold_active[idx]:
                             latched_pos = self._force_hold_position[idx]
                             reopen_requested = raw_target_action[idx] > (latched_pos + self.force_hold_release_margin)
-                            if reopen_requested or not contact_detected or not driver_ok:
+                            if reopen_requested or not driver_ok:
                                 self._force_hold_active[idx] = False
+                                self._force_hold_contact_lost_since[idx] = None
                                 logger_mp.info(
                                     f"[Dex1_1_Gripper_Controller] {self._force_hold_names[idx]} gripper force-hold released. "
-                                    "Reopen requested or contact/load condition disappeared."
+                                    "Reopen requested or driver load state invalid."
                                 )
                             else:
+                                if contact_released:
+                                    if self._force_hold_contact_lost_since[idx] is None:
+                                        self._force_hold_contact_lost_since[idx] = now
+                                    elif (now - self._force_hold_contact_lost_since[idx]) >= self.force_hold_release_grace_sec:
+                                        self._force_hold_active[idx] = False
+                                        self._force_hold_contact_lost_since[idx] = None
+                                        logger_mp.info(
+                                            f"[Dex1_1_Gripper_Controller] {self._force_hold_names[idx]} gripper force-hold released. "
+                                            "Contact load stayed below release threshold."
+                                        )
+                                        continue
+                                else:
+                                    self._force_hold_contact_lost_since[idx] = None
                                 dual_gripper_action[idx] = latched_pos
                         elif closing_intent and contact_detected and driver_ok:
                             self._force_hold_active[idx] = True
+                            self._force_hold_contact_lost_since[idx] = None
                             self._force_hold_position[idx] = float(dual_gripper_state[idx])
                             dual_gripper_action[idx] = self._force_hold_position[idx]
                             logger_mp.warning(
