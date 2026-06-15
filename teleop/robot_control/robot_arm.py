@@ -1,6 +1,7 @@
 import numpy as np
 import threading
 import time
+from collections import deque
 from enum import IntEnum
 
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize # dds
@@ -23,7 +24,7 @@ G1_23_Num_Motors = 35
 H1_2_Num_Motors = 35
 H1_Num_Motors = 20
 H2_Num_Motors = 35
- 
+
 
 class MotorState:
     def __init__(self):
@@ -54,6 +55,7 @@ class H2_LowState:
 class DataBuffer:
     def __init__(self):
         self.data = None
+        self.timestamp = None
         self.lock = threading.Lock()
 
     def GetData(self):
@@ -63,6 +65,100 @@ class DataBuffer:
     def SetData(self, data):
         with self.lock:
             self.data = data
+            self.timestamp = time.time()
+
+    def GetTimestamp(self):
+        with self.lock:
+            return self.timestamp
+
+    def GetAge(self):
+        with self.lock:
+            if self.timestamp is None:
+                return None
+            return time.time() - self.timestamp
+
+
+def _init_latency_trace_fields(controller):
+    controller._latency_tracker = None
+    controller._pending_trace_seq = 0
+
+
+def _set_latency_tracker(controller, tracker):
+    controller._latency_tracker = tracker
+
+
+def _mark_trace_published(
+    controller,
+    trace_seq,
+    publish_ts_ns=None,
+    dds_write_ms=None,
+    enqueue_to_publish_ms=None,
+    ctrl_loop_ms=None,
+):
+    if not trace_seq:
+        return
+    tracker = getattr(controller, "_latency_tracker", None)
+    if tracker is None:
+        return
+    try:
+        tracker.mark_publish(
+            int(trace_seq),
+            publish_ts_ns=publish_ts_ns,
+            dds_write_ms=dds_write_ms,
+            enqueue_to_publish_ms=enqueue_to_publish_ms,
+            ctrl_loop_ms=ctrl_loop_ms,
+        )
+    except Exception as e:
+        logger_mp.warning(f"[LATENCY] failed to mark publish for seq={trace_seq}: {e}")
+
+
+def _init_controller_timing_fields(controller):
+    controller._timing_lock = threading.Lock()
+    controller._publish_loop_ms = deque(maxlen=400)
+    controller._dds_write_ms = deque(maxlen=400)
+    controller._enqueue_to_publish_ms = deque(maxlen=400)
+    controller._dds_publish_count = 0
+    controller._dds_publish_start_ns = time.perf_counter_ns()
+    controller._pending_cmd_version = 0
+    controller._pending_target_set_ns = 0
+    controller._last_published_cmd_version = -1
+
+
+def _record_controller_timing_sample(controller, loop_dt_ms: float, write_dt_ms: float, enqueue_to_publish_ms):
+    with controller._timing_lock:
+        controller._publish_loop_ms.append(float(loop_dt_ms))
+        controller._dds_write_ms.append(float(write_dt_ms))
+        if enqueue_to_publish_ms is not None:
+            controller._enqueue_to_publish_ms.append(float(enqueue_to_publish_ms))
+        controller._dds_publish_count += 1
+
+
+def _summary_stats(values):
+    if not values:
+        return None
+    arr = np.asarray(values, dtype=float)
+    return {
+        "avg_ms": float(np.mean(arr)),
+        "p95_ms": float(np.percentile(arr, 95)),
+        "max_ms": float(np.max(arr)),
+    }
+
+
+def _get_controller_timing_snapshot(controller):
+    if not hasattr(controller, "_timing_lock"):
+        return None
+    with controller._timing_lock:
+        loop_stats = _summary_stats(controller._publish_loop_ms)
+        write_stats = _summary_stats(controller._dds_write_ms)
+        enqueue_stats = _summary_stats(controller._enqueue_to_publish_ms)
+        elapsed_ns = max(1, time.perf_counter_ns() - controller._dds_publish_start_ns)
+        publish_hz = controller._dds_publish_count / (elapsed_ns / 1e9)
+    return {
+        "publish_hz": float(publish_hz),
+        "loop_stats": loop_stats,
+        "write_stats": write_stats,
+        "enqueue_stats": enqueue_stats,
+    }
 
 class G1_29_ArmController:
     def __init__(self, motion_mode = False, simulation_mode = False):
@@ -85,6 +181,8 @@ class G1_29_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+        _init_latency_trace_fields(self)
+        _init_controller_timing_fields(self)
 
         if self.motion_mode:
             self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Motion, hg_LowCmd)
@@ -135,6 +233,8 @@ class G1_29_ArmController:
                     self.msg.motor_cmd[id].kd = self.kd_high
             self.msg.motor_cmd[id].q  = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
+        self.q_target = self.get_current_dual_arm_q().copy()
+        self.tauff_target = np.zeros_like(self.q_target)
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -167,11 +267,15 @@ class G1_29_ArmController:
             self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = 1.0;
 
         while True:
+            loop_start_ns = time.perf_counter_ns()
             start_time = time.time()
 
             with self.ctrl_lock:
                 arm_q_target     = self.q_target
                 arm_tauff_target = self.tauff_target
+                trace_seq = self._pending_trace_seq
+                cmd_version = self._pending_cmd_version
+                target_set_ns = self._pending_target_set_ns
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -184,7 +288,29 @@ class G1_29_ArmController:
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]   
 
             self.msg.crc = self.crc.Crc(self.msg)
+            write_start_ns = time.perf_counter_ns()
             self.lowcmd_publisher.Write(self.msg)
+            publish_done_ns = time.perf_counter_ns()
+            dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
+            ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
+            enqueue_to_publish_ms = None
+            if cmd_version != self._last_published_cmd_version and target_set_ns:
+                enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
+                self._last_published_cmd_version = cmd_version
+            _mark_trace_published(
+                self,
+                trace_seq,
+                publish_ts_ns=publish_done_ns,
+                dds_write_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+                ctrl_loop_ms=ctrl_loop_ms,
+            )
+            _record_controller_timing_sample(
+                self,
+                loop_dt_ms=ctrl_loop_ms,
+                write_dt_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+            )
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -197,11 +323,20 @@ class G1_29_ArmController:
             # logger_mp.debug(f"arm_velocity_limit:{self.arm_velocity_limit}")
             # logger_mp.debug(f"sleep_time:{sleep_time}")
 
-    def ctrl_dual_arm(self, q_target, tauff_target):
+    def set_latency_tracker(self, tracker):
+        _set_latency_tracker(self, tracker)
+
+    def get_timing_snapshot(self):
+        return _get_controller_timing_snapshot(self)
+
+    def ctrl_dual_arm(self, q_target, tauff_target, trace_seq = None):
         '''Set control target values q & tau of the left and right arm motors.'''
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
+            self._pending_cmd_version += 1
+            self._pending_target_set_ns = time.perf_counter_ns()
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -367,6 +502,8 @@ class G1_23_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+        _init_latency_trace_fields(self)
+        _init_controller_timing_fields(self)
 
         
         if self.motion_mode:
@@ -418,6 +555,8 @@ class G1_23_ArmController:
                     self.msg.motor_cmd[id].kd = self.kd_high
             self.msg.motor_cmd[id].q  = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
+        self.q_target = self.get_current_dual_arm_q().copy()
+        self.tauff_target = np.zeros_like(self.q_target)
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -450,11 +589,15 @@ class G1_23_ArmController:
             self.msg.motor_cmd[G1_23_JointIndex.kNotUsedJoint0].q = 1.0;
 
         while True:
+            loop_start_ns = time.perf_counter_ns()
             start_time = time.time()
 
             with self.ctrl_lock:
                 arm_q_target     = self.q_target
                 arm_tauff_target = self.tauff_target
+                trace_seq = self._pending_trace_seq
+                cmd_version = self._pending_cmd_version
+                target_set_ns = self._pending_target_set_ns
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -467,7 +610,29 @@ class G1_23_ArmController:
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]      
 
             self.msg.crc = self.crc.Crc(self.msg)
+            write_start_ns = time.perf_counter_ns()
             self.lowcmd_publisher.Write(self.msg)
+            publish_done_ns = time.perf_counter_ns()
+            dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
+            ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
+            enqueue_to_publish_ms = None
+            if cmd_version != self._last_published_cmd_version and target_set_ns:
+                enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
+                self._last_published_cmd_version = cmd_version
+            _mark_trace_published(
+                self,
+                trace_seq,
+                publish_ts_ns=publish_done_ns,
+                dds_write_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+                ctrl_loop_ms=ctrl_loop_ms,
+            )
+            _record_controller_timing_sample(
+                self,
+                loop_dt_ms=ctrl_loop_ms,
+                write_dt_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+            )
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -480,11 +645,20 @@ class G1_23_ArmController:
             # logger_mp.debug(f"arm_velocity_limit:{self.arm_velocity_limit}")
             # logger_mp.debug(f"sleep_time:{sleep_time}")
 
-    def ctrl_dual_arm(self, q_target, tauff_target):
+    def set_latency_tracker(self, tracker):
+        _set_latency_tracker(self, tracker)
+
+    def get_timing_snapshot(self):
+        return _get_controller_timing_snapshot(self)
+
+    def ctrl_dual_arm(self, q_target, tauff_target, trace_seq = None):
         '''Set control target values q & tau of the left and right arm motors.'''
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
+            self._pending_cmd_version += 1
+            self._pending_target_set_ns = time.perf_counter_ns()
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -642,6 +816,8 @@ class H1_2_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+        _init_latency_trace_fields(self)
+        _init_controller_timing_fields(self)
 
 
         if self.motion_mode:
@@ -693,6 +869,8 @@ class H1_2_ArmController:
                     self.msg.motor_cmd[id].kd = self.kd_high
             self.msg.motor_cmd[id].q  = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
+        self.q_target = self.get_current_dual_arm_q().copy()
+        self.tauff_target = np.zeros_like(self.q_target)
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -725,11 +903,15 @@ class H1_2_ArmController:
             self.msg.motor_cmd[H1_2_JointIndex.kNotUsedJoint0].q = 1.0;
 
         while True:
+            loop_start_ns = time.perf_counter_ns()
             start_time = time.time()
 
             with self.ctrl_lock:
                 arm_q_target     = self.q_target
                 arm_tauff_target = self.tauff_target
+                trace_seq = self._pending_trace_seq
+                cmd_version = self._pending_cmd_version
+                target_set_ns = self._pending_target_set_ns
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -742,7 +924,29 @@ class H1_2_ArmController:
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]      
 
             self.msg.crc = self.crc.Crc(self.msg)
+            write_start_ns = time.perf_counter_ns()
             self.lowcmd_publisher.Write(self.msg)
+            publish_done_ns = time.perf_counter_ns()
+            dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
+            ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
+            enqueue_to_publish_ms = None
+            if cmd_version != self._last_published_cmd_version and target_set_ns:
+                enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
+                self._last_published_cmd_version = cmd_version
+            _mark_trace_published(
+                self,
+                trace_seq,
+                publish_ts_ns=publish_done_ns,
+                dds_write_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+                ctrl_loop_ms=ctrl_loop_ms,
+            )
+            _record_controller_timing_sample(
+                self,
+                loop_dt_ms=ctrl_loop_ms,
+                write_dt_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+            )
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -755,11 +959,20 @@ class H1_2_ArmController:
             # logger_mp.debug(f"arm_velocity_limit:{self.arm_velocity_limit}")
             # logger_mp.debug(f"sleep_time:{sleep_time}")
 
-    def ctrl_dual_arm(self, q_target, tauff_target):
+    def set_latency_tracker(self, tracker):
+        _set_latency_tracker(self, tracker)
+
+    def get_timing_snapshot(self):
+        return _get_controller_timing_snapshot(self)
+
+    def ctrl_dual_arm(self, q_target, tauff_target, trace_seq = None):
         '''Set control target values q & tau of the left and right arm motors.'''
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
+            self._pending_cmd_version += 1
+            self._pending_target_set_ns = time.perf_counter_ns()
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''
@@ -921,6 +1134,8 @@ class H1_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+        _init_latency_trace_fields(self)
+        _init_controller_timing_fields(self)
 
         self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Debug, go_LowCmd)
         self.lowcmd_publisher.Init()
@@ -962,6 +1177,8 @@ class H1_ArmController:
                 self.msg.motor_cmd[id].mode = 0x0A
             self.msg.motor_cmd[id].q  = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
+        self.q_target = self.get_current_dual_arm_q().copy()
+        self.tauff_target = np.zeros_like(self.q_target)
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -991,11 +1208,15 @@ class H1_ArmController:
 
     def _ctrl_motor_state(self):
         while True:
+            loop_start_ns = time.perf_counter_ns()
             start_time = time.time()
 
             with self.ctrl_lock:
                 arm_q_target     = self.q_target
                 arm_tauff_target = self.tauff_target
+                trace_seq = self._pending_trace_seq
+                cmd_version = self._pending_cmd_version
+                target_set_ns = self._pending_target_set_ns
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -1008,7 +1229,29 @@ class H1_ArmController:
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]      
 
             self.msg.crc = self.crc.Crc(self.msg)
+            write_start_ns = time.perf_counter_ns()
             self.lowcmd_publisher.Write(self.msg)
+            publish_done_ns = time.perf_counter_ns()
+            dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
+            ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
+            enqueue_to_publish_ms = None
+            if cmd_version != self._last_published_cmd_version and target_set_ns:
+                enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
+                self._last_published_cmd_version = cmd_version
+            _mark_trace_published(
+                self,
+                trace_seq,
+                publish_ts_ns=publish_done_ns,
+                dds_write_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+                ctrl_loop_ms=ctrl_loop_ms,
+            )
+            _record_controller_timing_sample(
+                self,
+                loop_dt_ms=ctrl_loop_ms,
+                write_dt_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+            )
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1021,11 +1264,20 @@ class H1_ArmController:
             # logger_mp.debug(f"arm_velocity_limit:{self.arm_velocity_limit}")
             # logger_mp.debug(f"sleep_time:{sleep_time}")
 
-    def ctrl_dual_arm(self, q_target, tauff_target):
+    def set_latency_tracker(self, tracker):
+        _set_latency_tracker(self, tracker)
+
+    def get_timing_snapshot(self):
+        return _get_controller_timing_snapshot(self)
+
+    def ctrl_dual_arm(self, q_target, tauff_target, trace_seq = None):
         '''Set control target values q & tau of the left and right arm motors.'''
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
+            self._pending_cmd_version += 1
+            self._pending_target_set_ns = time.perf_counter_ns()
     
     def get_current_motor_q(self):
         '''Return current state q of all body motors.'''
@@ -1142,6 +1394,8 @@ class H2_ArmController:
         self._speed_gradual_max = False
         self._gradual_start_time = None
         self._gradual_time = None
+        _init_latency_trace_fields(self)
+        _init_controller_timing_fields(self)
         
         if self.motion_mode:
             self.lowcmd_publisher = ChannelPublisher(kTopicLowCommand_Motion, hg_LowCmd)
@@ -1195,6 +1449,8 @@ class H2_ArmController:
             )
             self.msg.motor_cmd[id].q = self.all_motor_q[id]
         logger_mp.info("Lock OK!")
+        self.q_target = self.get_current_dual_arm_q().copy()
+        self.tauff_target = np.zeros_like(self.q_target)
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -1227,11 +1483,15 @@ class H2_ArmController:
             self.msg.motor_cmd[H2_JointIndex.kNotUsedJoint0].q = 1.0
 
         while True:
+            loop_start_ns = time.perf_counter_ns()
             start_time = time.time()
 
             with self.ctrl_lock:
                 arm_q_target = self.q_target
                 arm_tauff_target = self.tauff_target
+                trace_seq = self._pending_trace_seq
+                cmd_version = self._pending_cmd_version
+                target_set_ns = self._pending_target_set_ns
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -1244,7 +1504,29 @@ class H2_ArmController:
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]
 
             self.msg.crc = self.crc.Crc(self.msg)
+            write_start_ns = time.perf_counter_ns()
             self.lowcmd_publisher.Write(self.msg)
+            publish_done_ns = time.perf_counter_ns()
+            dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
+            ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
+            enqueue_to_publish_ms = None
+            if cmd_version != self._last_published_cmd_version and target_set_ns:
+                enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
+                self._last_published_cmd_version = cmd_version
+            _mark_trace_published(
+                self,
+                trace_seq,
+                publish_ts_ns=publish_done_ns,
+                dds_write_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+                ctrl_loop_ms=ctrl_loop_ms,
+            )
+            _record_controller_timing_sample(
+                self,
+                loop_dt_ms=ctrl_loop_ms,
+                write_dt_ms=dds_write_ms,
+                enqueue_to_publish_ms=enqueue_to_publish_ms,
+            )
 
             if self._speed_gradual_max is True:
                 t_elapsed = start_time - self._gradual_start_time
@@ -1255,11 +1537,20 @@ class H2_ArmController:
             sleep_time = max(0, (self.control_dt - all_t_elapsed))
             time.sleep(sleep_time)
 
-    def ctrl_dual_arm(self, q_target, tauff_target):
+    def set_latency_tracker(self, tracker):
+        _set_latency_tracker(self, tracker)
+
+    def get_timing_snapshot(self):
+        return _get_controller_timing_snapshot(self)
+
+    def ctrl_dual_arm(self, q_target, tauff_target, trace_seq = None):
         """Set control target values q & tau of the left and right arm motors."""
         with self.ctrl_lock:
             self.q_target = q_target
             self.tauff_target = tauff_target
+            self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
+            self._pending_cmd_version += 1
+            self._pending_target_set_ns = time.perf_counter_ns()
 
     def get_mode_machine(self):
         """Return current dds mode machine."""

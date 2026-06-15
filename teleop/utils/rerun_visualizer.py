@@ -7,6 +7,18 @@ import rerun.blueprint as rrb
 from datetime import datetime
 os.environ["RUST_LOG"] = "error"
 
+
+def canonical_color_key(color_key: str) -> str:
+    key = str(color_key or "").strip()
+    mapping = {
+        "left_wrist": "wrist_left",
+        "right_wrist": "wrist_right",
+        "wrist_left": "wrist_left",
+        "wrist_right": "wrist_right",
+        "head": "head",
+    }
+    return mapping.get(key, key)
+
 class RerunEpisodeReader:
     def __init__(self, task_dir = ".", json_file="data.json"):
         self.task_dir = task_dir
@@ -42,6 +54,7 @@ class RerunEpisodeReader:
                     'actions': item_data.get('actions', {}),
                     'tactiles': item_data.get('tactiles', {}),
                     'audios': audios,
+                    'timestamps': item_data.get('timestamps', {}),
                 }
             )
 
@@ -49,21 +62,21 @@ class RerunEpisodeReader:
 
     def _process_images(self, item_data, data_type, dir_path):
         images = {}
-
-        for key, file_name in item_data.get(data_type, {}).items():
+        data_entries = item_data.get(data_type, {}) or {}
+        for key, file_name in data_entries.items():
             if file_name:
                 file_path = os.path.join(dir_path, file_name)
                 if os.path.exists(file_path):
                     image = cv2.imread(file_path)
-                    image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-                    images[key] = image
+                    if image is not None:
+                        images[key] = image
         return images
 
     def _process_audio(self, item_data, data_type, episode_dir):
         audio_data = {}
         dir_path = os.path.join(episode_dir, data_type)
-
-        for key, file_name in item_data.get(data_type, {}).items():
+        data_entries = item_data.get(data_type, {}) or {}
+        for key, file_name in data_entries.items():
             if file_name:
                 file_path = os.path.join(dir_path, file_name)
                 if os.path.exists(file_path):
@@ -71,95 +84,186 @@ class RerunEpisodeReader:
         return audio_data
 
 class RerunLogger:
-    def __init__(self, prefix = "", IdxRangeBoundary = 30, memory_limit = None):
+    def __init__(self, prefix = "", IdxRangeBoundary = 30, memory_limit = None, rrd_path = None, spawn_viewer = True):
         self.prefix = prefix
         self.IdxRangeBoundary = IdxRangeBoundary
-        rr.init(datetime.now().strftime("Runtime_%Y%m%d_%H%M%S"))
-        if memory_limit:
-            rr.spawn(memory_limit = memory_limit, hide_welcome_screen = True)
-        else:
-            rr.spawn(hide_welcome_screen = True)
+        self.blueprint = None
+        self.rrd_path = rrd_path
+        self.spawn_viewer = spawn_viewer
+        self.application_id = datetime.now().strftime("Runtime_%Y%m%d_%H%M%S_%f")
+        self.live_recording = None
+        self.file_recording = None
 
         # Set up blueprint for live visualization
         if self.IdxRangeBoundary:
             self.setup_blueprint()
+        else:
+            self.blueprint = None
+
+        if self.spawn_viewer:
+            self.live_recording = rr.new_recording(self.application_id)
+            if memory_limit:
+                rr.spawn(
+                    recording=self.live_recording,
+                    memory_limit=memory_limit,
+                    hide_welcome_screen=True,
+                    default_blueprint=self.blueprint,
+                )
+            else:
+                rr.spawn(
+                    recording=self.live_recording,
+                    hide_welcome_screen=True,
+                    default_blueprint=self.blueprint,
+                )
+
+        if self.rrd_path:
+            self.file_recording = rr.new_recording(self.application_id)
+            rr.save(self.rrd_path, recording=self.file_recording, default_blueprint=self.blueprint)
+
+    def _recordings(self):
+        recordings = []
+        if self.live_recording is not None:
+            recordings.append(self.live_recording)
+        if self.file_recording is not None:
+            recordings.append(self.file_recording)
+        return recordings
+
+    def _sliding_idx_time_range(self):
+        return [
+            rrb.VisibleTimeRange(
+                "idx",
+                start=rrb.TimeRangeBoundary.cursor_relative(seq=-self.IdxRangeBoundary),
+                end=rrb.TimeRangeBoundary.cursor_relative(),
+            )
+        ]
 
     def setup_blueprint(self):
-        views = []
+        joint_curve_views = []
 
-        data_plot_paths = [
-                           f"{self.prefix}left_arm", 
-                           f"{self.prefix}right_arm", 
-                           f"{self.prefix}left_ee", 
-                           f"{self.prefix}right_ee"
-        ]
-        for plot_path in data_plot_paths:
-            view = rrb.TimeSeriesView(
-                origin = plot_path,
-                time_ranges=[
-                    rrb.VisibleTimeRange(
-                        "idx",
-                        start = rrb.TimeRangeBoundary.cursor_relative(seq = -self.IdxRangeBoundary),
-                        end = rrb.TimeRangeBoundary.cursor_relative(),
-                    )
-                ],
-                plot_legend = rrb.PlotLegend(visible = True),
+        for plot_path in [
+            f"{self.prefix}left_arm",
+            f"{self.prefix}right_arm",
+            f"{self.prefix}left_ee",
+            f"{self.prefix}right_ee",
+        ]:
+            joint_curve_views.append(
+                rrb.TimeSeriesView(
+                    origin=plot_path,
+                    name=plot_path.split("/")[-1],
+                    time_ranges=self._sliding_idx_time_range(),
+                    plot_legend=rrb.PlotLegend(visible=True),
+                )
             )
-            views.append(view)
 
-        # image_plot_paths = [
-        #                     f"{self.prefix}colors/color_0",
-        #                     f"{self.prefix}colors/color_1",
-        #                     f"{self.prefix}colors/color_2",
-        #                     f"{self.prefix}colors/color_3"
-        # ]
-        # for plot_path in image_plot_paths:
-        #     view = rrb.Spatial2DView(
-        #         origin = plot_path,
-        #         time_ranges=[
-        #             rrb.VisibleTimeRange(
-        #                 "idx",
-        #                 start = rrb.TimeRangeBoundary.cursor_relative(seq = -self.IdxRangeBoundary),
-        #                 end = rrb.TimeRangeBoundary.cursor_relative(),
-        #             )
-        #         ],
-        #     )
-        #     views.append(view)
+        pose_curve_views = []
+        for plot_path in [
+            f"{self.prefix}left_arm_pose",
+            f"{self.prefix}right_arm_pose",
+        ]:
+            pose_curve_views.append(
+                rrb.TimeSeriesView(
+                    origin=plot_path,
+                    name=plot_path.split("/")[-1],
+                    time_ranges=self._sliding_idx_time_range(),
+                    plot_legend=rrb.PlotLegend(visible=True),
+                )
+            )
 
-        grid = rrb.Grid(contents = views,
-                        grid_columns=2,               
-                        column_shares=[1, 1],
-                        row_shares=[1, 1], 
+        head_view = rrb.Spatial2DView(
+            origin=f"{self.prefix}colors/head",
+            name="head_rgb",
+            time_ranges=self._sliding_idx_time_range(),
         )
-        views.append(rr.blueprint.SelectionPanel(state=rrb.PanelState.Collapsed))
-        views.append(rr.blueprint.TimePanel(state=rrb.PanelState.Collapsed))
-        rr.send_blueprint(grid)
+        left_wrist_view = rrb.Spatial2DView(
+            origin=f"{self.prefix}colors/wrist_left",
+            name="wrist_left_rgb",
+            time_ranges=self._sliding_idx_time_range(),
+        )
+        right_wrist_view = rrb.Spatial2DView(
+            origin=f"{self.prefix}colors/wrist_right",
+            name="wrist_right_rgb",
+            time_ranges=self._sliding_idx_time_range(),
+        )
 
+        curves_tabs = rrb.Tabs(
+            contents=[
+                rrb.Grid(contents=joint_curve_views, grid_columns=2, name="joint_curves"),
+                rrb.Grid(contents=pose_curve_views, grid_columns=2, name="pose_curves"),
+            ],
+            active_tab=0,
+            name="curves",
+        )
+        camera_tabs = rrb.Tabs(
+            contents=[head_view, left_wrist_view, right_wrist_view],
+            active_tab="head_rgb",
+            name="cameras",
+        )
+        layout = rrb.Vertical(
+            contents=[camera_tabs, curves_tabs],
+            row_shares=[2, 2],
+            name="teleop_recording",
+        )
+        self.blueprint = rrb.Blueprint(
+            layout,
+            rr.blueprint.SelectionPanel(state=rrb.PanelState.Collapsed),
+            rr.blueprint.TimePanel(state=rrb.PanelState.Expanded),
+            collapse_panels=False,
+        )
+
+    @staticmethod
+    def _log_pose_series(base_path: str, pose_info: dict, recording):
+        position = pose_info.get("position", []) or []
+        rpy = pose_info.get("rpy", []) or []
+        for axis, value in zip(("x", "y", "z"), position):
+            rr.log(f"{base_path}/position/{axis}", rr.Scalar(float(value)), recording=recording)
+        for axis, value in zip(("roll", "pitch", "yaw"), rpy):
+            rr.log(f"{base_path}/rpy/{axis}", rr.Scalar(float(value)), recording=recording)
 
     def log_item_data(self, item_data: dict):
-        rr.set_time_sequence("idx", item_data.get('idx', 0))
+        recordings = self._recordings()
+        if not recordings:
+            return
 
-        # Log states
-        states = item_data.get('states', {}) or {}
-        for part, state_info in states.items():
-            if part != "body" and state_info:
-                values = state_info.get('qpos', [])
-                for idx, val in enumerate(values):
-                    rr.log(f"{self.prefix}{part}/states/qpos/{idx}", rr.Scalar(val))
+        for recording in recordings:
+            rr.set_time_sequence("idx", item_data.get('idx', 0), recording=recording)
+            sample_ts = (((item_data.get("timestamps", {}) or {}).get("sample_monotonic_ns")))
+            if sample_ts is not None:
+                rr.set_time_nanos("sample_time", int(sample_ts), recording=recording)
 
-        # Log actions
-        actions = item_data.get('actions', {}) or {}
-        for part, action_info in actions.items():
-            if part != "body" and action_info:
-                values = action_info.get('qpos', [])
-                for idx, val in enumerate(values):
-                    rr.log(f"{self.prefix}{part}/actions/qpos/{idx}", rr.Scalar(val))
+            states = item_data.get('states', {}) or {}
+            for part, state_info in states.items():
+                if part != "body" and state_info:
+                    values = state_info.get('qpos', [])
+                    for idx, val in enumerate(values):
+                        rr.log(f"{self.prefix}{part}/states/qpos/{idx}", rr.Scalar(val), recording=recording)
+                    pose_info = state_info.get("pose")
+                    if pose_info:
+                        self._log_pose_series(f"{self.prefix}{part}_pose/states", pose_info, recording)
 
-        # # Log colors (images)
-        # colors = item_data.get('colors', {}) or {}
-        # for color_key, color_val in colors.items():
-        #     if color_val is not None:
-        #         rr.log(f"{self.prefix}colors/{color_key}", rr.Image(color_val))
+            actions = item_data.get('actions', {}) or {}
+            for part, action_info in actions.items():
+                if part != "body" and action_info:
+                    values = action_info.get('qpos', [])
+                    for idx, val in enumerate(values):
+                        rr.log(f"{self.prefix}{part}/actions/qpos/{idx}", rr.Scalar(val), recording=recording)
+                    pose_info = action_info.get("pose")
+                    if pose_info:
+                        self._log_pose_series(f"{self.prefix}{part}_pose/actions", pose_info, recording)
+
+            colors = item_data.get('colors', {}) or {}
+            for color_key, color_val in colors.items():
+                if color_val is None:
+                    continue
+                if isinstance(color_val, str):
+                    continue
+                canonical_key = canonical_color_key(color_key)
+                if hasattr(color_val, "shape"):
+                    image = color_val
+                    if len(image.shape) == 3 and image.shape[2] == 3:
+                        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                    elif len(image.shape) == 3 and image.shape[2] == 4:
+                        image = cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA)
+                    rr.log(f"{self.prefix}colors/{canonical_key}", rr.Image(image), recording=recording)
 
         # # Log depths (images)
         # depths = item_data.get('depths', {}) or {}
@@ -183,6 +287,21 @@ class RerunLogger:
     def log_episode_data(self, episode_data: list):
         for item_data in episode_data:
             self.log_item_data(item_data)
+
+    def save(self, path: str):
+        if self.file_recording is None:
+            raise RuntimeError("RerunLogger.save() no longer supports exporting past data after logging starts. Configure rrd_path at construction time.")
+
+    def close(self):
+        for recording in self._recordings():
+            try:
+                recording.flush()
+            except Exception:
+                pass
+            try:
+                rr.disconnect(recording=recording)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

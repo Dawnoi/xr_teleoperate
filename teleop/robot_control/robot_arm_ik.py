@@ -15,6 +15,14 @@ sys.path.append(parent2_dir)
 
 from teleop.utils.weighted_moving_filter import WeightedMovingFilter
 
+
+def _resolve_asset_paths(asset_subdir: str, urdf_name: str):
+    teleop_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    repo_root = os.path.dirname(teleop_dir)
+    model_dir = os.path.join(repo_root, "assets", asset_subdir)
+    urdf_path = os.path.join(model_dir, urdf_name)
+    return urdf_path, model_dir
+
 class G1_29_ArmIK:
     def __init__(self, Unit_Test = False, Visualization = False):
         np.set_printoptions(precision=5, suppress=True, linewidth=200)
@@ -25,12 +33,7 @@ class G1_29_ArmIK:
         # fixed cache file path
         self.cache_path = "g1_29_model_cache.pkl"
 
-        if not self.Unit_Test:
-            self.urdf_path = '../assets/g1/g1_body29_hand14.urdf'
-            self.model_dir = '../assets/g1/'
-        else:
-            self.urdf_path = '../../assets/g1/g1_body29_hand14.urdf'
-            self.model_dir = '../../assets/g1/'
+        self.urdf_path, self.model_dir = _resolve_asset_paths('g1', 'g1_body29_hand14.urdf')
 
         # Try loading cache first
         if os.path.exists(self.cache_path) and (not self.Visualization):
@@ -319,12 +322,7 @@ class G1_23_ArmIK:
         # fixed cache file path
         self.cache_path = "g1_23_model_cache.pkl"
 
-        if not self.Unit_Test:
-            self.urdf_path = '../assets/g1/g1_body23.urdf'
-            self.model_dir = '../assets/g1/'
-        else:
-            self.urdf_path = '../../assets/g1/g1_body23.urdf'
-            self.model_dir = '../../assets/g1/'
+        self.urdf_path, self.model_dir = _resolve_asset_paths('g1', 'g1_body23.urdf')
 
         # Try loading cache first
         if os.path.exists(self.cache_path) and (not self.Visualization):
@@ -599,12 +597,7 @@ class H1_2_ArmIK:
         # fixed cache file path
         self.cache_path = "h1_2_model_cache.pkl"
 
-        if not self.Unit_Test:
-            self.urdf_path = '../assets/h1_2/h1_2.urdf'
-            self.model_dir = '../assets/h1_2/'
-        else:
-            self.urdf_path = '../../assets/h1_2/h1_2.urdf'
-            self.model_dir = '../../assets/h1_2/'
+        self.urdf_path, self.model_dir = _resolve_asset_paths('h1_2', 'h1_2.urdf')
 
         # Try loading cache first
         if os.path.exists(self.cache_path) and (not self.Visualization):
@@ -902,12 +895,7 @@ class H1_ArmIK:
         # fixed cache file path
         self.cache_path = "h1_model_cache.pkl"
 
-        if not self.Unit_Test:
-            self.urdf_path = '../assets/h1/h1_with_hand.urdf'
-            self.model_dir = '../assets/h1/'
-        else:
-            self.urdf_path = '../../assets/h1/h1_with_hand.urdf'
-            self.model_dir = '../../assets/h1/'
+        self.urdf_path, self.model_dir = _resolve_asset_paths('h1', 'h1_with_hand.urdf')
 
         # Try loading cache first
         if os.path.exists(self.cache_path) and (not self.Visualization):
@@ -1209,12 +1197,7 @@ class H2_ArmIK:
         # fixed cache file path
         self.cache_path = "h2_model_cache.pkl"
 
-        if not self.Unit_Test:
-            self.urdf_path = "../assets/h2/H2.urdf"
-            self.model_dir = "../assets/h2/"
-        else:
-            self.urdf_path = "../../assets/h2/H2.urdf"
-            self.model_dir = "../../assets/h2/"
+        self.urdf_path, self.model_dir = _resolve_asset_paths('h2', 'H2.urdf')
 
         # Try loading cache first
         if os.path.exists(self.cache_path) and (not self.Visualization):
