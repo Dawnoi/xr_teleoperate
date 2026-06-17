@@ -142,6 +142,149 @@ def pose_matrix_to_record(pose_mat):
         "matrix4x4": pose.tolist(),
     }
 
+
+def _add_basic_control_args(parser):
+    group = parser.add_argument_group("basic control parameters")
+    group.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
+    group.add_argument('--input-mode', type=str, choices=['hand', 'controller'], default='hand', help='Select XR device input tracking source')
+    group.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
+    group.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
+    group.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
+    group.add_argument('--controller-deadman', type=str, choices=['grip', 'none'], default='grip',
+                       help='Controller safety enable logic. "grip" means each arm/ee only moves while the same-side grip is held.')
+    group.add_argument('--max-arm-joint-speed', type=float, default=1.5,
+                       help='Outer-loop arm target speed limit in rad/s. Lower values reduce sudden jumps from teleop/IK.')
+    group.add_argument('--home-return-speed', type=float, default=0.6,
+                       help='Dedicated arm joint speed limit in rad/s used only while returning to the ready/home pose via left Y.')
+
+
+def _add_base_control_args(parser):
+    group = parser.add_argument_group("base control parameters")
+    group.add_argument('--base-max-vx', type=float, default=0.3,
+                       help='Maximum commanded chassis x velocity in m/s from the left thumbstick Y axis when --motion is enabled.')
+    group.add_argument('--base-max-vy', type=float, default=0.3,
+                       help='Maximum commanded chassis y velocity in m/s from the left thumbstick X axis when --motion is enabled.')
+    group.add_argument('--base-max-wz', type=float, default=0.3,
+                       help='Maximum commanded chassis angular z velocity in rad/s from the right thumbstick X axis when --motion is enabled.')
+    group.add_argument('--base-max-z', type=float, default=1.0,
+                       help='Maximum normalized G1D AGV HeightAdjust command from the right thumbstick Y axis when --base-controller g1d_agv is enabled.')
+    group.add_argument('--base-stick-deadzone', type=float, default=0.08,
+                       help='Thumbstick deadzone for chassis motion commands in motion mode.')
+    group.add_argument('--base-controller', type=str, choices=['none', 'g1d_agv'], default='none',
+                       help='Optional chassis control path. Use g1d_agv for the official G1D AGV API while keeping arm control in debug mode.')
+
+
+def _add_controller_mapping_args(parser):
+    group = parser.add_argument_group("controller mapping parameters")
+    group.add_argument('--head-reference-mode', type=str, choices=['head_coupled', 'fixed_per_grip', 'live_head_reference', 'head_decoupled_live', 'hybrid', 'calibrated', 'live'], default='live_head_reference',
+                       help='Controller wrist reference frame. "head_coupled" = fixed once after calibration. "fixed_per_grip" = freeze the current head translation at each grip takeover, release it when grip is released. "live_head_reference" = current head translation is always the live reference. "hybrid" = live when idle, frozen while gripping. Legacy aliases: calibrated=head_coupled, live/head_decoupled_live=live_head_reference semantics.')
+    group.add_argument('--controller-orientation-mode', type=str, choices=['absolute', 'relative', 'neutral'], default='absolute',
+                       help='Wrist orientation control. "absolute" matches the original main-branch controller feel most closely (controller orientation directly drives wrist orientation). "relative" uses controller rotation delta from the current grip anchor. "neutral" fixes wrist orientation.')
+    group.add_argument('--controller-mapping-mode', type=str, choices=['legacy_main', 'anchored_safe'], default='anchored_safe',
+                       help='"legacy_main" reproduces the original main-branch controller mapping semantics as closely as possible. "anchored_safe" uses the newer grip-anchor based takeover-safe mapping.')
+    group.add_argument('--calibration-mode', type=str, choices=['manual', 'auto'], default='manual',
+                       help='Calibration trigger in head_coupled/hybrid mode. "manual" waits for key c after r; "auto" calibrates once live pose data is available. fixed_per_grip/live_head_reference do not require manual calibration.')
+
+
+def _add_workspace_args(parser):
+    group = parser.add_argument_group("arm workspace parameters")
+    group.add_argument('--disable-arm-workspace-limit', action='store_true',
+                       help='Disable wrist workspace clamping before IK.')
+    group.add_argument('--arm-workspace-mode', type=str, choices=['tapered', 'box'], default='tapered',
+                       help='Workspace shape before IK. "tapered" = lower narrow / upper wide inverted-trapezoid prism. "box" = fixed rectangular box.')
+    group.add_argument('--arm-workspace-min', type=float, nargs=3, default=[0.10, -0.32, -0.08],
+                       metavar=('XMIN', 'YMIN', 'ZMIN'),
+                       help='Forward box workspace lower bound in the arm IK/base frame, applied before IK when --arm-workspace-mode box.')
+    group.add_argument('--arm-workspace-max', type=float, nargs=3, default=[0.45, 0.32, 0.42],
+                       metavar=('XMAX', 'YMAX', 'ZMAX'),
+                       help='Forward box workspace upper bound in the arm IK/base frame, applied before IK when --arm-workspace-mode box.')
+    group.add_argument('--arm-workspace-z-min', type=float, default=-0.05,
+                       help='Tapered workspace lower z bound in the arm IK/base frame.')
+    group.add_argument('--arm-workspace-z-max', type=float, default=0.45,
+                       help='Tapered workspace upper z bound in the arm IK/base frame.')
+    group.add_argument('--arm-workspace-x-min', type=float, default=0.10,
+                       help='Tapered workspace minimum forward x bound.')
+    group.add_argument('--arm-workspace-x-max-low', type=float, default=0.38,
+                       help='Tapered workspace forward x upper bound at z_min.')
+    group.add_argument('--arm-workspace-x-max-high', type=float, default=0.52,
+                       help='Tapered workspace forward x upper bound at z_max.')
+    group.add_argument('--arm-workspace-y-max-low', type=float, default=0.24,
+                       help='Tapered workspace lateral |y| bound at z_min.')
+    group.add_argument('--arm-workspace-y-max-high', type=float, default=0.38,
+                       help='Tapered workspace lateral |y| bound at z_max.')
+
+
+def _add_debug_args(parser):
+    group = parser.add_argument_group("debug parameters")
+    group.add_argument('--timing-debug', action='store_true',
+                       help='Enable periodic timing / staleness logs for diagnosing wireless lag and runtime stalls.')
+    group.add_argument('--timing-debug-interval', type=float, default=2.0,
+                       help='Seconds between timing debug reports when --timing-debug is enabled.')
+    group.add_argument('--latency-trace', action='store_true',
+                       help='Enable simple arm latency tracing: 收到输入 -> DDS下发 -> 执行响应.')
+    group.add_argument('--latency-trace-path', type=str, default='./utils/data/latency_trace.jsonl',
+                       help='Path to save latency trace jsonl records.')
+    group.add_argument('--latency-command-threshold', type=float, default=0.02,
+                       help='Minimum max joint delta (rad) to start a new latency trace sample.')
+    group.add_argument('--latency-exec-q-threshold', type=float, default=0.01,
+                       help='Execution-detected threshold on joint position delta (rad).')
+    group.add_argument('--latency-exec-dq-threshold', type=float, default=0.05,
+                       help='Execution-detected threshold on joint velocity magnitude (rad/s).')
+    group.add_argument('--latency-timeout', type=float, default=2.0,
+                       help='Timeout in seconds for one latency trace sample.')
+    group.add_argument('--latency-summary-every', type=int, default=10,
+                       help='Print percentile summary every N completed/timeout latency samples.')
+
+
+def _add_mode_args(parser):
+    group = parser.add_argument_group("mode flags")
+    group.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
+    group.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
+    group.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
+    group.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
+    group.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
+
+
+def _add_recording_args(parser):
+    group = parser.add_argument_group("recording parameters")
+    group.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
+    group.add_argument('--record-arm-repr', type=str, choices=['qpos', 'pose', 'both'], default='qpos',
+                       help='Recording representation for arm data: joint angles (qpos), wrist pose, or both.')
+    group.add_argument('--task-dir', type = str, default = './utils/data/', help = 'path to save data')
+    group.add_argument('--task-name', type = str, default = 'pick cube', help = 'task file name for recording')
+    group.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
+    group.add_argument('--task-desc', type = str, default = 'task description', help = 'task description for recording at json file')
+    group.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
+
+
+def _add_camera_args(parser):
+    group = parser.add_argument_group("camera parameters")
+    group.add_argument('--head-camera-id', type=int, default=-1, help='Local head RGB camera id for cv2.VideoCapture, e.g. 0. <0 disables.')
+    group.add_argument('--left-camera-id', type=int, default=-1, help='Local left wrist RGB camera id for cv2.VideoCapture. <0 disables.')
+    group.add_argument('--right-camera-id', type=int, default=-1, help='Local right wrist RGB camera id for cv2.VideoCapture. <0 disables.')
+    group.add_argument('--camera-width', type=int, default=640, help='Requested local camera frame width.')
+    group.add_argument('--camera-height', type=int, default=480, help='Requested local camera frame height.')
+    group.add_argument('--camera-fps', type=int, default=30, help='Requested local camera FPS.')
+    group.add_argument('--camera-fourcc', type=str, default='MJPG', help='Requested local camera FOURCC, e.g. MJPG/YUYV.')
+    group.add_argument('--camera-buffer-size', type=int, default=1, help='Requested local camera driver buffer size.')
+    group.add_argument('--head-zmq-endpoint', type=str, default='', help='Remote ZMQ raw endpoint for head camera, e.g. tcp://192.168.1.10:5555')
+    group.add_argument('--left-zmq-endpoint', type=str, default='', help='Remote ZMQ raw endpoint for left wrist camera.')
+    group.add_argument('--right-zmq-endpoint', type=str, default='', help='Remote ZMQ raw endpoint for right wrist camera.')
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser()
+    _add_basic_control_args(parser)
+    _add_base_control_args(parser)
+    _add_controller_mapping_args(parser)
+    _add_workspace_args(parser)
+    _add_debug_args(parser)
+    _add_mode_args(parser)
+    _add_recording_args(parser)
+    _add_camera_args(parser)
+    return parser
+
+
 if __name__ == '__main__':
     arm_ctrl = None
     tv_wrapper = None
@@ -156,109 +299,7 @@ if __name__ == '__main__':
     head_remote_camera = None
     left_remote_camera = None
     right_remote_camera = None
-    parser = argparse.ArgumentParser()
-    # basic control parameters
-    parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
-    parser.add_argument('--input-mode', type=str, choices=['hand', 'controller'], default='hand', help='Select XR device input tracking source')
-    parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
-    parser.add_argument('--ee', type=str, choices=['dex1', 'dex3', 'inspire_ftp', 'inspire_dfx', 'brainco'], help='Select end effector controller')
-    parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
-    parser.add_argument('--controller-deadman', type=str, choices=['grip', 'none'], default='grip',
-                        help='Controller safety enable logic. "grip" means each arm/ee only moves while the same-side grip is held.')
-    parser.add_argument('--max-arm-joint-speed', type=float, default=1.5,
-                        help='Outer-loop arm target speed limit in rad/s. Lower values reduce sudden jumps from teleop/IK.')
-    parser.add_argument('--home-return-speed', type=float, default=0.6,
-                        help='Dedicated arm joint speed limit in rad/s used only while returning to the ready/home pose via left Y.')
-    parser.add_argument('--base-max-vx', type=float, default=0.3,
-                        help='Maximum commanded chassis x velocity in m/s from the left thumbstick Y axis when --motion is enabled.')
-    parser.add_argument('--base-max-vy', type=float, default=0.3,
-                        help='Maximum commanded chassis y velocity in m/s from the left thumbstick X axis when --motion is enabled.')
-    parser.add_argument('--base-max-wz', type=float, default=0.3,
-                        help='Maximum commanded chassis angular z velocity in rad/s from the right thumbstick X axis when --motion is enabled.')
-    parser.add_argument('--base-max-z', type=float, default=1.0,
-                        help='Maximum normalized G1D AGV HeightAdjust command from the right thumbstick Y axis when --base-controller g1d_agv is enabled.')
-    parser.add_argument('--base-stick-deadzone', type=float, default=0.08,
-                        help='Thumbstick deadzone for chassis motion commands in motion mode.')
-    parser.add_argument('--base-controller', type=str, choices=['none', 'g1d_agv'], default='none',
-                        help='Optional chassis control path. Use g1d_agv for the official G1D AGV API while keeping arm control in debug mode.')
-    parser.add_argument('--head-reference-mode', type=str, choices=['head_coupled', 'fixed_per_grip', 'live_head_reference', 'head_decoupled_live', 'hybrid', 'calibrated', 'live'], default='live_head_reference',
-                        help='Controller wrist reference frame. "head_coupled" = fixed once after calibration. "fixed_per_grip" = freeze the current head translation at each grip takeover, release it when grip is released. "live_head_reference" = current head translation is always the live reference. "hybrid" = live when idle, frozen while gripping. Legacy aliases: calibrated=head_coupled, live/head_decoupled_live=live_head_reference semantics.')
-    parser.add_argument('--controller-orientation-mode', type=str, choices=['absolute', 'relative', 'neutral'], default='absolute',
-                        help='Wrist orientation control. "absolute" matches the original main-branch controller feel most closely (controller orientation directly drives wrist orientation). "relative" uses controller rotation delta from the current grip anchor. "neutral" fixes wrist orientation.')
-    parser.add_argument('--controller-mapping-mode', type=str, choices=['legacy_main', 'anchored_safe'], default='anchored_safe',
-                        help='"legacy_main" reproduces the original main-branch controller mapping semantics as closely as possible. "anchored_safe" uses the newer grip-anchor based takeover-safe mapping.')
-    parser.add_argument('--calibration-mode', type=str, choices=['manual', 'auto'], default='manual',
-                        help='Calibration trigger in head_coupled/hybrid mode. "manual" waits for key c after r; "auto" calibrates once live pose data is available. fixed_per_grip/live_head_reference do not require manual calibration.')
-    parser.add_argument('--disable-arm-workspace-limit', action='store_true',
-                        help='Disable wrist workspace clamping before IK.')
-    parser.add_argument('--arm-workspace-mode', type=str, choices=['tapered', 'box'], default='tapered',
-                        help='Workspace shape before IK. "tapered" = lower narrow / upper wide inverted-trapezoid prism. "box" = fixed rectangular box.')
-    parser.add_argument('--arm-workspace-min', type=float, nargs=3, default=[0.10, -0.32, -0.08],
-                        metavar=('XMIN', 'YMIN', 'ZMIN'),
-                        help='Forward box workspace lower bound in the arm IK/base frame, applied before IK when --arm-workspace-mode box.')
-    parser.add_argument('--arm-workspace-max', type=float, nargs=3, default=[0.45, 0.32, 0.42],
-                        metavar=('XMAX', 'YMAX', 'ZMAX'),
-                        help='Forward box workspace upper bound in the arm IK/base frame, applied before IK when --arm-workspace-mode box.')
-    parser.add_argument('--arm-workspace-z-min', type=float, default=-0.05,
-                        help='Tapered workspace lower z bound in the arm IK/base frame.')
-    parser.add_argument('--arm-workspace-z-max', type=float, default=0.45,
-                        help='Tapered workspace upper z bound in the arm IK/base frame.')
-    parser.add_argument('--arm-workspace-x-min', type=float, default=0.10,
-                        help='Tapered workspace minimum forward x bound.')
-    parser.add_argument('--arm-workspace-x-max-low', type=float, default=0.38,
-                        help='Tapered workspace forward x upper bound at z_min.')
-    parser.add_argument('--arm-workspace-x-max-high', type=float, default=0.52,
-                        help='Tapered workspace forward x upper bound at z_max.')
-    parser.add_argument('--arm-workspace-y-max-low', type=float, default=0.24,
-                        help='Tapered workspace lateral |y| bound at z_min.')
-    parser.add_argument('--arm-workspace-y-max-high', type=float, default=0.38,
-                        help='Tapered workspace lateral |y| bound at z_max.')
-    parser.add_argument('--timing-debug', action='store_true',
-                        help='Enable periodic timing / staleness logs for diagnosing wireless lag and runtime stalls.')
-    parser.add_argument('--timing-debug-interval', type=float, default=2.0,
-                        help='Seconds between timing debug reports when --timing-debug is enabled.')
-    parser.add_argument('--latency-trace', action='store_true',
-                        help='Enable simple arm latency tracing: 收到输入 -> DDS下发 -> 执行响应.')
-    parser.add_argument('--latency-trace-path', type=str, default='./utils/data/latency_trace.jsonl',
-                        help='Path to save latency trace jsonl records.')
-    parser.add_argument('--latency-command-threshold', type=float, default=0.02,
-                        help='Minimum max joint delta (rad) to start a new latency trace sample.')
-    parser.add_argument('--latency-exec-q-threshold', type=float, default=0.01,
-                        help='Execution-detected threshold on joint position delta (rad).')
-    parser.add_argument('--latency-exec-dq-threshold', type=float, default=0.05,
-                        help='Execution-detected threshold on joint velocity magnitude (rad/s).')
-    parser.add_argument('--latency-timeout', type=float, default=2.0,
-                        help='Timeout in seconds for one latency trace sample.')
-    parser.add_argument('--latency-summary-every', type=int, default=10,
-                        help='Print percentile summary every N completed/timeout latency samples.')
-    # mode flags
-    parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
-    parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
-    parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
-    parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
-    parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
-    # record mode and task info
-    parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
-    parser.add_argument('--record-arm-repr', type=str, choices=['qpos', 'pose', 'both'], default='qpos',
-                        help='Recording representation for arm data: joint angles (qpos), wrist pose, or both.')
-    parser.add_argument('--task-dir', type = str, default = './utils/data/', help = 'path to save data')
-    parser.add_argument('--task-name', type = str, default = 'pick cube', help = 'task file name for recording')
-    parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
-    parser.add_argument('--task-desc', type = str, default = 'task description', help = 'task description for recording at json file')
-    parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
-    parser.add_argument('--head-camera-id', type=int, default=-1, help='Local head RGB camera id for cv2.VideoCapture, e.g. 0. <0 disables.')
-    parser.add_argument('--left-camera-id', type=int, default=-1, help='Local left wrist RGB camera id for cv2.VideoCapture. <0 disables.')
-    parser.add_argument('--right-camera-id', type=int, default=-1, help='Local right wrist RGB camera id for cv2.VideoCapture. <0 disables.')
-    parser.add_argument('--camera-width', type=int, default=640, help='Requested local camera frame width.')
-    parser.add_argument('--camera-height', type=int, default=480, help='Requested local camera frame height.')
-    parser.add_argument('--camera-fps', type=int, default=30, help='Requested local camera FPS.')
-    parser.add_argument('--camera-fourcc', type=str, default='MJPG', help='Requested local camera FOURCC, e.g. MJPG/YUYV.')
-    parser.add_argument('--camera-buffer-size', type=int, default=1, help='Requested local camera driver buffer size.')
-    parser.add_argument('--head-zmq-endpoint', type=str, default='', help='Remote ZMQ raw endpoint for head camera, e.g. tcp://192.168.1.10:5555')
-    parser.add_argument('--left-zmq-endpoint', type=str, default='', help='Remote ZMQ raw endpoint for left wrist camera.')
-    parser.add_argument('--right-zmq-endpoint', type=str, default='', help='Remote ZMQ raw endpoint for right wrist camera.')
-
-    args = parser.parse_args()
+    args = build_arg_parser().parse_args()
     logger_mp.debug(f"args: {args}")
     normalized_head_mode = "head_coupled" if args.head_reference_mode == "calibrated" else (
         "live_head_reference" if args.head_reference_mode in {"live", "head_decoupled_live"} else args.head_reference_mode
