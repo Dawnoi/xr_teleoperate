@@ -53,6 +53,30 @@ class LeRobotV2WriterStatsTest(unittest.TestCase):
             self.assertIn("queue", stats["runtime"])
             self.assertIn("processing", stats["runtime"])
 
+    def test_cancel_episode_reuses_episode_index(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with mock.patch.object(lerobot_v2_writer.LeRobotV2Writer, "_compute_fk_for_qpos", _fake_compute_fk):
+                with mock.patch.object(lerobot_v2_writer.LeRobotV2Writer, "_video_writer", _fake_video_writer):
+                    writer = lerobot_v2_writer.LeRobotV2Writer(
+                        task_dir=tmp_dir,
+                        arm_ik=_FakeArmIk(),
+                        rerun_log=False,
+                    )
+                    try:
+                        self.assertTrue(writer.create_episode())
+                        self.assertEqual(writer._current_episode_index, 0)
+                        self.assertEqual(writer._next_episode_index, 1)
+
+                        writer.cancel_episode()
+                        self.assertTrue(writer.is_ready())
+                        self.assertEqual(writer._next_episode_index, 0)
+
+                        self.assertTrue(writer.create_episode())
+                        self.assertEqual(writer._current_episode_index, 0)
+                    finally:
+                        writer.cancel_episode()
+                        writer.close()
+
 
 if __name__ == "__main__":
     unittest.main()

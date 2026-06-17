@@ -61,6 +61,7 @@ STOP           = False  # Enable to begin system exit procedure
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
+RECORD_CANCEL  = False  # Cancel active/armed recording without saving
 RECENTER       = False  # Recalibrate fixed head reference for controller-space teleop
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
@@ -75,7 +76,7 @@ RECENTER       = False  # Recalibrate fixed head reference for controller-space 
 #  --> auto  : Auto-transition after saving data.
 
 def on_press(key):
-    global STOP, START, RECORD_TOGGLE, RECENTER
+    global STOP, START, RECORD_TOGGLE, RECORD_CANCEL, RECENTER
     if key == 'r':
         START = True
     elif key == 'c':
@@ -85,17 +86,20 @@ def on_press(key):
         STOP = True
     elif key == 's' and START == True:
         RECORD_TOGGLE = True
+    elif key == 'x' and START == True:
+        RECORD_CANCEL = True
     else:
         logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
 
 def get_state() -> dict:
     """Return current heartbeat state"""
-    global START, STOP, RECORD_RUNNING, READY
+    global START, STOP, RECORD_RUNNING, RECORD_CANCEL, READY
     return {
         "START": START,
         "STOP": STOP,
         "READY": READY,
         "RECORD_RUNNING": RECORD_RUNNING,
+        "RECORD_CANCEL": RECORD_CANCEL,
     }
 
 
@@ -1040,6 +1044,7 @@ if __name__ == '__main__':
             logger_mp.info("🟣  After calibration, press [c] anytime to recenter the reference.")
         if args.record:
             logger_mp.info("🟡  Press [s] to START or SAVE recording (toggle cycle).")
+            logger_mp.info("🟠  Press [x] to CANCEL the active recording without saving.")
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
@@ -1088,6 +1093,19 @@ if __name__ == '__main__':
             start_time = time.time()
 
             # record mode
+            if args.record and RECORD_CANCEL:
+                RECORD_CANCEL = False
+                if RECORD_RUNNING or recording_waiting_for_first_frame:
+                    RECORD_RUNNING = False
+                    recording_waiting_for_first_frame = False
+                    record_start_monotonic_ns = None
+                    pending_record_samples.clear()
+                    last_enqueued_primary_frame_id = None
+                    recorder.cancel_episode()
+                    logger_mp.info("[RECORD_CANCEL] active episode canceled; next recording will reuse the episode index.")
+                else:
+                    logger_mp.info("[RECORD_CANCEL] ignored: no active recording to cancel.")
+
             if args.record and RECORD_TOGGLE:
                 RECORD_TOGGLE = False
                 if not RECORD_RUNNING and not recording_waiting_for_first_frame:

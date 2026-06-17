@@ -84,6 +84,25 @@ class EpisodeWriterControlExtrasCompatTest(unittest.TestCase):
             self.assertEqual(len(payload["data"]), 1)
             self.assertNotIn("control_extras", payload["data"][0])
 
+    def test_cancel_episode_reuses_episode_index(self):
+        EpisodeWriter = _import_episode_writer()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            writer = EpisodeWriter(task_dir=tmp_dir, rerun_log=False)
+            try:
+                self.assertTrue(writer.create_episode())
+                first_episode_dir = pathlib.Path(writer.episode_dir)
+                first_episode_name = first_episode_dir.name
+
+                writer.cancel_episode()
+                self.assertTrue(writer.is_ready())
+                self.assertFalse(first_episode_dir.exists())
+
+                self.assertTrue(writer.create_episode())
+                self.assertEqual(pathlib.Path(writer.episode_dir).name, first_episode_name)
+            finally:
+                writer.cancel_episode()
+                writer.close()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1895,6 +1895,26 @@ class LeRobotV2Writer:
             self._save_requested = True
         logger_mp.info("[LeRobotV2Writer] save requested for the active episode.")
 
+    def cancel_episode(self) -> None:
+        with self._state_lock:
+            if not self._current_episode_active:
+                logger_mp.info("[LeRobotV2Writer] cancel requested without an active episode.")
+                return
+            episode_index = self._current_episode_index
+            self._save_requested = False
+        while True:
+            try:
+                self._item_queue.get_nowait()
+                self._item_queue.task_done()
+            except Empty:
+                break
+        self._cleanup_unregistered_artifacts(episode_index)
+        with self._state_lock:
+            if self._next_episode_index == episode_index + 1:
+                self._next_episode_index = episode_index
+            self._reset_episode_state()
+        logger_mp.info("[LeRobotV2Writer] canceled episode %06d; index will be reused.", episode_index)
+
     def close(self) -> None:
         with self._state_lock:
             if self._current_episode_active and not self._save_requested:

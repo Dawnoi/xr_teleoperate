@@ -6,6 +6,7 @@ import numpy as np
 import time
 import zmq
 import struct
+import shutil
 from collections import deque
 from .rerun_visualizer import RerunLogger
 from queue import Queue, Empty
@@ -458,6 +459,34 @@ class EpisodeWriter():
         """
         self.need_save = True  # Set the save flag
         logger_mp.info(f"==> Episode saved start...")
+
+    def cancel_episode(self):
+        """
+        Drop the active episode and reuse its episode index for the next recording.
+        """
+        if self.is_available:
+            return
+        self.need_save = False
+        while True:
+            try:
+                self.item_data_queue.get_nowait()
+                self.item_data_queue.task_done()
+            except Empty:
+                break
+        if self.rerun_log and self.online_logger is not None:
+            try:
+                self.online_logger.close()
+            except Exception:
+                pass
+            self.online_logger = None
+        episode_dir = getattr(self, "episode_dir", None)
+        if episode_dir and os.path.isdir(episode_dir):
+            shutil.rmtree(episode_dir, ignore_errors=True)
+        self.item_id = -1
+        self.episode_id = self.episode_id - 1
+        self.first_item = True
+        self.is_available = True
+        logger_mp.info("==> Episode canceled; next recording will reuse this episode index.")
 
     def _save_episode(self):
         """
