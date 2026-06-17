@@ -1784,11 +1784,21 @@ if __name__ == '__main__':
                             "action": build_alignment_timestamp_entry(aligned_action, sample_monotonic_ns),
                             "camera": camera_timestamps,
                         }
+                        aligned_arm_tauff = np.asarray(aligned_action["tauff"], dtype=float).reshape(-1)
+                        if aligned_arm_tauff.shape[0] != 14 or not np.all(np.isfinite(aligned_arm_tauff)):
+                            logger_mp.warning(
+                                "[RECORD_ALIGN] drop pending sample: invalid aligned arm tauff for control sidecar."
+                            )
+                            pending_record_samples.popleft()
+                            continue
+                        control_extras = {
+                            "arm_tauff": aligned_arm_tauff.tolist(),
+                        }
                         if args.sim:
                             sim_state = sim_state_subscriber.read_data()
-                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state, timestamps=timestamps)
+                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state, timestamps=timestamps, control_extras=control_extras)
                         else:
-                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, timestamps=timestamps)
+                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, timestamps=timestamps, control_extras=control_extras)
                         pending_record_samples.popleft()
 
             current_time = time.time()
