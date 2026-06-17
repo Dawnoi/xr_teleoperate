@@ -37,7 +37,7 @@ from teleop.utils.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
 from teleop.utils.g1d_agv_bridge import G1DAgvBridge
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
-from teleop.utils.xr_robotics_wrapper import XRRoboticsWrapper
+from teleop.utils.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
 from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
 from teleop.utils.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,
@@ -284,6 +284,15 @@ def pose_matrix_to_record(pose_mat):
         "matrix4x4": pose.tolist(),
     }
 
+
+def require_finite_vector(value, size: int, name: str):
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    if arr.shape[0] != int(size):
+        raise ValueError(f"{name} must have shape ({size},), got {arr.shape}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} contains non-finite values")
+    return arr
+
 if __name__ == '__main__':
     arm_ctrl = None
     tv_wrapper = None
@@ -292,6 +301,7 @@ if __name__ == '__main__':
     recorder = None
     ipc_server = None
     sim_state_subscriber = None
+    exit_go_home = True
     head_camera = None
     left_camera = None
     right_camera = None
@@ -331,6 +341,20 @@ if __name__ == '__main__':
                         help='"legacy_main" reproduces the original main-branch controller mapping semantics as closely as possible. "anchored_safe" uses the newer grip-anchor based takeover-safe mapping.')
     parser.add_argument('--calibration-mode', type=str, choices=['manual', 'auto'], default='manual',
                         help='Calibration trigger in head_coupled/hybrid mode. "manual" waits for key c after r; "auto" calibrates once live pose data is available. fixed_per_grip/live_head_reference do not require manual calibration.')
+    parser.add_argument('--input-provider', type=str, choices=['xr', 'lerobot_offline'], default='xr',
+                        help='Teleop input provider backend: live XR input or offline LeRobot replay.')
+    parser.add_argument('--offline-replay-dataset-root', type=str, default='',
+                        help='Dataset root for offline replay provider.')
+    parser.add_argument('--offline-replay-episode-index', type=int, default=0,
+                        help='Episode index for offline replay provider.')
+    parser.add_argument('--offline-replay-arm-source', type=str, choices=['action', 'state', 'fk_cmd_pose'], default='action',
+                        help='Arm source used by offline replay provider.')
+    parser.add_argument('--offline-replay-speed-scale', type=float, default=1.0,
+                        help='Playback speed scale for offline replay provider.')
+    parser.add_argument('--offline-replay-end-action', type=str, choices=['home', 'hold'], default='home',
+                        help='Robot action to take when offline replay reaches the end.')
+    parser.add_argument('--auto-start', action='store_true',
+                        help='Enter START state automatically after initialization. Intended for offline replay entrypoints.')
     parser.add_argument('--disable-arm-workspace-limit', action='store_true',
                         help='Disable wrist workspace clamping before IK.')
     parser.add_argument('--arm-workspace-mode', type=str, choices=['tapered', 'box'], default='tapered',
@@ -379,6 +403,8 @@ if __name__ == '__main__':
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
+    parser.add_argument('--no-gripper', action='store_true',
+                        help='Disable end-effector controller initialization and commands. Useful for arm-only offline replay.')
     # record mode and task info
     parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
     parser.add_argument('--record-arm-repr', type=str, choices=['qpos', 'pose', 'both'], default='qpos',
@@ -432,8 +458,15 @@ if __name__ == '__main__':
     action_nearest_fallback_max_delta_ns = state_nearest_fallback_max_delta_ns
     record_future_wait_timeout_ns = int(max(120_000_000, (2.0 / max(args.frequency, 1e-6)) * 1e9))
     pending_sample_timeout_ns = int(1_000_000_000)
+    control_dt = 1.0 / max(args.frequency, 1e-6)
     if args.base_controller == "g1d_agv" and args.motion:
         raise ValueError("Do not combine --base-controller g1d_agv with --motion. G1D AGV base control should run with the arms kept in debug mode.")
+    if args.input_provider == "lerobot_offline":
+        validate_lerobot_offline_episode(
+            args.offline_replay_dataset_root,
+            args.offline_replay_episode_index,
+            args.offline_replay_arm_source,
+        )
 
     def compute_arm_gravity_tauff(arm_ik_obj, arm_q):
         try:
@@ -802,13 +835,6 @@ if __name__ == '__main__':
                                                       daemon=True)
             listen_keyboard_thread.start()
 
-        tv_wrapper = XRRoboticsWrapper(
-            use_hand_tracking=args.input_mode == "hand",
-            head_reference_mode=args.head_reference_mode,
-            controller_orientation_mode=args.controller_orientation_mode,
-            controller_mapping_mode=args.controller_mapping_mode,
-        )
-        logger_mp.info("Using XR-Robotics as the only Pico input source.")
         if workspace_limit_enabled:
             if workspace_mode == "box":
                 logger_mp.info(
@@ -878,8 +904,21 @@ if __name__ == '__main__':
             arm_ik = H2_ArmIK()
             arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
 
+        tv_wrapper = create_teleop_input_provider(args, arm_ik=arm_ik)
+        if args.input_provider == "xr":
+            logger_mp.info("Using XR-Robotics as the teleop input provider.")
+        else:
+            logger_mp.info(
+                "Using offline teleop input provider (%s), dataset_root=%s, episode_index=%d.",
+                args.input_provider,
+                args.offline_replay_dataset_root,
+                args.offline_replay_episode_index,
+            )
+
         # end-effector
-        if args.ee == "dex3":
+        if args.no_gripper:
+            logger_mp.info("[EE] --no-gripper enabled; end-effector controller is disabled.")
+        elif args.ee == "dex3":
             from teleop.robot_control.robot_hand_unitree import Dex3_1_Controller
             left_hand_pos_array = Array('d', 75, lock = True)      # [input]
             right_hand_pos_array = Array('d', 75, lock = True)     # [input]
@@ -1006,6 +1045,9 @@ if __name__ == '__main__':
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter START state
+        if args.auto_start:
+            START = True
+            logger_mp.info("[AUTO_START] entering START state automatically.")
         while not START and not STOP: # wait for start or stop signal.
             time.sleep(0.033)
 
@@ -1034,7 +1076,9 @@ if __name__ == '__main__':
         prev_right_grip_pressed = False
         left_takeover_settle_frames = 0
         right_takeover_settle_frames = 0
-        TAKEOVER_SETTLE_FRAMES = 0 if args.controller_mapping_mode == "legacy_main" else 2
+        TAKEOVER_SETTLE_FRAMES = 0 if (
+            args.controller_mapping_mode == "legacy_main" or args.input_provider == "lerobot_offline"
+        ) else 2
         recording_waiting_for_first_frame = False
         last_record_wait_log_ns = 0
         last_enqueued_primary_frame_id = None
@@ -1124,16 +1168,31 @@ if __name__ == '__main__':
 
             # get xr's tele data
             tele_fetch_start = time.perf_counter()
-            tele_data = tv_wrapper.get_tele_data(
+            sample = tv_wrapper.get_sample(
                 current_left_robot_wrist_pose=current_left_wrist_pose,
                 current_right_robot_wrist_pose=current_right_wrist_pose,
+                current_arm_q=current_lr_arm_q,
+                current_arm_dq=current_lr_arm_dq,
+                dt=control_dt,
             )
             tele_fetch_dt = time.perf_counter() - tele_fetch_start
-            timing_debugger.add_tele_fetch(tele_fetch_dt, tele_data is not None)
-            if tele_data is None:
+            timing_debugger.add_tele_fetch(tele_fetch_dt, sample is not None)
+            if sample is None:
+                if bool(getattr(tv_wrapper, "done", False)):
+                    if args.input_provider == "lerobot_offline":
+                        exit_go_home = args.offline_replay_end_action == "home"
+                        logger_mp.info(
+                            "[OFFLINE_REPLAY] input provider finished. end_action=%s, stopping main loop.",
+                            args.offline_replay_end_action,
+                        )
+                    START = False
+                    STOP = True
+                    continue
                 timing_debugger.maybe_report(arm_ctrl=arm_ctrl, gripper_ctrl=gripper_ctrl)
                 time.sleep(0.01)
                 continue
+            tele_data = sample.tele_data
+            motion_intent = sample.motion_intent
             tele_data_recv_ts_ns = time.perf_counter_ns()
             tele_fetch_ms = tele_fetch_dt * 1000.0
 
@@ -1191,19 +1250,19 @@ if __name__ == '__main__':
             prev_right_grip_pressed = right_grip_pressed
             takeover_logic_ms = (time.perf_counter() - takeover_logic_start) * 1000.0
 
-            if (args.ee == "dex3" or args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
+            if (not args.no_gripper) and (args.ee == "dex3" or args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
                 with right_hand_pos_array.get_lock():
                     right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
-            elif args.ee == "dex1" and args.input_mode == "controller":
+            elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "controller":
                 if left_arm_enabled:
                     with left_gripper_value.get_lock():
                         left_gripper_value.value = tele_data.left_ctrl_triggerValue
                 if right_arm_enabled:
                     with right_gripper_value.get_lock():
                         right_gripper_value.value = tele_data.right_ctrl_triggerValue
-            elif args.ee == "dex1" and args.input_mode == "hand":
+            elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "hand":
                 with left_gripper_value.get_lock():
                     left_gripper_value.value = tele_data.left_hand_pinchValue
                 with right_gripper_value.get_lock():
@@ -1337,34 +1396,48 @@ if __name__ == '__main__':
                 sol_q = home_target_q.copy()
                 sol_tauff = current_hold_tauff.copy()
             elif left_arm_enabled or right_arm_enabled:
-                left_target_pose = tele_data.left_wrist_pose
-                right_target_pose = tele_data.right_wrist_pose
-                if workspace_limit_enabled:
-                    if workspace_mode == "box":
-                        left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_box(
-                            left_target_pose,
-                            right_target_pose,
-                            workspace_min,
-                            workspace_max,
-                        )
-                    else:
-                        left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_tapered_workspace(
-                            left_target_pose,
-                            right_target_pose,
-                            tapered_workspace_params["z_min"],
-                            tapered_workspace_params["z_max"],
-                            tapered_workspace_params["x_min"],
-                            tapered_workspace_params["x_max_low"],
-                            tapered_workspace_params["x_max_high"],
-                            tapered_workspace_params["y_max_low"],
-                            tapered_workspace_params["y_max_high"],
-                        )
-                time_ik_start = time.perf_counter()
-                sol_q, sol_tauff  = arm_ik.solve_ik(left_target_pose, right_target_pose, current_lr_arm_q, current_lr_arm_dq)
-                ik_dt = time.perf_counter() - time_ik_start
-                ik_ms = ik_dt * 1000.0
-                timing_debugger.add_ik(ik_dt)
-                logger_mp.debug(f"ik:\t{round(ik_dt, 6)}")
+                motion_kind = str(getattr(motion_intent, "kind", "pose"))
+                if motion_kind == "pose":
+                    left_target_pose = motion_intent.left_wrist_pose
+                    right_target_pose = motion_intent.right_wrist_pose
+                    if workspace_limit_enabled:
+                        if workspace_mode == "box":
+                            left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_box(
+                                left_target_pose,
+                                right_target_pose,
+                                workspace_min,
+                                workspace_max,
+                            )
+                        else:
+                            left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_tapered_workspace(
+                                left_target_pose,
+                                right_target_pose,
+                                tapered_workspace_params["z_min"],
+                                tapered_workspace_params["z_max"],
+                                tapered_workspace_params["x_min"],
+                                tapered_workspace_params["x_max_low"],
+                                tapered_workspace_params["x_max_high"],
+                                tapered_workspace_params["y_max_low"],
+                                tapered_workspace_params["y_max_high"],
+                            )
+                    time_ik_start = time.perf_counter()
+                    sol_q, sol_tauff = arm_ik.solve_ik(left_target_pose, right_target_pose, current_lr_arm_q, current_lr_arm_dq)
+                    ik_dt = time.perf_counter() - time_ik_start
+                    ik_ms = ik_dt * 1000.0
+                    timing_debugger.add_ik(ik_dt)
+                    logger_mp.debug(f"ik:\t{round(ik_dt, 6)}")
+                elif motion_kind == "joint_position":
+                    sol_q = require_finite_vector(motion_intent.arm_q, 14, "motion_intent.arm_q")
+                    sol_tauff = current_hold_tauff.copy()
+                elif motion_kind == "joint_velocity":
+                    arm_dq = require_finite_vector(motion_intent.arm_dq, 14, "motion_intent.arm_dq")
+                    sol_q = current_lr_arm_q + arm_dq * control_dt
+                    sol_tauff = current_hold_tauff.copy()
+                else:
+                    logger_mp.error("Unsupported motion intent kind: %s", motion_kind)
+                    START = False
+                    STOP = True
+                    continue
             else:
                 sol_q = current_hold_q.copy()
                 sol_tauff = current_hold_tauff.copy()
@@ -1463,25 +1536,25 @@ if __name__ == '__main__':
             if args.record:
                 READY = recorder.is_ready() # now ready to (2) enter RECORD_RUNNING state
                 # dex hand or gripper
-                if args.ee == "dex3" and args.input_mode == "hand":
+                if (not args.no_gripper) and args.ee == "dex3" and args.input_mode == "hand":
                     with dual_hand_data_lock:
                         left_ee_state = dual_hand_state_array[:7]
                         right_ee_state = dual_hand_state_array[-7:]
                         left_hand_action = dual_hand_action_array[:7]
                         right_hand_action = dual_hand_action_array[-7:]
-                elif args.ee == "dex1" and args.input_mode == "hand":
+                elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "hand":
                     with dual_gripper_data_lock:
                         left_ee_state = [dual_gripper_state_array[0]]
                         right_ee_state = [dual_gripper_state_array[1]]
                         left_hand_action = [dual_gripper_action_array[0]]
                         right_hand_action = [dual_gripper_action_array[1]]
-                elif args.ee == "dex1" and args.input_mode == "controller":
+                elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "controller":
                     with dual_gripper_data_lock:
                         left_ee_state = [dual_gripper_state_array[0]]
                         right_ee_state = [dual_gripper_state_array[1]]
                         left_hand_action = [dual_gripper_action_array[0]]
                         right_hand_action = [dual_gripper_action_array[1]]
-                elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
+                elif (not args.no_gripper) and (args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
                     with dual_hand_data_lock:
                         left_ee_state = dual_hand_state_array[:6]
                         right_ee_state = dual_hand_state_array[-6:]
@@ -1816,7 +1889,7 @@ if __name__ == '__main__':
         logger_mp.error(traceback.format_exc())
     finally:
         try:
-            if arm_ctrl is not None:
+            if arm_ctrl is not None and exit_go_home:
                 arm_ctrl.ctrl_dual_arm_go_home()
         except Exception as e:
             logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
@@ -1832,9 +1905,10 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to stop keyboard listener or ipc server: {e}")
         
         try:
-            tv_wrapper.close()
+            if tv_wrapper is not None:
+                tv_wrapper.close()
         except Exception as e:
-            logger_mp.error(f"Failed to close XR wrapper: {e}")
+            logger_mp.error(f"Failed to close teleop input provider: {e}")
 
         try:
             if 'agv_bridge' in locals() and agv_bridge is not None:

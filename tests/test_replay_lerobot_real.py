@@ -1,5 +1,5 @@
-import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -7,92 +7,62 @@ from unittest import mock
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-import numpy as np
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-class _DummyArmCtrl:
-    def __init__(self):
-        self.calls = []
-        self.arm_velocity_limit = None
-
-    def ctrl_dual_arm_go_home(self):
-        self.calls.append(("home",))
-
-    def ctrl_dual_arm(self, q, tauff):
-        self.calls.append(("arm", list(q), list(tauff)))
-
-
-class _DummyArmIk:
-    pass
-
-
-def _fake_initialize_robot_runtime(_network_interface, _motion):
-    return _DummyArmIk(), _DummyArmCtrl()
-
-
-def _fake_compute_gravity_tauff(_arm_ik, arm_q):
-    return np.asarray(arm_q, dtype=float) * 0.0 + 1.0
-
-
 from teleop import replay_lerobot_real
 
 
-def _write_episode(dataset_root: pathlib.Path, episode_index: int = 0):
+def _write_episode(
+    dataset_root: pathlib.Path,
+    episode_index: int = 0,
+    include_state: bool = False,
+    include_fk: bool = False,
+):
     data_dir = dataset_root / "data" / "chunk-000"
     data_dir.mkdir(parents=True)
-    table = pa.table(
-        {
-            "timestamp": pa.array([0.0, 0.1], type=pa.float64()),
-            "frame_index": pa.array([0, 1], type=pa.int64()),
-            "episode_index": pa.array([episode_index, episode_index], type=pa.int64()),
-            "action": pa.array(
-                [
-                    [float(i) for i in range(16)],
-                    [float(i + 100) for i in range(16)],
-                ],
-                type=pa.list_(pa.float64()),
-            ),
-        }
-    )
+    columns = {
+        "timestamp": pa.array([0.0, 0.1], type=pa.float64()),
+        "frame_index": pa.array([0, 1], type=pa.int64()),
+        "episode_index": pa.array([episode_index, episode_index], type=pa.int64()),
+        "action": pa.array(
+            [
+                [float(i) for i in range(16)],
+                [float(i + 100) for i in range(16)],
+            ],
+            type=pa.list_(pa.float64()),
+        ),
+    }
+    if include_state:
+        columns["observation.state"] = pa.array(
+            [
+                [float(i + 20) for i in range(16)],
+                [float(i + 40) for i in range(16)],
+            ],
+            type=pa.list_(pa.float64()),
+        )
+    if include_fk:
+        columns["observation.fk.cmd.left.gripper_flange"] = pa.array(
+            [[0.1, 0.2, 0.3, 0.0, 0.0, 0.0], [0.2, 0.3, 0.4, 0.1, 0.0, 0.0]],
+            type=pa.list_(pa.float64()),
+        )
+        columns["observation.fk.cmd.right.gripper_flange"] = pa.array(
+            [[0.4, 0.5, 0.6, 0.0, 0.1, 0.0], [0.5, 0.6, 0.7, 0.0, 0.1, 0.1]],
+            type=pa.list_(pa.float64()),
+        )
+    table = pa.table(columns)
     pq.write_table(table, data_dir / f"episode_{episode_index:06d}.parquet")
 
 
 def _write_sidecar(dataset_root: pathlib.Path, episode_index: int = 0):
     sidecar_dir = dataset_root / "extras" / "control" / "chunk-000"
     sidecar_dir.mkdir(parents=True)
-    rows = [
-        {
-            "schema_version": 1,
-            "episode_index": episode_index,
-            "frame_index": 0,
-            "timestamp": 0.0,
-            "sample_monotonic_ns": 1000,
-            "arm_tauff": [float(i) for i in range(14)],
-            "source": "teleop_runtime",
-        },
-        {
-            "schema_version": 1,
-            "episode_index": episode_index,
-            "frame_index": 1,
-            "timestamp": 0.1,
-            "sample_monotonic_ns": 2000,
-            "arm_tauff": [float("nan")] + [0.0] * 13,
-            "source": "teleop_runtime",
-        },
-    ]
-    with open(sidecar_dir / f"episode_{episode_index:06d}.jsonl", "w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(json.dumps(row))
-            f.write("\n")
-
-
-def _write_empty_sidecar(dataset_root: pathlib.Path, episode_index: int = 0):
-    sidecar_dir = dataset_root / "extras" / "control" / "chunk-000"
-    sidecar_dir.mkdir(parents=True)
-    (sidecar_dir / f"episode_{episode_index:06d}.jsonl").write_text("", encoding="utf-8")
+    (sidecar_dir / f"episode_{episode_index:06d}.jsonl").write_text(
+        '{"frame_index": 0, "arm_tauff": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]}\n',
+        encoding="utf-8",
+    )
 
 
 class ReplayLeRobotRealTest(unittest.TestCase):
@@ -102,95 +72,206 @@ class ReplayLeRobotRealTest(unittest.TestCase):
         self.assertEqual(split.left_gripper, 7.0)
         self.assertEqual(split.right_arm7.tolist(), [float(i) for i in range(8, 15)])
         self.assertEqual(split.right_gripper, 15.0)
-        self.assertEqual(split.arm_q.tolist(), [float(i) for i in range(7)] + [float(i) for i in range(8, 15)])
+        self.assertEqual(
+            split.arm_q.tolist(),
+            [float(i) for i in range(7)] + [float(i) for i in range(8, 15)],
+        )
 
-    def test_load_episode_prefers_valid_recorded_tauff_and_falls_back_for_invalid_rows(self):
+    def test_load_dry_run_summary_reports_frame_range_shape_and_sidecar_presence(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_root = pathlib.Path(tmp_dir)
-            _write_episode(dataset_root)
+            _write_episode(dataset_root, include_state=True)
             _write_sidecar(dataset_root)
 
-            with mock.patch.object(replay_lerobot_real, "warn") as warn_mock:
-                frames = replay_lerobot_real.load_replay_frames(
-                    dataset_root=dataset_root,
-                    episode_index=0,
-                    use_recorded_tauff=True,
-                )
+            summary = replay_lerobot_real.load_dry_run_summary(
+                dataset_root=dataset_root,
+                episode_index=0,
+                arm_source="state",
+            )
 
-        self.assertEqual(len(frames), 2)
-        self.assertEqual(frames[0].recorded_tauff.tolist(), [float(i) for i in range(14)])
-        self.assertIsNone(frames[1].recorded_tauff)
-        warn_mock.assert_called()
-        self.assertTrue(any("invalid recorded tauff" in call.args[0] for call in warn_mock.call_args_list))
+        self.assertEqual(summary["frame_count"], 2)
+        self.assertEqual(summary["timestamp_range"], (0.0, 0.1))
+        self.assertEqual(summary["action_shape"], (16,))
+        self.assertEqual(summary["sidecar"], "present")
+        self.assertEqual(summary["arm_source"], "state")
 
-    def test_load_episode_warns_once_when_recorded_tauff_sidecar_is_missing(self):
+    def test_dry_run_prints_summary_and_does_not_call_subprocess(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_root = pathlib.Path(tmp_dir)
-            _write_episode(dataset_root)
+            _write_episode(dataset_root, include_fk=True)
 
-            with mock.patch.object(replay_lerobot_real, "warn") as warn_mock:
-                frames = replay_lerobot_real.load_replay_frames(
-                    dataset_root=dataset_root,
-                    episode_index=0,
-                    use_recorded_tauff=True,
-                )
-
-        self.assertEqual(len(frames), 2)
-        self.assertTrue(all(frame.recorded_tauff is None for frame in frames))
-        warn_mock.assert_called_once()
-        self.assertIn("control sidecar missing", warn_mock.call_args.args[0])
-
-    def test_load_episode_warns_when_sidecar_has_no_matching_tauff_rows(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            dataset_root = pathlib.Path(tmp_dir)
-            _write_episode(dataset_root)
-            _write_empty_sidecar(dataset_root)
-
-            with mock.patch.object(replay_lerobot_real, "warn") as warn_mock:
-                frames = replay_lerobot_real.load_replay_frames(
-                    dataset_root=dataset_root,
-                    episode_index=0,
-                    use_recorded_tauff=True,
-                )
-
-        self.assertEqual(len(frames), 2)
-        self.assertTrue(all(frame.recorded_tauff is None for frame in frames))
-        self.assertTrue(any("recorded tauff missing for 2 frame(s)" in call.args[0] for call in warn_mock.call_args_list))
-
-    def test_dry_run_does_not_initialize_robot_runtime(self):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            dataset_root = pathlib.Path(tmp_dir)
-            _write_episode(dataset_root)
-
-            with mock.patch.object(replay_lerobot_real, "initialize_robot_runtime") as init_mock:
-                exit_code = replay_lerobot_real.main([
-                    "--dataset-root",
-                    str(dataset_root),
-                    "--episode-index",
-                    "0",
-                    "--dry-run",
-                ])
+            with mock.patch.object(replay_lerobot_real.subprocess, "call") as call_mock:
+                with mock.patch("builtins.print") as print_mock:
+                    exit_code = replay_lerobot_real.main(
+                        [
+                            "--dataset-root",
+                            str(dataset_root),
+                            "--episode-index",
+                            "0",
+                            "--dry-run",
+                            "--arm-source",
+                            "fk_cmd_pose",
+                        ]
+                    )
 
         self.assertEqual(exit_code, 0)
-        init_mock.assert_not_called()
+        call_mock.assert_not_called()
+        printed = " ".join(" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list)
+        self.assertIn("frames=2", printed)
+        self.assertIn("timestamp=0.000000->0.100000", printed)
+        self.assertIn("action_shape=(16,)", printed)
+        self.assertIn("sidecar=missing", printed)
+        self.assertIn("arm_source=fk_cmd_pose", printed)
 
-    def test_main_uses_recorded_tauff_when_available(self):
+    def test_dry_run_rejects_missing_state_column_before_subprocess(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_root = pathlib.Path(tmp_dir)
             _write_episode(dataset_root)
-            _write_sidecar(dataset_root)
-            with mock.patch.object(replay_lerobot_real, "initialize_robot_runtime", _fake_initialize_robot_runtime):
-                with mock.patch.object(replay_lerobot_real, "compute_gravity_tauff", _fake_compute_gravity_tauff):
-                    exit_code = replay_lerobot_real.main([
+
+            with mock.patch.object(replay_lerobot_real.subprocess, "call") as call_mock:
+                with self.assertRaises(KeyError):
+                    replay_lerobot_real.main(
+                        [
+                            "--dataset-root",
+                            str(dataset_root),
+                            "--episode-index",
+                            "0",
+                            "--dry-run",
+                            "--arm-source",
+                            "state",
+                        ]
+                    )
+
+        call_mock.assert_not_called()
+
+    def test_dry_run_rejects_missing_fk_columns_before_subprocess(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_root = pathlib.Path(tmp_dir)
+            _write_episode(dataset_root)
+
+            with mock.patch.object(replay_lerobot_real.subprocess, "call") as call_mock:
+                with self.assertRaises(KeyError):
+                    replay_lerobot_real.main(
+                        [
+                            "--dataset-root",
+                            str(dataset_root),
+                            "--episode-index",
+                            "0",
+                            "--dry-run",
+                            "--arm-source",
+                            "fk_cmd_pose",
+                        ]
+                    )
+
+        call_mock.assert_not_called()
+
+    def test_non_dry_run_builds_expected_subprocess_command(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_root = pathlib.Path(tmp_dir)
+            _write_episode(dataset_root, episode_index=3, include_state=True)
+
+            with mock.patch.object(replay_lerobot_real.subprocess, "call", return_value=7) as call_mock:
+                exit_code = replay_lerobot_real.main(
+                    [
                         "--dataset-root",
                         str(dataset_root),
                         "--episode-index",
-                        "0",
-                        "--use-recorded-tauff",
-                        "--no-gripper",
-                    ])
+                        "3",
+                        "--network-interface",
+                        "eth0",
+                        "--max-arm-joint-speed",
+                        "0.7",
+                        "--speed-scale",
+                        "1.5",
+                        "--arm-source",
+                        "state",
+                        "--end-action",
+                        "hold",
+                        "--motion",
+                    ]
+                )
+
+        self.assertEqual(exit_code, 7)
+        call_mock.assert_called_once()
+        cmd = call_mock.call_args.args[0]
+        self.assertEqual(cmd[0], sys.executable)
+        self.assertEqual(cmd[1], str((REPO_ROOT / "teleop" / "teleop_hand_and_arm.py").resolve()))
+        self.assertIn("--input-provider", cmd)
+        self.assertIn("lerobot_offline", cmd)
+        self.assertIn("--offline-replay-dataset-root", cmd)
+        self.assertIn(str(dataset_root), cmd)
+        self.assertIn("--offline-replay-episode-index", cmd)
+        self.assertIn("3", cmd)
+        self.assertIn("--offline-replay-arm-source", cmd)
+        self.assertIn("state", cmd)
+        self.assertIn("--offline-replay-speed-scale", cmd)
+        self.assertIn("1.5", cmd)
+        self.assertIn("--offline-replay-end-action", cmd)
+        self.assertIn("hold", cmd)
+        self.assertIn("--network-interface", cmd)
+        self.assertIn("eth0", cmd)
+        self.assertIn("--max-arm-joint-speed", cmd)
+        self.assertIn("0.7", cmd)
+        self.assertIn("--controller-deadman", cmd)
+        self.assertIn("grip", cmd)
+        self.assertIn("--head-reference-mode", cmd)
+        self.assertIn("fixed_per_grip", cmd)
+        self.assertIn("--controller-mapping-mode", cmd)
+        self.assertIn("anchored_safe", cmd)
+        self.assertIn("--controller-orientation-mode", cmd)
+        self.assertIn("relative", cmd)
+        self.assertIn("--base-controller", cmd)
+        self.assertIn("none", cmd)
+        self.assertIn("--headless", cmd)
+        self.assertIn("--auto-start", cmd)
+        self.assertIn("--motion", cmd)
+
+    def test_non_dry_run_forwards_no_gripper_to_teleop_entry(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            dataset_root = pathlib.Path(tmp_dir)
+            _write_episode(dataset_root)
+
+            with mock.patch.object(replay_lerobot_real.subprocess, "call", return_value=0) as call_mock:
+                with mock.patch("builtins.print") as print_mock:
+                    exit_code = replay_lerobot_real.main(
+                        [
+                            "--dataset-root",
+                            str(dataset_root),
+                            "--episode-index",
+                            "0",
+                            "--no-gripper",
+                            "--use-recorded-tauff",
+                        ]
+                    )
 
         self.assertEqual(exit_code, 0)
+        cmd = call_mock.call_args.args[0]
+        ee_indices = [i for i, token in enumerate(cmd) if token == "--ee"]
+        self.assertEqual(len(ee_indices), 1)
+        self.assertEqual(cmd[ee_indices[0] + 1], "dex1")
+        self.assertIn("--no-gripper", cmd)
+        printed = " ".join(" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list)
+        self.assertIn("use_recorded_tauff", printed)
+        self.assertIn("runtime tauff", printed)
+
+    def test_build_subprocess_command_omits_optional_network_interface(self):
+        cmd = replay_lerobot_real.build_subprocess_command(
+            dataset_root="/tmp/dataset",
+            episode_index=5,
+            network_interface=None,
+            max_arm_joint_speed=0.9,
+            speed_scale=2.0,
+            motion=False,
+            arm_source="action",
+            end_action="home",
+        )
+
+        self.assertNotIn("--network-interface", cmd)
+        self.assertIn("--offline-replay-episode-index", cmd)
+        self.assertIn("5", cmd)
+        self.assertIn("--offline-replay-speed-scale", cmd)
+        self.assertIn("2.0", cmd)
+        self.assertNotIn("--motion", cmd)
 
 
 if __name__ == "__main__":
