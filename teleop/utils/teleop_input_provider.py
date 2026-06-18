@@ -5,11 +5,21 @@ from pathlib import Path
 import time
 from typing import Any, Mapping
 
+import logging_mp
 import numpy as np
 
+from teleop.utils.inference_protocol import TcpJsonTransport
+from teleop.utils.online_inference import (
+    CameraSample,
+    OnlineInferenceConfig,
+    OnlineInferenceSession,
+    RobotStateSample,
+)
+from teleop.utils.pose_transform import load_pose_transformer
 from teleop.utils.xr_input_types import TeleData
 
 
+logger_mp = logging_mp.getLogger(__name__)
 CHUNK_NAME = "chunk-000"
 ACTION_SIZE = 16
 ARM_SIZE = 14
@@ -47,6 +57,24 @@ def dex1_q_to_trigger_value(q) -> float:
         raise ValueError("gripper q contains NaN or Inf")
     trigger = (q_value / 5.4) * 2.0 + 5.0
     return float(np.clip(trigger, 5.0, 7.0))
+
+
+def dex1_width_m_to_trigger_value(width_m, max_width_m: float = 0.054) -> float:
+    width_value = float(width_m)
+    if not np.isfinite(width_value):
+        raise ValueError("gripper width contains NaN or Inf")
+    max_width_value = float(max_width_m)
+    if max_width_value <= 0.0 or not np.isfinite(max_width_value):
+        raise ValueError("max_width_m must be positive and finite")
+    trigger = (np.clip(width_value, 0.0, max_width_value) / max_width_value) * 2.0 + 5.0
+    return float(np.clip(trigger, 5.0, 7.0))
+
+
+def _finite_gripper_width(value: Any, label: str) -> float:
+    width = float(value)
+    if not np.isfinite(width):
+        raise ValueError(f"{label} contains NaN or Inf")
+    return width
 
 
 def pose6_to_matrix(pose6) -> np.ndarray:
@@ -480,10 +508,173 @@ class LeRobotOfflineInputProvider(BaseTeleopInputProvider):
         return self._done
 
 
+class OnlineInferenceInputProvider(BaseTeleopInputProvider):
+    def __init__(
+        self,
+        session: OnlineInferenceSession,
+        arm_side: str,
+        ee: str | None = None,
+        no_gripper: bool = False,
+        dex1_max_width_m: float = 0.054,
+    ):
+        self.session = session
+        self.arm_side = str(arm_side)
+        if self.arm_side not in {"left", "right", "both"}:
+            raise ValueError(f"unsupported online inference arm_side: {arm_side!r}")
+        self.ee = ee
+        self.no_gripper = bool(no_gripper)
+        self.dex1_max_width_m = float(dex1_max_width_m)
+        self._frame_index = 0
+
+        if not self.no_gripper and self.ee != "dex1":
+            raise ValueError("online inference gripper control only supports ee='dex1'; use --no-gripper to ignore gripper actions")
+
+    def get_sample(self, *args, **kwargs) -> TeleopInputSample | None:
+        del args
+        left_pose = _finite_pose_matrix(kwargs.get("current_left_robot_wrist_pose"), "current_left_robot_wrist_pose")
+        right_pose = _finite_pose_matrix(kwargs.get("current_right_robot_wrist_pose"), "current_right_robot_wrist_pose")
+        host_monotonic_ns = kwargs.get("current_state_host_monotonic_ns")
+        if host_monotonic_ns is None:
+            host_monotonic_ns = time.monotonic_ns()
+
+        state_sample = RobotStateSample(
+            host_monotonic_ns=int(host_monotonic_ns),
+            left_pose=left_pose,
+            right_pose=right_pose,
+            left_gripper_width=_finite_gripper_width(kwargs.get("current_left_gripper_width", 0.0), "current_left_gripper_width"),
+            right_gripper_width=_finite_gripper_width(kwargs.get("current_right_gripper_width", 0.0), "current_right_gripper_width"),
+        )
+        camera_samples = self._coerce_camera_samples(kwargs)
+        step = self.session.tick(state_sample=state_sample, camera_samples=camera_samples)
+
+        enabled_arms = [str(side) for side in step.enabled_arms if str(side) in {"left", "right"}]
+        trigger_values = [10.0, 10.0]
+        trigger_pressed = [False, False]
+        if not self.no_gripper:
+            if "left" in enabled_arms:
+                trigger_values[0] = dex1_width_m_to_trigger_value(step.left_gripper_width, self.dex1_max_width_m)
+                trigger_pressed[0] = True
+            if "right" in enabled_arms:
+                trigger_values[1] = dex1_width_m_to_trigger_value(step.right_gripper_width, self.dex1_max_width_m)
+                trigger_pressed[1] = True
+
+        tele_data = TeleData(
+            head_pose=_make_identity_pose(),
+            left_wrist_pose=np.asarray(step.left_pose, dtype=float),
+            right_wrist_pose=np.asarray(step.right_pose, dtype=float),
+            left_ctrl_trigger=trigger_pressed[0],
+            left_ctrl_triggerValue=float(trigger_values[0]),
+            left_ctrl_squeeze="left" in enabled_arms,
+            left_ctrl_squeezeValue=1.0 if "left" in enabled_arms else 0.0,
+            left_ctrl_thumbstickValue=np.zeros(2, dtype=float),
+            right_ctrl_trigger=trigger_pressed[1],
+            right_ctrl_triggerValue=float(trigger_values[1]),
+            right_ctrl_squeeze="right" in enabled_arms,
+            right_ctrl_squeezeValue=1.0 if "right" in enabled_arms else 0.0,
+            right_ctrl_thumbstickValue=np.zeros(2, dtype=float),
+        )
+        metadata = dict(step.metadata or {})
+        metadata.update(
+            {
+                "enabled_arms": enabled_arms,
+                "online_inference_status": step.status,
+                "arm_side": self.arm_side,
+            }
+        )
+        motion_intent = MotionIntent(
+            kind="pose",
+            left_wrist_pose=np.asarray(step.left_pose, dtype=float),
+            right_wrist_pose=np.asarray(step.right_pose, dtype=float),
+            timestamp=time.time(),
+            frame_index=self._frame_index,
+            source="online_inference",
+            metadata=metadata,
+        )
+        self._frame_index += 1
+        done = step.status == "failed"
+        return TeleopInputSample(tele_data=tele_data, motion_intent=motion_intent, done=done)
+
+    def _coerce_camera_samples(self, kwargs: dict[str, Any]) -> list[CameraSample]:
+        explicit_samples = kwargs.get("camera_samples")
+        if explicit_samples is not None:
+            samples = list(explicit_samples)
+            self._set_required_camera_names([getattr(sample, "name", "") for sample in samples])
+            return samples
+
+        camera_sources = kwargs.get("camera_sources") or {}
+        target_monotonic_ns = kwargs.get("current_state_host_monotonic_ns")
+        samples: list[CameraSample] = []
+        required_names: list[str] = []
+        if isinstance(camera_sources, Mapping):
+            iterable = camera_sources.items()
+        else:
+            iterable = camera_sources
+        for entry in iterable:
+            try:
+                name, source = entry
+            except Exception:
+                continue
+            if source is None:
+                continue
+            name = str(name)
+            required_names.append(name)
+            frame = None
+            meta = None
+            get_nearest = getattr(source, "get_nearest", None)
+            if callable(get_nearest) and target_monotonic_ns is not None:
+                frame, meta = get_nearest(int(target_monotonic_ns), max_delta_ns=self.session.max_camera_delta_ns, copy=True)
+            if frame is None or meta is None:
+                get_latest = getattr(source, "get_latest", None)
+                if not callable(get_latest):
+                    continue
+                frame, meta = get_latest(copy=True)
+            if frame is None or meta is None:
+                continue
+            host_ns = meta.get("host_recv_monotonic_ns", meta.get("host_monotonic_ns"))
+            if host_ns is None:
+                continue
+            if target_monotonic_ns is not None and abs(int(host_ns) - int(target_monotonic_ns)) > self.session.max_camera_delta_ns:
+                continue
+            samples.append(CameraSample(name=name, frame=frame, host_monotonic_ns=int(host_ns)))
+        self._set_required_camera_names(required_names)
+        return samples
+
+    def _set_required_camera_names(self, names: list[str]) -> None:
+        unique_names = list(dict.fromkeys(str(name) for name in names if str(name)))
+        if not unique_names:
+            return
+        set_required = getattr(self.session, "set_required_camera_names", None)
+        if callable(set_required):
+            set_required(unique_names)
+
+    def report_control_feedback(self, feedback: dict) -> None:
+        report = getattr(self.session, "report_control_feedback", None)
+        if callable(report):
+            report(feedback)
+
+    def close(self) -> None:
+        close_fn = getattr(self.session, "close", None)
+        if callable(close_fn):
+            close_fn()
+            return
+        transport = getattr(self.session, "transport", None)
+        close_transport = getattr(transport, "close", None)
+        if callable(close_transport):
+            close_transport()
+
+    def has_live_pose_data(self) -> bool:
+        return True
+
+    @property
+    def done(self) -> bool:
+        return False
+
+
 def create_teleop_input_provider(args, arm_ik=None) -> BaseTeleopInputProvider:
     input_provider = getattr(args, "input_provider", "xr") or "xr"
 
     if input_provider == "xr":
+        logger_mp.info("Using XR-Robotics as the teleop input provider.")
         xr_wrapper_cls = _load_xr_robotics_wrapper()
         xr_wrapper = xr_wrapper_cls(
             use_hand_tracking=getattr(args, "input_mode", "controller") == "hand",
@@ -499,12 +690,63 @@ def create_teleop_input_provider(args, arm_ik=None) -> BaseTeleopInputProvider:
             raise ValueError("offline_replay_dataset_root is required for lerobot_offline input provider")
         if not hasattr(args, "offline_replay_episode_index"):
             raise ValueError("offline_replay_episode_index is required for lerobot_offline input provider")
+        logger_mp.info(
+            "Using offline teleop input provider (%s), dataset_root=%s, episode_index=%d.",
+            input_provider,
+            dataset_root,
+            getattr(args, "offline_replay_episode_index"),
+        )
         return LeRobotOfflineInputProvider(
             dataset_root=dataset_root,
             episode_index=getattr(args, "offline_replay_episode_index"),
             arm_source=getattr(args, "offline_replay_arm_source", "action"),
             speed_scale=getattr(args, "offline_replay_speed_scale", 1.0),
             arm_ik=arm_ik,
+        )
+
+    if input_provider == "online_inference":
+        enable_motion = bool(getattr(args, "online_inference_enable_motion", False))
+        dry_run = bool(getattr(args, "online_inference_dry_run", False))
+        transformer = load_pose_transformer(
+            enable_motion=enable_motion and not dry_run,
+            transform_config_path=getattr(args, "online_inference_transform_config", None),
+            arm_side=getattr(args, "online_inference_arm_side", "both"),
+        )
+        config = OnlineInferenceConfig(
+            arm_side=getattr(args, "online_inference_arm_side", "both"),
+            n_obs_steps=getattr(args, "online_inference_n_obs_steps", 2),
+            camera_freq=getattr(args, "online_inference_camera_freq", 30.0),
+            action_step_sec=getattr(args, "online_inference_action_step_sec", 0.10),
+            interpolation_interval_sec=getattr(args, "online_inference_interp_sec", 0.01),
+            post_action_delay_ms=getattr(args, "online_inference_post_action_delay_ms", 75),
+            response_timeout_sec=getattr(args, "online_inference_response_timeout_sec", 2.0),
+            jpeg_quality=getattr(args, "online_inference_jpeg_quality", 85),
+            enable_motion=enable_motion,
+            dry_run=dry_run,
+        )
+        transport = TcpJsonTransport.connect(
+            host=getattr(args, "online_inference_host", "127.0.0.1"),
+            port=getattr(args, "online_inference_port", 5555),
+            connect_timeout_sec=getattr(args, "online_inference_response_timeout_sec", 2.0),
+        )
+        session = OnlineInferenceSession(
+            config=config,
+            transport=transport,
+            pose_transformer=transformer,
+        )
+        logger_mp.info(
+            "Using online inference input provider: host=%s port=%s arm_side=%s enable_motion=%s dry_run=%s.",
+            getattr(args, "online_inference_host", "127.0.0.1"),
+            getattr(args, "online_inference_port", 5555),
+            config.arm_side,
+            config.enable_motion,
+            config.dry_run,
+        )
+        return OnlineInferenceInputProvider(
+            session=session,
+            arm_side=config.arm_side,
+            ee=getattr(args, "ee", None),
+            no_gripper=getattr(args, "no_gripper", False),
         )
 
     raise ValueError(f"unsupported input_provider: {input_provider}")

@@ -48,6 +48,41 @@ def _write_lerobot_episode(dataset_root: pathlib.Path, include_fk: bool = False)
     pq.write_table(pa.table(columns), data_dir / "episode_000000.parquet")
 
 
+def _pose_matrix(x: float, y: float, z: float) -> np.ndarray:
+    pose = np.eye(4, dtype=float)
+    pose[:3, 3] = [x, y, z]
+    return pose
+
+
+class FakeOnlineSession:
+    def __init__(self, steps):
+        self.steps = list(steps)
+        self.tick_calls = []
+        self.feedback = []
+        self.max_camera_delta_ns = 100_000_000
+        self.required_camera_names = []
+
+    def tick(self, state_sample, camera_samples):
+        self.tick_calls.append((state_sample, list(camera_samples)))
+        return self.steps.pop(0)
+
+    def set_required_camera_names(self, names):
+        self.required_camera_names = list(names)
+
+    def report_control_feedback(self, feedback):
+        self.feedback.append(feedback)
+
+
+class FakeCameraSource:
+    def __init__(self, frame, host_monotonic_ns: int):
+        self.frame = frame
+        self.host_monotonic_ns = int(host_monotonic_ns)
+
+    def get_latest(self, copy=True):
+        frame = self.frame.copy() if copy else self.frame
+        return frame, {"host_recv_monotonic_ns": self.host_monotonic_ns}
+
+
 class TeleopInputProviderTest(unittest.TestCase):
     def test_lerobot_action_source_emits_joint_position_intent(self):
         from teleop.utils.teleop_input_provider import LeRobotOfflineInputProvider
@@ -148,12 +183,304 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertTrue(np.allclose(wrapped.left_pose, np.eye(4)))
         self.assertTrue(np.allclose(wrapped.right_pose, np.eye(4)))
 
+    def test_create_xr_provider_logs_provider_selection(self):
+        import teleop.utils.teleop_input_provider as input_provider_module
+
+        class FakeXRWrapper:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        args = SimpleNamespace(input_provider="xr")
+        with mock.patch.object(input_provider_module, "_load_xr_robotics_wrapper", return_value=FakeXRWrapper):
+            with mock.patch.object(input_provider_module, "logger_mp", create=True) as logger:
+                input_provider_module.create_teleop_input_provider(args)
+
+        logger.info.assert_any_call("Using XR-Robotics as the teleop input provider.")
+
+    def test_create_lerobot_provider_logs_provider_selection(self):
+        import teleop.utils.teleop_input_provider as input_provider_module
+
+        args = SimpleNamespace(
+            input_provider="lerobot_offline",
+            offline_replay_dataset_root="/tmp/dataset",
+            offline_replay_episode_index=7,
+            offline_replay_arm_source="action",
+            offline_replay_speed_scale=0.5,
+        )
+        with mock.patch.object(input_provider_module, "LeRobotOfflineInputProvider", return_value=mock.Mock()):
+            with mock.patch.object(input_provider_module, "logger_mp", create=True) as logger:
+                input_provider_module.create_teleop_input_provider(args)
+
+        logger.info.assert_any_call(
+            "Using offline teleop input provider (%s), dataset_root=%s, episode_index=%d.",
+            "lerobot_offline",
+            "/tmp/dataset",
+            7,
+        )
+
     def test_create_provider_rejects_lerobot_without_dataset(self):
         from teleop.utils.teleop_input_provider import create_teleop_input_provider
 
         args = SimpleNamespace(input_provider="lerobot_offline", offline_replay_dataset_root="", offline_replay_episode_index=0)
         with self.assertRaises(ValueError):
             create_teleop_input_provider(args)
+
+    def test_online_provider_left_arm_emits_pose_intent_and_dex1_trigger(self):
+        from teleop.utils.online_inference import CameraSample, OnlineInferenceStep
+        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+
+        current_left = _pose_matrix(1.0, 0.0, 0.0)
+        current_right = _pose_matrix(2.0, 0.0, 0.0)
+        target_left = _pose_matrix(3.0, 0.0, 0.0)
+        session = FakeOnlineSession(
+            [
+                OnlineInferenceStep(
+                    left_pose=target_left,
+                    right_pose=current_right,
+                    left_gripper_width=0.054,
+                    right_gripper_width=0.010,
+                    enabled_arms=["left"],
+                    status="executing_chunk",
+                )
+            ]
+        )
+        provider = OnlineInferenceInputProvider(
+            session=session,
+            arm_side="left",
+            ee="dex1",
+            no_gripper=False,
+        )
+
+        sample = provider.get_sample(
+            current_state_host_monotonic_ns=123,
+            current_left_robot_wrist_pose=current_left,
+            current_right_robot_wrist_pose=current_right,
+            current_left_gripper_width=0.010,
+            current_right_gripper_width=0.020,
+            camera_samples=[
+                CameraSample(name="head", frame=np.zeros((4, 4, 3), dtype=np.uint8), host_monotonic_ns=123)
+            ],
+        )
+
+        self.assertEqual(sample.motion_intent.source, "online_inference")
+        self.assertEqual(sample.motion_intent.metadata["enabled_arms"], ["left"])
+        self.assertTrue(np.allclose(sample.motion_intent.left_wrist_pose, target_left))
+        self.assertTrue(np.allclose(sample.motion_intent.right_wrist_pose, current_right))
+        self.assertTrue(sample.tele_data.left_ctrl_squeeze)
+        self.assertFalse(sample.tele_data.right_ctrl_squeeze)
+        self.assertAlmostEqual(sample.tele_data.left_ctrl_triggerValue, 7.0)
+        state_sample, camera_samples = session.tick_calls[0]
+        self.assertEqual(state_sample.host_monotonic_ns, 123)
+        self.assertAlmostEqual(state_sample.left_gripper_width, 0.010)
+        self.assertEqual(camera_samples[0].name, "head")
+
+    def test_online_provider_right_arm_holds_left_side(self):
+        from teleop.utils.online_inference import OnlineInferenceStep
+        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+
+        current_left = _pose_matrix(1.0, 0.0, 0.0)
+        current_right = _pose_matrix(2.0, 0.0, 0.0)
+        target_right = _pose_matrix(4.0, 0.0, 0.0)
+        session = FakeOnlineSession(
+            [
+                OnlineInferenceStep(
+                    left_pose=current_left,
+                    right_pose=target_right,
+                    left_gripper_width=0.010,
+                    right_gripper_width=0.054,
+                    enabled_arms=["right"],
+                    status="executing_chunk",
+                )
+            ]
+        )
+        provider = OnlineInferenceInputProvider(session=session, arm_side="right", ee="dex1", no_gripper=False)
+
+        sample = provider.get_sample(
+            current_state_host_monotonic_ns=456,
+            current_left_robot_wrist_pose=current_left,
+            current_right_robot_wrist_pose=current_right,
+            current_left_gripper_width=0.010,
+            current_right_gripper_width=0.020,
+            camera_samples=[],
+        )
+
+        self.assertEqual(sample.motion_intent.metadata["enabled_arms"], ["right"])
+        self.assertTrue(np.allclose(sample.motion_intent.left_wrist_pose, current_left))
+        self.assertTrue(np.allclose(sample.motion_intent.right_wrist_pose, target_right))
+        self.assertFalse(sample.tele_data.left_ctrl_squeeze)
+        self.assertTrue(sample.tele_data.right_ctrl_squeeze)
+
+    def test_online_provider_both_arms_enabled(self):
+        from teleop.utils.online_inference import OnlineInferenceStep
+        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+
+        session = FakeOnlineSession(
+            [
+                OnlineInferenceStep(
+                    left_pose=_pose_matrix(3.0, 0.0, 0.0),
+                    right_pose=_pose_matrix(4.0, 0.0, 0.0),
+                    left_gripper_width=0.000,
+                    right_gripper_width=0.054,
+                    enabled_arms=["left", "right"],
+                    status="executing_chunk",
+                )
+            ]
+        )
+        provider = OnlineInferenceInputProvider(session=session, arm_side="both", ee="dex1", no_gripper=False)
+
+        sample = provider.get_sample(
+            current_state_host_monotonic_ns=789,
+            current_left_robot_wrist_pose=_pose_matrix(1.0, 0.0, 0.0),
+            current_right_robot_wrist_pose=_pose_matrix(2.0, 0.0, 0.0),
+            current_left_gripper_width=0.010,
+            current_right_gripper_width=0.020,
+            camera_samples=[],
+        )
+
+        self.assertEqual(sample.motion_intent.metadata["enabled_arms"], ["left", "right"])
+        self.assertTrue(sample.tele_data.left_ctrl_squeeze)
+        self.assertTrue(sample.tele_data.right_ctrl_squeeze)
+        self.assertAlmostEqual(sample.tele_data.left_ctrl_triggerValue, 5.0)
+        self.assertAlmostEqual(sample.tele_data.right_ctrl_triggerValue, 7.0)
+
+    def test_online_provider_dry_run_status_does_not_enable_motion(self):
+        from teleop.utils.online_inference import OnlineInferenceStep
+        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+
+        current_left = _pose_matrix(1.0, 0.0, 0.0)
+        current_right = _pose_matrix(2.0, 0.0, 0.0)
+        session = FakeOnlineSession(
+            [
+                OnlineInferenceStep(
+                    left_pose=_pose_matrix(3.0, 0.0, 0.0),
+                    right_pose=current_right,
+                    left_gripper_width=0.054,
+                    right_gripper_width=0.020,
+                    enabled_arms=[],
+                    status="executing_chunk",
+                    metadata={"dry_run": True},
+                )
+            ]
+        )
+        provider = OnlineInferenceInputProvider(session=session, arm_side="left", ee="dex1", no_gripper=False)
+
+        sample = provider.get_sample(
+            current_state_host_monotonic_ns=123,
+            current_left_robot_wrist_pose=current_left,
+            current_right_robot_wrist_pose=current_right,
+            current_left_gripper_width=0.010,
+            current_right_gripper_width=0.020,
+            camera_samples=[],
+        )
+
+        self.assertEqual(sample.motion_intent.metadata["enabled_arms"], [])
+        self.assertFalse(sample.tele_data.left_ctrl_squeeze)
+        self.assertFalse(sample.tele_data.right_ctrl_squeeze)
+
+    def test_online_provider_failed_session_returns_done(self):
+        from teleop.utils.online_inference import OnlineInferenceStep
+        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+
+        session = FakeOnlineSession(
+            [
+                OnlineInferenceStep(
+                    left_pose=_pose_matrix(1.0, 0.0, 0.0),
+                    right_pose=_pose_matrix(2.0, 0.0, 0.0),
+                    left_gripper_width=0.010,
+                    right_gripper_width=0.020,
+                    enabled_arms=[],
+                    status="failed",
+                    metadata={"error": "timeout"},
+                )
+            ]
+        )
+        provider = OnlineInferenceInputProvider(session=session, arm_side="left", ee="dex1", no_gripper=False)
+
+        sample = provider.get_sample(
+            current_state_host_monotonic_ns=123,
+            current_left_robot_wrist_pose=_pose_matrix(1.0, 0.0, 0.0),
+            current_right_robot_wrist_pose=_pose_matrix(2.0, 0.0, 0.0),
+            current_left_gripper_width=0.010,
+            current_right_gripper_width=0.020,
+            camera_samples=[],
+        )
+
+        self.assertTrue(sample.done)
+        self.assertEqual(sample.motion_intent.metadata["online_inference_status"], "failed")
+
+    def test_online_provider_declares_non_empty_camera_sources_as_required(self):
+        from teleop.utils.online_inference import OnlineInferenceStep
+        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+
+        session = FakeOnlineSession(
+            [
+                OnlineInferenceStep(
+                    left_pose=_pose_matrix(1.0, 0.0, 0.0),
+                    right_pose=_pose_matrix(2.0, 0.0, 0.0),
+                    left_gripper_width=0.010,
+                    right_gripper_width=0.020,
+                    enabled_arms=[],
+                    status="collecting_observation",
+                )
+            ]
+        )
+        provider = OnlineInferenceInputProvider(session=session, arm_side="left", ee="dex1", no_gripper=False)
+
+        provider.get_sample(
+            current_state_host_monotonic_ns=123,
+            current_left_robot_wrist_pose=_pose_matrix(1.0, 0.0, 0.0),
+            current_right_robot_wrist_pose=_pose_matrix(2.0, 0.0, 0.0),
+            current_left_gripper_width=0.010,
+            current_right_gripper_width=0.020,
+            camera_sources={
+                "head": FakeCameraSource(np.zeros((4, 4, 3), dtype=np.uint8), 123),
+                "left_wrist": FakeCameraSource(np.zeros((4, 4, 3), dtype=np.uint8), 123),
+                "right_wrist": None,
+            },
+        )
+
+        self.assertEqual(session.required_camera_names, ["head", "left_wrist"])
+        _, camera_samples = session.tick_calls[0]
+        self.assertEqual([sample.name for sample in camera_samples], ["head", "left_wrist"])
+
+    def test_online_provider_rejects_unsupported_gripper_without_no_gripper(self):
+        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+
+        with self.assertRaises(ValueError):
+            OnlineInferenceInputProvider(
+                session=mock.Mock(),
+                arm_side="left",
+                ee="dex3",
+                no_gripper=False,
+            )
+
+    def test_create_online_provider_requires_transform_config_for_real_motion_before_connecting(self):
+        import teleop.utils.teleop_input_provider as input_provider_module
+
+        args = SimpleNamespace(
+            input_provider="online_inference",
+            online_inference_host="127.0.0.1",
+            online_inference_port=5555,
+            online_inference_arm_side="left",
+            online_inference_n_obs_steps=2,
+            online_inference_camera_freq=30.0,
+            online_inference_jpeg_quality=85,
+            online_inference_action_step_sec=0.10,
+            online_inference_interp_sec=0.01,
+            online_inference_post_action_delay_ms=75,
+            online_inference_response_timeout_sec=2.0,
+            online_inference_transform_config="",
+            online_inference_enable_motion=True,
+            online_inference_dry_run=False,
+            ee="dex1",
+            no_gripper=False,
+        )
+
+        with mock.patch.object(input_provider_module, "TcpJsonTransport") as transport_cls:
+            with self.assertRaises(ValueError):
+                input_provider_module.create_teleop_input_provider(args)
+
+        transport_cls.connect.assert_not_called()
 
 
 if __name__ == "__main__":
