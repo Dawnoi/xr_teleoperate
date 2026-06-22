@@ -71,3 +71,51 @@ python teleop/replay_lerobot_real.py \
 ```
 
 旧数据集如果没有 `extras/control/chunk-000/episode_000000.jsonl` sidecar，会自动回退到运行时 live tauff 计算，不影响主 parquet / 视频回放。
+
+## 导出 UMI / DP 单帧格式
+
+LeRobot v2 数据可以离线导出成 UMI / Diffusion Policy 常用的 episode 文件夹：
+
+```bash
+python3 tools/export_lerobot_to_umi_dp.py \
+  --lerobot-root /path/to/lerobot_dataset \
+  --output-root /path/to/umi_dp_dataset \
+  --tcp-source cmd \
+  --gripper-source action \
+  --timestamp-source sample
+```
+
+输出结构：
+
+```text
+episode_000000/
+  camera/
+    cam0/
+      000000_20260618_153012_347.png
+      000001_20260618_153012_380.png
+    cam1/
+    cam2/
+  tcp/
+    left.json
+    right.json
+  gripper/
+    left.json
+    right.json
+  meta.json
+```
+
+严格对应关系：
+
+```text
+parquet 第 i 行 == mp4 解码第 i 帧 == alignment jsonl 第 i 行
+```
+
+说明：
+
+- `mp4` 本身不保存每帧真实采集的年月日时分秒毫秒。
+- PNG 文件名里的真实时间来自 `meta/alignment/episode_XXXXXX.jsonl`。
+- 默认 `--timestamp-source sample` 表示三路相机和 action 共用同一个样本时间戳。
+- 如果需要每路相机使用自己的接收时间，可改成 `--timestamp-source camera`。
+- 默认 `--tcp-source cmd` 使用 `observation.fk.cmd.*.gripper_flange`，即动作指令对应的 TCP。
+- 默认 `--gripper-source action` 使用 `action[7]` / `action[15]`。
+- 如需覆盖已导出的 episode，增加 `--overwrite`。
