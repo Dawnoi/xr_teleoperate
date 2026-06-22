@@ -38,6 +38,7 @@ from teleop.utils.g1d_agv_bridge import G1DAgvBridge
 from teleop.utils.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.utils.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
+from teleop.utils.online_inference import online_inference_speed_limit_delta
 from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
 from teleop.utils.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,
@@ -1599,9 +1600,13 @@ if __name__ == '__main__':
             )
             safety_ms = (time.perf_counter() - safety_start) * 1000.0
             if args.input_provider == "online_inference" and provider_feedback is None:
-                speed_limit_delta = float(np.max(np.abs(sol_q_before_speed_limit - sol_q)))
-                max_allowed_delta = float(args.max_arm_joint_speed) / max(float(args.frequency), 1e-6)
-                if speed_limit_delta > max(0.10, max_allowed_delta * 2.0):
+                speed_limit_delta = online_inference_speed_limit_delta(
+                    target_q=sol_q_before_speed_limit,
+                    limited_q=sol_q,
+                    max_arm_joint_speed=args.max_arm_joint_speed,
+                    frequency=args.frequency,
+                )
+                if speed_limit_delta is not None:
                     provider_feedback = {
                         "fatal": True,
                         "reason": "online inference action exceeded joint speed limit",

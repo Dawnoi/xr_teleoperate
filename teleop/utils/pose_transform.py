@@ -18,6 +18,8 @@ def _is_finite_number(value: Any) -> bool:
 
 
 def validate_matrix4x4(matrix: Any) -> List[List[float]]:
+    if not isinstance(matrix, (list, tuple)) and hasattr(matrix, "tolist"):
+        matrix = matrix.tolist()
     if not isinstance(matrix, (list, tuple)) or len(matrix) != 4:
         raise ValueError("matrix must be a 4x4 list")
     validated: List[List[float]] = []
@@ -64,6 +66,8 @@ def _invert_rigid_transform(matrix: List[List[float]]) -> List[List[float]]:
 
 
 def pose7_xyzw_to_matrix(pose7: Any) -> List[List[float]]:
+    if not isinstance(pose7, (list, tuple)) and hasattr(pose7, "tolist"):
+        pose7 = pose7.tolist()
     if not isinstance(pose7, (list, tuple)) or len(pose7) != 7:
         raise ValueError("pose7 must be [x, y, z, qx, qy, qz, qw]")
     values = [float(value) for value in pose7]

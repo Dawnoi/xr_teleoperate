@@ -77,6 +77,29 @@ class OnlineInferenceStep:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
+def online_inference_speed_limit_delta(
+    *,
+    target_q: Any,
+    limited_q: Any,
+    max_arm_joint_speed: float,
+    frequency: float,
+) -> Optional[float]:
+    target = np.asarray(target_q, dtype=float).reshape(-1)
+    limited = np.asarray(limited_q, dtype=float).reshape(-1)
+    if target.shape != limited.shape:
+        raise ValueError("joint speed check requires target and limited vectors with identical shape")
+    if target.size == 0:
+        raise ValueError("joint speed check requires non-empty joint vectors")
+    if not np.all(np.isfinite(target)) or not np.all(np.isfinite(limited)):
+        raise ValueError("joint speed check vectors must be finite")
+
+    speed_limit_delta = float(np.max(np.abs(target - limited)))
+    allowed_delta = float(max_arm_joint_speed) / max(float(frequency), 1e-6)
+    if speed_limit_delta <= max(0.10, allowed_delta * 2.0):
+        return None
+    return speed_limit_delta
+
+
 class OnlineInferenceSession:
     def __init__(
         self,
@@ -101,6 +124,8 @@ class OnlineInferenceSession:
         self._camera_order: List[str] = []
         self._required_camera_names: Optional[List[str]] = None
         self._init_poses_server: Dict[str, List[float]] = {}
+        self._last_observation_debug: Dict[str, Any] = {}
+        self._last_action_debug: Dict[str, Any] = {}
 
         self._waiting_since_ns: Optional[int] = None
         self._collecting_since_ns: Optional[int] = None
@@ -121,6 +146,15 @@ class OnlineInferenceSession:
         self._observation_ready_timeout_ns = int(max(5.0, self.config.response_timeout_sec * 2.0) * 1_000_000_000)
 
         self._transport_reset_done = False
+
+    def get_debug_snapshot(self) -> Dict[str, Any]:
+        return {
+            "arm_side": self.config.arm_side,
+            "status": self.status,
+            "error": self.error,
+            "last_observation": dict(self._last_observation_debug),
+            "last_action": dict(self._last_action_debug),
+        }
 
     def set_required_camera_names(self, names: Sequence[str]) -> None:
         required = [str(name) for name in names if str(name)]
@@ -182,6 +216,7 @@ class OnlineInferenceSession:
         try:
             self._ensure_transport_reset()
             observation = self._build_observation_message()
+            self._last_observation_debug = self._make_observation_debug(observation)
             self.transport.send_json(observation)
             self._waiting_since_ns = int(self.clock_ns())
             self._collecting_since_ns = None
@@ -248,6 +283,8 @@ class OnlineInferenceSession:
             clear_pending_rx()
         self._transport_reset_done = True
         self._init_poses_server = {}
+        self._last_observation_debug = {}
+        self._last_action_debug = {}
 
     def _build_observation_message(self) -> Dict[str, Any]:
         message: Dict[str, Any] = {"type": "observation"}
@@ -406,6 +443,13 @@ class OnlineInferenceSession:
                 {},
             )
 
+        if isinstance(payload, dict) and payload.get("type") == "reset_ack":
+            return self._hold_step(
+                state_sample,
+                "waiting_action",
+                {"ignored_response_type": "reset_ack"},
+            )
+
         try:
             self._load_action_payload(payload)
         except Exception as exc:
@@ -442,6 +486,7 @@ class OnlineInferenceSession:
         if delay_ms_value > self.config.max_post_action_delay_ms:
             raise ValueError("post_action_delay_ms exceeds max_post_action_delay_ms")
 
+        self._last_action_debug = self._make_action_debug(left_steps, right_steps, chunk_size)
         self._current_chunk_left = left_steps
         self._current_chunk_right = right_steps
         self._current_chunk_index = 0
@@ -453,6 +498,56 @@ class OnlineInferenceSession:
 
         self._waiting_since_ns = None
         self.status = "executing_chunk"
+
+    def _make_observation_debug(self, observation: Dict[str, Any]) -> Dict[str, Any]:
+        debug: Dict[str, Any] = {}
+        for key, side in (("arm_l", "left"), ("arm_r", "right")):
+            arm_payload = observation.get(key)
+            if not isinstance(arm_payload, dict):
+                continue
+            poses = arm_payload.get("poses") or []
+            grippers = arm_payload.get("grippers") or []
+            arm_current_pose = arm_payload.get("arm_current_pose")
+            init_pose = arm_payload.get("init_pose")
+            debug[side] = {
+                "n_poses": len(poses) if isinstance(poses, list) else 0,
+                "n_images": len(arm_payload.get("images") or []),
+                "arm_current_pose": self._float_list_or_none(arm_current_pose),
+                "init_pose": self._float_list_or_none(init_pose),
+                "last_gripper": float(grippers[-1]) if isinstance(grippers, list) and grippers else None,
+            }
+        return debug
+
+    def _make_action_debug(
+        self,
+        left_steps: Optional[List[np.ndarray]],
+        right_steps: Optional[List[np.ndarray]],
+        chunk_size: int,
+    ) -> Dict[str, Any]:
+        debug: Dict[str, Any] = {}
+        for side, steps in (("left", left_steps), ("right", right_steps)):
+            if not steps:
+                continue
+            first_step = np.asarray(steps[0], dtype=np.float64)
+            side_observation = self._last_observation_debug.get(side, {})
+            arm_current_pose = side_observation.get("arm_current_pose")
+            delta_xyz_m = None
+            if arm_current_pose is not None and len(arm_current_pose) >= 3:
+                current_xyz = np.asarray(arm_current_pose[:3], dtype=np.float64)
+                action_xyz = np.asarray(first_step[:3], dtype=np.float64)
+                delta_xyz_m = float(np.linalg.norm(action_xyz - current_xyz))
+            debug[side] = {
+                "chunk_size": int(chunk_size),
+                "first_step": [float(value) for value in first_step.tolist()],
+                "delta_xyz_m": delta_xyz_m,
+            }
+        return debug
+
+    @staticmethod
+    def _float_list_or_none(values: Any) -> Optional[List[float]]:
+        if not isinstance(values, (list, tuple)):
+            return None
+        return [float(value) for value in values]
 
     def _emit_action_step(self, state_sample: RobotStateSample) -> OnlineInferenceStep:
         if self._current_chunk_index >= self._current_chunk_size:

@@ -652,6 +652,12 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
         if callable(report):
             report(feedback)
 
+    def get_debug_snapshot(self) -> dict:
+        snapshot = getattr(self.session, "get_debug_snapshot", None)
+        if callable(snapshot):
+            return snapshot()
+        return {}
+
     def close(self) -> None:
         close_fn = getattr(self.session, "close", None)
         if callable(close_fn):

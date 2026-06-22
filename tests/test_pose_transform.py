@@ -47,6 +47,22 @@ def _assert_vector_close(test_case: unittest.TestCase, actual, expected, places:
         test_case.assertAlmostEqual(actual_value, expected_value, places=places)
 
 
+class _ArrayLikeMatrix:
+    def __init__(self, values):
+        self._values = values
+
+    def tolist(self):
+        return self._values
+
+
+class _ArrayLikeVector:
+    def __init__(self, values):
+        self._values = values
+
+    def tolist(self):
+        return self._values
+
+
 class PoseTransformTest(unittest.TestCase):
     def test_pose7_matrix_roundtrip_xyzw(self):
         pose7 = [0.25, -0.5, 1.2, 0.0, 0.0, math.sqrt(0.5) * 2.0, math.sqrt(0.5) * 2.0]
@@ -57,6 +73,13 @@ class PoseTransformTest(unittest.TestCase):
         _assert_matrix_close(self, matrix, pose7_xyzw_to_matrix(roundtrip_pose7))
         _assert_vector_close(self, roundtrip_pose7[:3], pose7[:3])
         self.assertAlmostEqual(math.sqrt(sum(value * value for value in roundtrip_pose7[3:])), 1.0)
+
+    def test_pose7_to_matrix_accepts_array_like_vector(self):
+        pose7 = _ArrayLikeVector([0.25, -0.5, 1.2, 0.0, 0.0, 0.0, 1.0])
+
+        matrix = pose7_xyzw_to_matrix(pose7)
+
+        _assert_vector_close(self, [matrix[0][3], matrix[1][3], matrix[2][3]], [0.25, -0.5, 1.2])
 
     def test_loader_requires_config_when_motion_enabled(self):
         with self.assertRaises(ValueError):
@@ -146,6 +169,19 @@ class PoseTransformTest(unittest.TestCase):
         _assert_matrix_close(
             self,
             pose7_xyzw_to_matrix(transformer.observation_to_server("right", pose7_xyzw_to_matrix(pose7))),
+            pose7_xyzw_to_matrix(pose7),
+        )
+
+    def test_disabled_transformer_accepts_array_like_wrist_matrix_for_observation(self):
+        transformer = load_pose_transformer(enable_motion=False, transform_config_path=None)
+        pose7 = [0.1, 0.2, -0.3, 0.0, 0.0, 0.0, 1.0]
+        wrist_matrix = _ArrayLikeMatrix(pose7_xyzw_to_matrix(pose7))
+
+        recovered_pose7 = transformer.observation_to_server("right", wrist_matrix)
+
+        _assert_matrix_close(
+            self,
+            pose7_xyzw_to_matrix(recovered_pose7),
             pose7_xyzw_to_matrix(pose7),
         )
 

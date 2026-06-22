@@ -90,6 +90,35 @@ def _image(fill: int) -> np.ndarray:
 
 
 class OnlineInferenceSessionTest(unittest.TestCase):
+    def test_speed_limit_delta_returns_none_for_small_clip(self):
+        from teleop.utils.online_inference import online_inference_speed_limit_delta
+
+        delta = online_inference_speed_limit_delta(
+            target_q=np.array([0.01] * 14, dtype=float),
+            limited_q=np.array([0.0] * 14, dtype=float),
+            max_arm_joint_speed=0.1,
+            frequency=30.0,
+        )
+
+        self.assertIsNone(delta)
+
+    def test_speed_limit_delta_reports_large_clip(self):
+        from teleop.utils.online_inference import online_inference_speed_limit_delta
+
+        target = np.zeros(14, dtype=float)
+        limited = np.zeros(14, dtype=float)
+        target[9] = 0.50
+        limited[9] = 0.01
+
+        delta = online_inference_speed_limit_delta(
+            target_q=target,
+            limited_q=limited,
+            max_arm_joint_speed=0.1,
+            frequency=30.0,
+        )
+
+        self.assertAlmostEqual(delta, 0.49)
+
     def _make_state(self, host_monotonic_ns: int):
         from teleop.utils.online_inference import RobotStateSample
 
@@ -340,6 +369,68 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(step.enabled_arms, [])
         self.assertIn("timeout", session.error.lower())
         self.assertEqual(session.status, "failed")
+
+    def test_wait_action_ignores_reset_ack_control_response(self):
+        from teleop.utils.online_inference import OnlineInferenceSession
+
+        clock = FakeClock()
+        transport = FakeTransport()
+        session = OnlineInferenceSession(
+            config=self._make_config(response_timeout_sec=0.50),
+            transport=transport,
+            clock_ns=clock,
+        )
+
+        session.tick(
+            state_sample=self._make_state(clock()),
+            camera_samples=self._make_cameras(clock()),
+        )
+        clock.advance_ms(40)
+        session.tick(
+            state_sample=self._make_state(clock()),
+            camera_samples=self._make_cameras(clock()),
+        )
+        transport.queue_recv({"type": "reset_ack", "timestamp": 123.0})
+
+        step = session.tick(
+            state_sample=self._make_state(clock()),
+            camera_samples=self._make_cameras(clock()),
+        )
+
+        self.assertEqual(step.status, "waiting_action")
+        self.assertEqual(step.enabled_arms, [])
+        self.assertIsNone(session.error)
+        self.assertEqual(session.status, "waiting_action")
+
+    def test_debug_snapshot_tracks_latest_right_observation_and_action(self):
+        from teleop.utils.online_inference import OnlineInferenceSession
+
+        clock = FakeClock()
+        transport = FakeTransport()
+        session = OnlineInferenceSession(
+            config=self._make_config(arm_side="right"),
+            transport=transport,
+            clock_ns=clock,
+        )
+
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
+        clock.advance_ms(40)
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
+        transport.queue_recv(
+            {
+                "type": "action",
+                "action_r": [[-0.5, -1.0, -2.5, 0.0, 0.0, 0.0, 1.0, 0.02]],
+            }
+        )
+
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
+        snapshot = session.get_debug_snapshot()
+
+        self.assertEqual(snapshot["arm_side"], "right")
+        self.assertEqual(snapshot["last_observation"]["right"]["arm_current_pose"][:3], [-1.0, -2.0, -3.0])
+        self.assertEqual(snapshot["last_action"]["right"]["first_step"][:3], [-0.5, -1.0, -2.5])
+        self.assertEqual(snapshot["last_action"]["right"]["chunk_size"], 1)
+        self.assertAlmostEqual(snapshot["last_action"]["right"]["delta_xyz_m"], 1.224744871, places=6)
 
     def test_post_action_delay_timeout_fails_closed(self):
         from teleop.utils.online_inference import OnlineInferenceSession
