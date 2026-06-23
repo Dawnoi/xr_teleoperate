@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+import logging
 import numpy as np
 
 from teleop.utils.inference_protocol import encode_jpeg_base64, parse_action_chunk
 from teleop.utils.pose_transform import matrix_to_pose7_xyzw, pose7_xyzw_to_matrix
+
+logger = logging.getLogger(__name__)
 
 
 def _monotonic_ns() -> int:
@@ -15,12 +18,19 @@ def _monotonic_ns() -> int:
     return time.monotonic_ns()
 
 
+def _perf_counter_ns() -> int:
+    import time
+
+    return time.perf_counter_ns()
+
+
 @dataclass
 class OnlineInferenceConfig:
     arm_side: str
     n_obs_steps: int = 2
     camera_freq: float = 30.0
     action_step_sec: float = 0.10
+    chunk_step_mode: str = "timed"
     interpolation_interval_sec: float = 0.01
     post_action_delay_ms: int = 75
     max_post_action_delay_ms: int = 5000
@@ -36,6 +46,8 @@ class OnlineInferenceConfig:
             raise ValueError("n_obs_steps must be positive")
         if self.action_step_sec <= 0.0:
             raise ValueError("action_step_sec must be positive")
+        if self.chunk_step_mode not in {"timed", "per_tick"}:
+            raise ValueError(f"unsupported chunk_step_mode: {self.chunk_step_mode!r}")
         if self.interpolation_interval_sec <= 0.0:
             raise ValueError("interpolation_interval_sec must be positive")
         if self.response_timeout_sec <= 0.0:
@@ -107,11 +119,13 @@ class OnlineInferenceSession:
         transport: Any,
         pose_transformer: Optional[Any] = None,
         clock_ns: Optional[Callable[[], int]] = None,
+        trace_clock_ns: Optional[Callable[[], int]] = None,
     ) -> None:
         self.config = config
         self.transport = transport
         self.pose_transformer = pose_transformer
         self.clock_ns = clock_ns or _monotonic_ns
+        self.trace_clock_ns = trace_clock_ns or _perf_counter_ns
 
         if self.config.enable_motion and not self.config.dry_run and self.pose_transformer is None:
             raise ValueError("pose_transformer is required when online inference motion is enabled")
@@ -126,6 +140,14 @@ class OnlineInferenceSession:
         self._init_poses_server: Dict[str, List[float]] = {}
         self._last_observation_debug: Dict[str, Any] = {}
         self._last_action_debug: Dict[str, Any] = {}
+        self._observation_seq = 0
+        self._current_observation_seq = 0
+        self._current_observation_send_ns: Optional[int] = None
+        self._current_observation_send_perf_ns: Optional[int] = None
+        self._chunk_seq = 0
+        self._current_chunk_seq = 0
+        self._current_action_recv_ns: Optional[int] = None
+        self._current_action_recv_perf_ns: Optional[int] = None
 
         self._waiting_since_ns: Optional[int] = None
         self._collecting_since_ns: Optional[int] = None
@@ -216,9 +238,16 @@ class OnlineInferenceSession:
         try:
             self._ensure_transport_reset()
             observation = self._build_observation_message()
+            self._log_current_observation_point(observation)
             self._last_observation_debug = self._make_observation_debug(observation)
+            observation_send_ns = int(self.clock_ns())
+            observation_send_perf_ns = int(self.trace_clock_ns())
             self.transport.send_json(observation)
-            self._waiting_since_ns = int(self.clock_ns())
+            self._waiting_since_ns = observation_send_ns
+            self._current_observation_send_perf_ns = observation_send_perf_ns
+            self._observation_seq += 1
+            self._current_observation_seq = self._observation_seq
+            self._current_observation_send_ns = int(self._waiting_since_ns)
             self._collecting_since_ns = None
             self.status = "waiting_action"
         except Exception as exc:
@@ -327,6 +356,32 @@ class OnlineInferenceSession:
             "init_pose": list(init_pose),
             "arm_current_pose": list(poses[-1]),
         }
+
+    def _log_current_observation_point(self, observation: Dict[str, Any]) -> None:
+        for arm_key in ("arm_l", "arm_r"):
+            arm_payload = observation.get(arm_key)
+            if not isinstance(arm_payload, dict):
+                continue
+            pose = arm_payload.get("arm_current_pose")
+            grippers = arm_payload.get("grippers")
+            if not isinstance(pose, list) or len(pose) != 7:
+                raise ValueError(f"{arm_key}.arm_current_pose must be pose7")
+            if not isinstance(grippers, list) or not grippers:
+                raise ValueError(f"{arm_key}.grippers must be non-empty")
+            images = arm_payload.get("images")
+            if not isinstance(images, list):
+                raise ValueError(f"{arm_key}.images must be a list")
+            logger.info(
+                "[ONLINE_INFERENCE][OBS] %s camera_order=%s n_images=%d n_poses=%d "
+                "current_pose=%s gripper_history=%s current_gripper=%.6f",
+                arm_key,
+                list(self._camera_order),
+                len(images),
+                len(arm_payload.get("poses") or []),
+                [float(value) for value in pose],
+                [float(value) for value in grippers],
+                float(grippers[-1]),
+            )
 
     def _select_observation_window(self) -> tuple[List[RobotStateSample], Dict[str, List[CameraSample]]]:
         if len(self._state_history) < self.config.n_obs_steps:
@@ -450,14 +505,25 @@ class OnlineInferenceSession:
                 {"ignored_response_type": "reset_ack"},
             )
 
+        action_recv_ns = int(self.clock_ns())
+        action_recv_perf_ns = int(self.trace_clock_ns())
         try:
-            self._load_action_payload(payload)
+            self._load_action_payload(
+                payload,
+                action_recv_ns=action_recv_ns,
+                action_recv_perf_ns=action_recv_perf_ns,
+            )
         except Exception as exc:
             self._fail(f"invalid action response: {exc}")
             return self._hold_step(state_sample, "failed", {"error": self.error})
         return self._emit_action_step(state_sample)
 
-    def _load_action_payload(self, payload: Any) -> None:
+    def _load_action_payload(
+        self,
+        payload: Any,
+        action_recv_ns: Optional[int] = None,
+        action_recv_perf_ns: Optional[int] = None,
+    ) -> None:
         if not isinstance(payload, dict):
             raise ValueError("action payload must be an object")
 
@@ -487,17 +553,54 @@ class OnlineInferenceSession:
             raise ValueError("post_action_delay_ms exceeds max_post_action_delay_ms")
 
         self._last_action_debug = self._make_action_debug(left_steps, right_steps, chunk_size)
+        self._log_action_chunk(left_steps, right_steps, chunk_size)
         self._current_chunk_left = left_steps
         self._current_chunk_right = right_steps
         self._current_chunk_index = 0
         self._current_chunk_size = chunk_size
         self._current_post_action_delay_ns = delay_ms_value * 1_000_000
-        self._current_step_start_ns = int(self.clock_ns())
+        self._current_action_recv_ns = int(action_recv_ns) if action_recv_ns is not None else int(self.clock_ns())
+        self._current_action_recv_perf_ns = (
+            int(action_recv_perf_ns) if action_recv_perf_ns is not None else int(self.trace_clock_ns())
+        )
+        self._current_step_start_ns = int(self._current_action_recv_ns)
         self._current_chunk_started_ns = int(self._current_step_start_ns)
         self._current_step_duration_ns = max(1, int(self.config.action_step_sec * 1_000_000_000))
+        self._chunk_seq += 1
+        self._current_chunk_seq = self._chunk_seq
 
         self._waiting_since_ns = None
         self.status = "executing_chunk"
+
+    def _log_action_chunk(
+        self,
+        left_steps: Optional[List[np.ndarray]],
+        right_steps: Optional[List[np.ndarray]],
+        chunk_size: int,
+    ) -> None:
+        for side, steps in (("left", left_steps), ("right", right_steps)):
+            if not steps:
+                continue
+            action_array = np.asarray(steps, dtype=np.float64)
+            if action_array.ndim != 2 or action_array.shape[1] != 8:
+                raise ValueError(f"{side} action chunk must have shape Nx8, got {action_array.shape}")
+            first_step = action_array[0]
+            last_step = action_array[-1]
+            grippers = action_array[:, 7]
+            logger.info(
+                "[ONLINE_INFERENCE][ACTION] %s chunk_size=%d "
+                "first_pose=%s first_gripper=%.6f "
+                "last_pose=%s last_gripper=%.6f "
+                "gripper_min=%.6f gripper_max=%.6f",
+                side,
+                int(chunk_size),
+                [float(value) for value in first_step[:7].tolist()],
+                float(first_step[7]),
+                [float(value) for value in last_step[:7].tolist()],
+                float(last_step[7]),
+                float(np.min(grippers)),
+                float(np.max(grippers)),
+            )
 
     def _make_observation_debug(self, observation: Dict[str, Any]) -> Dict[str, Any]:
         debug: Dict[str, Any] = {}
@@ -579,6 +682,14 @@ class OnlineInferenceSession:
             step_index,
             now_ns,
         )
+        if self.config.chunk_step_mode == "per_tick":
+            self._current_step_start_ns = now_ns
+            self._current_chunk_index += 1
+        metadata = self._make_action_step_metadata(
+            step_index=step_index,
+            step_output_ns=now_ns,
+            step_output_perf_ns=int(self.trace_clock_ns()),
+        )
         return OnlineInferenceStep(
             left_pose=left_pose,
             right_pose=right_pose,
@@ -586,8 +697,40 @@ class OnlineInferenceSession:
             right_gripper_width=right_gripper_width,
             enabled_arms=self._enabled_arms_for_action(),
             status="executing_chunk",
-            metadata={"chunk_index": step_index, "chunk_size": self._current_chunk_size},
+            metadata=metadata,
         )
+
+    def _make_action_step_metadata(
+        self,
+        *,
+        step_index: int,
+        step_output_ns: int,
+        step_output_perf_ns: int,
+    ) -> Dict[str, Any]:
+        metadata: Dict[str, Any] = {
+            "chunk_index": int(step_index),
+            "chunk_size": int(self._current_chunk_size),
+            "online_chunk_index": int(step_index),
+            "online_chunk_size": int(self._current_chunk_size),
+            "online_step_output_ns": int(step_output_ns),
+            "online_step_output_perf_ns": int(step_output_perf_ns),
+            "online_observation_seq": int(self._current_observation_seq),
+            "online_chunk_seq": int(self._current_chunk_seq),
+            "online_chunk_step_mode": self.config.chunk_step_mode,
+        }
+        if self._current_observation_send_ns is not None:
+            metadata["online_obs_send_ns"] = int(self._current_observation_send_ns)
+        if self._current_observation_send_perf_ns is not None:
+            metadata["online_obs_send_perf_ns"] = int(self._current_observation_send_perf_ns)
+        if self._current_action_recv_ns is not None:
+            metadata["online_action_recv_ns"] = int(self._current_action_recv_ns)
+        if self._current_action_recv_perf_ns is not None:
+            metadata["online_action_recv_perf_ns"] = int(self._current_action_recv_perf_ns)
+        if self._current_observation_send_perf_ns is not None and self._current_action_recv_perf_ns is not None:
+            metadata["online_obs_send_to_action_recv_ms"] = (
+                int(self._current_action_recv_perf_ns) - int(self._current_observation_send_perf_ns)
+            ) / 1e6
+        return metadata
 
     def _advance_due_steps(self, now_ns: int) -> None:
         if self._current_step_start_ns is None:
@@ -613,6 +756,8 @@ class OnlineInferenceSession:
         self._current_chunk_index = 0
         self._current_chunk_size = 0
         self._current_step_start_ns = None
+        self._current_action_recv_ns = None
+        self._current_action_recv_perf_ns = None
 
     def _build_action_output(
         self,
@@ -661,7 +806,7 @@ class OnlineInferenceSession:
     ) -> tuple[np.ndarray, float]:
         current_pose = self._action_pose_to_unitree(side, current_step[:7])
         current_gripper = float(current_step[7])
-        if next_step is None:
+        if next_step is None or self.config.chunk_step_mode == "per_tick":
             return current_pose, current_gripper
 
         if self._current_step_start_ns is None:

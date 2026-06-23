@@ -10,6 +10,12 @@ import numpy as np
 
 
 TOP_LEVEL_ORDER = [
+    "online_obs_send_to_action_recv_ms",
+    "online_step_output_to_provider_return_ms",
+    "online_provider_return_to_pub_ms",
+    "online_step_output_to_pub_ms",
+    "online_step_output_to_exec_ms",
+    "online_obs_send_to_exec_ms",
     "recv_to_pub_ms",
     "pub_to_exec_ms",
     "recv_to_exec_ms",
@@ -17,6 +23,12 @@ TOP_LEVEL_ORDER = [
 ]
 
 TOP_LEVEL_LABELS = {
+    "online_obs_send_to_action_recv_ms": "Online Obs Send -> Action Chunk",
+    "online_step_output_to_provider_return_ms": "Online Step -> Provider Return",
+    "online_provider_return_to_pub_ms": "Online Provider Return -> DDS Publish",
+    "online_step_output_to_pub_ms": "Online Step -> DDS Publish",
+    "online_step_output_to_exec_ms": "Online Step -> Motion Detected",
+    "online_obs_send_to_exec_ms": "Online Obs Send -> Motion Detected",
     "recv_to_pub_ms": "Receive -> DDS Publish",
     "pub_to_exec_ms": "DDS Publish -> Motion Detected",
     "recv_to_exec_ms": "Receive -> Motion Detected",
@@ -24,6 +36,12 @@ TOP_LEVEL_LABELS = {
 }
 
 TOP_LEVEL_STYLES = {
+    "online_obs_send_to_action_recv_ms": {"color": "#E45756", "marker": "P"},
+    "online_step_output_to_provider_return_ms": {"color": "#F2CF5B", "marker": ">"},
+    "online_provider_return_to_pub_ms": {"color": "#59A14F", "marker": "<"},
+    "online_step_output_to_pub_ms": {"color": "#72B7B2", "marker": "X"},
+    "online_step_output_to_exec_ms": {"color": "#FF9DA6", "marker": "v"},
+    "online_obs_send_to_exec_ms": {"color": "#9C755F", "marker": "*"},
     "recv_to_pub_ms": {"color": "#4C78A8", "marker": "o"},
     "pub_to_exec_ms": {"color": "#F58518", "marker": "s"},
     "recv_to_exec_ms": {"color": "#54A24B", "marker": "^"},
@@ -266,6 +284,60 @@ def _dominant_segments(record, top_n=4):
     return pairs[:max(1, int(top_n))]
 
 
+def _unique_sorted_ns(records, seq_key, time_key):
+    by_seq = {}
+    for record in records:
+        seq = record.get(seq_key)
+        value = record.get(time_key)
+        if seq is None or value is None:
+            continue
+        by_seq[int(seq)] = int(value)
+    return np.asarray([by_seq[key] for key in sorted(by_seq)], dtype=np.int64)
+
+
+def _hz_stats_from_ns(times_ns):
+    if times_ns.size < 2:
+        return None
+    diffs_ms = np.diff(times_ns.astype(np.float64)) / 1e6
+    diffs_ms = diffs_ms[diffs_ms > 0.0]
+    if diffs_ms.size == 0:
+        return None
+    hz = 1000.0 / diffs_ms
+    return {
+        "samples": int(diffs_ms.size + 1),
+        "avg_hz": float(np.mean(hz)),
+        "p50_hz": float(np.percentile(hz, 50)),
+        "p05_hz": float(np.percentile(hz, 5)),
+        "p95_hz": float(np.percentile(hz, 95)),
+        "avg_period_ms": float(np.mean(diffs_ms)),
+        "p50_period_ms": float(np.percentile(diffs_ms, 50)),
+    }
+
+
+def _fmt_hz(name, stats):
+    if stats is None:
+        return f"{name:<24} n/a"
+    return (
+        f"{name:<24} avg={stats['avg_hz']:>6.2f} Hz  p50={stats['p50_hz']:>6.2f} Hz  "
+        f"p05/p95={stats['p05_hz']:>6.2f}/{stats['p95_hz']:>6.2f} Hz  "
+        f"period_avg={stats['avg_period_ms']:>6.2f} ms"
+    )
+
+
+def _online_frequency_lines(completed):
+    obs_times = _unique_sorted_ns(completed, "online_observation_seq", "online_obs_send_perf_ns")
+    action_times = _unique_sorted_ns(completed, "online_chunk_seq", "online_action_recv_perf_ns")
+    step_times = np.asarray(
+        [int(record["online_step_output_trace_ns"]) for record in completed if record.get("online_step_output_trace_ns") is not None],
+        dtype=np.int64,
+    )
+    return [
+        _fmt_hz("obs_send_frequency", _hz_stats_from_ns(obs_times)),
+        _fmt_hz("action_chunk_frequency", _hz_stats_from_ns(action_times)),
+        _fmt_hz("step_output_frequency", _hz_stats_from_ns(step_times)),
+    ]
+
+
 
 def _summary_text(records):
     completed = completed_records(records)
@@ -280,6 +352,10 @@ def _summary_text(records):
 
     for key in TOP_LEVEL_ORDER:
         lines.append(_fmt_stats(TOP_LEVEL_LABELS[key], _stats(_metric_array(completed, key))))
+
+    if any(record.get("online_step_output_trace_ns") is not None for record in completed):
+        lines.extend(["", "Online inference frequency:"])
+        lines.extend(_online_frequency_lines(completed))
 
     lines.extend(["", "Breakdown:"])
     for key, label, _ in SEGMENT_SPECS:
@@ -571,6 +647,10 @@ def write_top_latency_report(records, out_path: Path, top_k: int = 20):
 
     key_order = [
         "seq", "status",
+        "online_observation_seq", "online_chunk_seq", "online_chunk_index", "online_chunk_size", "online_chunk_step_mode",
+        "online_obs_send_to_action_recv_ms", "online_action_recv_to_step_output_ms",
+        "online_step_output_to_provider_return_ms", "online_provider_return_to_pub_ms",
+        "online_step_output_to_pub_ms", "online_step_output_to_exec_ms", "online_obs_send_to_exec_ms",
         "recv_to_pub_ms", "pub_to_exec_ms", "recv_to_exec_ms", "fetch_to_exec_ms",
         "tele_fetch_ms", "takeover_logic_ms", "base_control_ms", "base_move_ms", "base_height_ms", "base_misc_ms",
         "base_control_mode", "base_vx_cmd", "base_vy_cmd", "base_wz_cmd", "base_z_cmd",
@@ -583,6 +663,9 @@ def write_top_latency_report(records, out_path: Path, top_k: int = 20):
         "left_arm_enabled", "right_arm_enabled", "home_return_active",
         "left_takeover_rising_edge", "right_takeover_rising_edge",
         "left_zero_takeover_this_frame", "right_zero_takeover_this_frame",
+        "online_obs_send_ns", "online_action_recv_ns", "online_step_output_ns",
+        "online_obs_send_perf_ns", "online_action_recv_perf_ns", "online_step_output_perf_ns",
+        "online_provider_output_perf_ns", "online_step_output_trace_ns",
         "t_recv_ns", "t_pub_ns", "t_exec_ns",
     ]
     lines.extend(["", "## Detailed records", ""])

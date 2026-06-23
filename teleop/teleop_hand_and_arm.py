@@ -372,6 +372,8 @@ if __name__ == '__main__':
                         help='JPEG quality for online inference observation images.')
     parser.add_argument('--online-inference-action-step-sec', type=float, default=0.10,
                         help='Nominal server action step duration in seconds.')
+    parser.add_argument('--online-inference-chunk-step-mode', type=str, choices=['timed', 'per_tick'], default='timed',
+                        help='How to advance action steps inside an online inference chunk.')
     parser.add_argument('--online-inference-interp-sec', type=float, default=0.01,
                         help='Nominal server interpolation interval in seconds.')
     parser.add_argument('--online-inference-post-action-delay-ms', type=int, default=75,
@@ -1211,16 +1213,16 @@ if __name__ == '__main__':
                 )
             current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, current_lr_arm_q)
 
-            online_left_gripper_width = 0.0
-            online_right_gripper_width = 0.0
+            online_left_gripper_q = 0.0
+            online_right_gripper_q = 0.0
             if (not args.no_gripper) and args.ee == "dex1":
                 try:
                     with dual_gripper_data_lock:
-                        online_left_gripper_width = float(dual_gripper_state_array[0]) / 5.4 * 0.054
-                        online_right_gripper_width = float(dual_gripper_state_array[1]) / 5.4 * 0.054
+                        online_left_gripper_q = float(dual_gripper_state_array[0])
+                        online_right_gripper_q = float(dual_gripper_state_array[1])
                 except Exception:
-                    online_left_gripper_width = 0.0
-                    online_right_gripper_width = 0.0
+                    online_left_gripper_q = 0.0
+                    online_right_gripper_q = 0.0
             camera_sources = {
                 "head": head_remote_camera if head_remote_camera is not None else head_camera,
                 "left_wrist": left_remote_camera if left_remote_camera is not None else left_camera,
@@ -1235,8 +1237,8 @@ if __name__ == '__main__':
                 current_state_host_monotonic_ns=current_state_sample_ns,
                 current_arm_q=current_lr_arm_q,
                 current_arm_dq=current_lr_arm_dq,
-                current_left_gripper_width=online_left_gripper_width,
-                current_right_gripper_width=online_right_gripper_width,
+                current_left_gripper_width=online_left_gripper_q,
+                current_right_gripper_width=online_right_gripper_q,
                 camera_sources=camera_sources,
                 dt=control_dt,
             )
@@ -1342,12 +1344,12 @@ if __name__ == '__main__':
                     left_trigger_value = (
                         tele_data.left_ctrl_triggerValue
                         if left_arm_enabled
-                        else float(np.clip(online_left_gripper_width / 0.054 * 2.0 + 5.0, 5.0, 7.0))
+                        else float(np.clip(online_left_gripper_q / 5.4 * 2.0 + 5.0, 5.0, 7.0))
                     )
                     right_trigger_value = (
                         tele_data.right_ctrl_triggerValue
                         if right_arm_enabled
-                        else float(np.clip(online_right_gripper_width / 0.054 * 2.0 + 5.0, 5.0, 7.0))
+                        else float(np.clip(online_right_gripper_q / 5.4 * 2.0 + 5.0, 5.0, 7.0))
                     )
                     with left_gripper_value.get_lock():
                         left_gripper_value.value = left_trigger_value
@@ -1627,10 +1629,19 @@ if __name__ == '__main__':
             if latency_tracker is not None and latency_tracker.can_start_new_trace():
                 max_command_delta = float(np.max(np.abs(sol_q - current_lr_arm_q)))
                 if max_command_delta >= args.latency_command_threshold:
+                    online_trace_extra = {}
+                    if args.input_provider == "online_inference" and motion_intent is not None:
+                        online_trace_extra = {
+                            key: value
+                            for key, value in (getattr(motion_intent, "metadata", {}) or {}).items()
+                            if str(key).startswith("online_")
+                        }
+                        online_trace_extra["online_provider_output_perf_ns"] = int(tele_data_recv_ts_ns)
                     trace_seq = latency_tracker.begin_trace(
                         recv_ts_ns=tele_data_recv_ts_ns,
                         recv_q=current_lr_arm_q,
                         extra={
+                            **online_trace_extra,
                             "tele_fetch_ms": tele_fetch_ms,
                             "takeover_logic_ms": takeover_logic_ms,
                             "base_control_ms": base_control_ms,

@@ -225,7 +225,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             create_teleop_input_provider(args)
 
-    def test_online_provider_left_arm_emits_pose_intent_and_dex1_trigger(self):
+    def test_online_provider_left_arm_emits_pose_intent_and_dex1_qpos_trigger(self):
         from teleop.utils.online_inference import CameraSample, OnlineInferenceStep
         from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
 
@@ -237,8 +237,8 @@ class TeleopInputProviderTest(unittest.TestCase):
                 OnlineInferenceStep(
                     left_pose=target_left,
                     right_pose=current_right,
-                    left_gripper_width=0.054,
-                    right_gripper_width=0.010,
+                    left_gripper_width=5.4,
+                    right_gripper_width=2.7,
                     enabled_arms=["left"],
                     status="executing_chunk",
                 )
@@ -255,8 +255,8 @@ class TeleopInputProviderTest(unittest.TestCase):
             current_state_host_monotonic_ns=123,
             current_left_robot_wrist_pose=current_left,
             current_right_robot_wrist_pose=current_right,
-            current_left_gripper_width=0.010,
-            current_right_gripper_width=0.020,
+            current_left_gripper_width=2.7,
+            current_right_gripper_width=3.6,
             camera_samples=[
                 CameraSample(name="head", frame=np.zeros((4, 4, 3), dtype=np.uint8), host_monotonic_ns=123)
             ],
@@ -271,7 +271,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertAlmostEqual(sample.tele_data.left_ctrl_triggerValue, 7.0)
         state_sample, camera_samples = session.tick_calls[0]
         self.assertEqual(state_sample.host_monotonic_ns, 123)
-        self.assertAlmostEqual(state_sample.left_gripper_width, 0.010)
+        self.assertAlmostEqual(state_sample.left_gripper_width, 2.7)
         self.assertEqual(camera_samples[0].name, "head")
 
     def test_online_provider_right_arm_holds_left_side(self):
@@ -286,8 +286,8 @@ class TeleopInputProviderTest(unittest.TestCase):
                 OnlineInferenceStep(
                     left_pose=current_left,
                     right_pose=target_right,
-                    left_gripper_width=0.010,
-                    right_gripper_width=0.054,
+                    left_gripper_width=2.7,
+                    right_gripper_width=5.4,
                     enabled_arms=["right"],
                     status="executing_chunk",
                 )
@@ -299,8 +299,8 @@ class TeleopInputProviderTest(unittest.TestCase):
             current_state_host_monotonic_ns=456,
             current_left_robot_wrist_pose=current_left,
             current_right_robot_wrist_pose=current_right,
-            current_left_gripper_width=0.010,
-            current_right_gripper_width=0.020,
+            current_left_gripper_width=2.7,
+            current_right_gripper_width=3.6,
             camera_samples=[],
         )
 
@@ -309,6 +309,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertTrue(np.allclose(sample.motion_intent.right_wrist_pose, target_right))
         self.assertFalse(sample.tele_data.left_ctrl_squeeze)
         self.assertTrue(sample.tele_data.right_ctrl_squeeze)
+        self.assertAlmostEqual(sample.tele_data.right_ctrl_triggerValue, 7.0)
 
     def test_online_provider_both_arms_enabled(self):
         from teleop.utils.online_inference import OnlineInferenceStep
@@ -320,7 +321,7 @@ class TeleopInputProviderTest(unittest.TestCase):
                     left_pose=_pose_matrix(3.0, 0.0, 0.0),
                     right_pose=_pose_matrix(4.0, 0.0, 0.0),
                     left_gripper_width=0.000,
-                    right_gripper_width=0.054,
+                    right_gripper_width=5.4,
                     enabled_arms=["left", "right"],
                     status="executing_chunk",
                 )
@@ -332,8 +333,8 @@ class TeleopInputProviderTest(unittest.TestCase):
             current_state_host_monotonic_ns=789,
             current_left_robot_wrist_pose=_pose_matrix(1.0, 0.0, 0.0),
             current_right_robot_wrist_pose=_pose_matrix(2.0, 0.0, 0.0),
-            current_left_gripper_width=0.010,
-            current_right_gripper_width=0.020,
+            current_left_gripper_width=0.0,
+            current_right_gripper_width=5.4,
             camera_samples=[],
         )
 
@@ -481,6 +482,34 @@ class TeleopInputProviderTest(unittest.TestCase):
                 input_provider_module.create_teleop_input_provider(args)
 
         transport_cls.connect.assert_not_called()
+
+    def test_create_online_provider_passes_chunk_step_mode(self):
+        import teleop.utils.teleop_input_provider as input_provider_module
+
+        args = SimpleNamespace(
+            input_provider="online_inference",
+            online_inference_host="127.0.0.1",
+            online_inference_port=5555,
+            online_inference_arm_side="left",
+            online_inference_n_obs_steps=2,
+            online_inference_camera_freq=30.0,
+            online_inference_jpeg_quality=85,
+            online_inference_action_step_sec=0.10,
+            online_inference_chunk_step_mode="per_tick",
+            online_inference_interp_sec=0.01,
+            online_inference_post_action_delay_ms=75,
+            online_inference_response_timeout_sec=2.0,
+            online_inference_transform_config="",
+            online_inference_enable_motion=False,
+            online_inference_dry_run=False,
+            ee="dex1",
+            no_gripper=False,
+        )
+
+        with mock.patch.object(input_provider_module.TcpJsonTransport, "connect", return_value=mock.Mock()):
+            provider = input_provider_module.create_teleop_input_provider(args)
+
+        self.assertEqual(provider.session.config.chunk_step_mode, "per_tick")
 
 
 if __name__ == "__main__":

@@ -149,6 +149,7 @@ class SimpleLatencyTracker:
             "recv_to_exec_ms": self._delta_ms(record.t_recv_ns, record.t_exec_ns),
         }
         payload.update(record.fields)
+        self._add_online_inference_derived_fields(payload)
 
         enqueue_to_publish_ms = payload.get("enqueue_to_publish_ms")
         dds_write_ms = payload.get("dds_write_ms")
@@ -301,3 +302,23 @@ class SimpleLatencyTracker:
         if start_ns is None or end_ns is None:
             return None
         return (int(end_ns) - int(start_ns)) / 1e6
+
+    @classmethod
+    def _add_online_inference_derived_fields(cls, payload: Dict[str, object]) -> None:
+        obs_send_perf_ns = payload.get("online_obs_send_perf_ns")
+        action_recv_perf_ns = payload.get("online_action_recv_perf_ns")
+        step_output_perf_ns = payload.get("online_step_output_perf_ns")
+        provider_return_perf_ns = payload.get("online_provider_output_perf_ns")
+        if provider_return_perf_ns is None and step_output_perf_ns is not None:
+            provider_return_perf_ns = payload.get("t_recv_ns")
+            payload["online_provider_output_perf_ns"] = provider_return_perf_ns
+
+        payload["online_obs_send_to_action_recv_ms"] = cls._delta_ms(obs_send_perf_ns, action_recv_perf_ns)
+        payload["online_action_recv_to_step_output_ms"] = cls._delta_ms(action_recv_perf_ns, step_output_perf_ns)
+        payload["online_step_output_to_provider_return_ms"] = cls._delta_ms(step_output_perf_ns, provider_return_perf_ns)
+        payload["online_provider_return_to_pub_ms"] = cls._delta_ms(provider_return_perf_ns, payload.get("t_pub_ns"))
+
+        payload["online_step_output_trace_ns"] = int(step_output_perf_ns) if step_output_perf_ns is not None else None
+        payload["online_step_output_to_pub_ms"] = cls._delta_ms(step_output_perf_ns, payload.get("t_pub_ns"))
+        payload["online_step_output_to_exec_ms"] = cls._delta_ms(step_output_perf_ns, payload.get("t_exec_ns"))
+        payload["online_obs_send_to_exec_ms"] = cls._delta_ms(obs_send_perf_ns, payload.get("t_exec_ns"))

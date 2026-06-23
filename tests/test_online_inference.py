@@ -20,6 +20,23 @@ class FakeClock:
         self.now_ns += int(value * 1_000_000)
 
 
+class DualFakeClock:
+    def __init__(self, control_start_ns: int = 10_000_000_000, trace_start_ns: int = 100_000_000_000) -> None:
+        self.control_ns = int(control_start_ns)
+        self.trace_ns = int(trace_start_ns)
+
+    def control(self) -> int:
+        return self.control_ns
+
+    def trace(self) -> int:
+        return self.trace_ns
+
+    def advance_ms(self, value: float) -> None:
+        delta_ns = int(value * 1_000_000)
+        self.control_ns += delta_ns
+        self.trace_ns += delta_ns
+
+
 class FakeTransport:
     def __init__(self, connected: bool = True) -> None:
         self.connected = connected
@@ -43,6 +60,17 @@ class FakeTransport:
 
     def queue_recv(self, payload: dict) -> None:
         self.recv_queue.append(payload)
+
+
+class AdvancingSendTransport(FakeTransport):
+    def __init__(self, clock: DualFakeClock, send_ms: float) -> None:
+        super().__init__()
+        self.clock = clock
+        self.send_ms = float(send_ms)
+
+    def send_json(self, payload: dict) -> None:
+        self.clock.advance_ms(self.send_ms)
+        super().send_json(payload)
 
 
 class FakePoseTransformer:
@@ -643,6 +671,133 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(second.metadata["chunk_index"], 1)
         self.assertTrue(np.allclose(first.left_pose, _pose_matrix(10.5, 10.0, 10.0)))
         self.assertTrue(np.allclose(second.left_pose, _pose_matrix(10.7, 10.0, 10.0)))
+
+    def test_per_tick_chunk_step_mode_consumes_one_step_each_tick(self):
+        from teleop.utils.online_inference import OnlineInferenceSession
+
+        clock = FakeClock()
+        transport = FakeTransport()
+        session = OnlineInferenceSession(
+            config=self._make_config(chunk_step_mode="per_tick", action_step_sec=10.0, enable_motion=True),
+            transport=transport,
+            pose_transformer=FakePoseTransformer(),
+            clock_ns=clock,
+        )
+
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
+        clock.advance_ms(40)
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
+        transport.queue_recv(
+            {
+                "type": "action",
+                "action": [
+                    [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.010],
+                    [0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.020],
+                    [0.9, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.030],
+                ],
+            }
+        )
+
+        first = session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
+        second = session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
+        third = session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
+
+        self.assertEqual(first.metadata["chunk_index"], 0)
+        self.assertEqual(second.metadata["chunk_index"], 1)
+        self.assertEqual(third.metadata["chunk_index"], 2)
+        self.assertTrue(np.allclose(first.left_pose, _pose_matrix(10.5, 10.0, 10.0)))
+        self.assertTrue(np.allclose(second.left_pose, _pose_matrix(10.7, 10.0, 10.0)))
+        self.assertTrue(np.allclose(third.left_pose, _pose_matrix(10.9, 10.0, 10.0)))
+
+    def test_action_step_metadata_tracks_control_and_perf_timestamps_separately(self):
+        from teleop.utils.online_inference import OnlineInferenceSession
+
+        clock = DualFakeClock()
+        transport = FakeTransport()
+        session = OnlineInferenceSession(
+            config=self._make_config(chunk_step_mode="per_tick", action_step_sec=10.0, enable_motion=True),
+            transport=transport,
+            pose_transformer=FakePoseTransformer(),
+            clock_ns=clock.control,
+            trace_clock_ns=clock.trace,
+        )
+
+        session.tick(state_sample=self._make_state(clock.control()), camera_samples=self._make_cameras(clock.control()))
+        clock.advance_ms(40)
+        session.tick(state_sample=self._make_state(clock.control()), camera_samples=self._make_cameras(clock.control()))
+        obs_send_ns = clock.control()
+        obs_send_perf_ns = clock.trace()
+        clock.advance_ms(17)
+        action_recv_ns = clock.control()
+        action_recv_perf_ns = clock.trace()
+        transport.queue_recv(
+            {
+                "type": "action",
+                "action": [
+                    [0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.010],
+                    [0.7, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.020],
+                ],
+            }
+        )
+
+        first = session.tick(state_sample=self._make_state(clock.control()), camera_samples=self._make_cameras(clock.control()))
+        clock.advance_ms(5)
+        second = session.tick(state_sample=self._make_state(clock.control()), camera_samples=self._make_cameras(clock.control()))
+
+        self.assertEqual(first.metadata["online_observation_seq"], 1)
+        self.assertEqual(first.metadata["online_chunk_seq"], 1)
+        self.assertEqual(first.metadata["online_chunk_size"], 2)
+        self.assertEqual(first.metadata["online_chunk_index"], 0)
+        self.assertEqual(first.metadata["online_obs_send_ns"], obs_send_ns)
+        self.assertEqual(first.metadata["online_action_recv_ns"], action_recv_ns)
+        self.assertEqual(first.metadata["online_step_output_ns"], action_recv_ns)
+        self.assertEqual(first.metadata["online_obs_send_perf_ns"], obs_send_perf_ns)
+        self.assertEqual(first.metadata["online_action_recv_perf_ns"], action_recv_perf_ns)
+        self.assertEqual(first.metadata["online_step_output_perf_ns"], action_recv_perf_ns)
+        self.assertNotEqual(first.metadata["online_obs_send_perf_ns"], first.metadata["online_obs_send_ns"])
+        self.assertAlmostEqual(first.metadata["online_obs_send_to_action_recv_ms"], 17.0)
+        self.assertEqual(second.metadata["online_observation_seq"], 1)
+        self.assertEqual(second.metadata["online_chunk_seq"], 1)
+        self.assertEqual(second.metadata["online_chunk_index"], 1)
+        self.assertEqual(second.metadata["online_step_output_ns"], action_recv_ns + 5_000_000)
+        self.assertEqual(second.metadata["online_step_output_perf_ns"], action_recv_perf_ns + 5_000_000)
+
+    def test_observation_send_perf_timestamp_is_before_transport_send(self):
+        from teleop.utils.online_inference import OnlineInferenceSession
+
+        clock = DualFakeClock()
+        transport = AdvancingSendTransport(clock=clock, send_ms=3.0)
+        session = OnlineInferenceSession(
+            config=self._make_config(chunk_step_mode="per_tick", action_step_sec=10.0, enable_motion=True),
+            transport=transport,
+            pose_transformer=FakePoseTransformer(),
+            clock_ns=clock.control,
+            trace_clock_ns=clock.trace,
+        )
+
+        session.tick(state_sample=self._make_state(clock.control()), camera_samples=self._make_cameras(clock.control()))
+        clock.advance_ms(40)
+        obs_send_start_ns = clock.control()
+        obs_send_start_perf_ns = clock.trace()
+        session.tick(state_sample=self._make_state(clock.control()), camera_samples=self._make_cameras(clock.control()))
+
+        clock.advance_ms(17)
+        action_recv_ns = clock.control()
+        action_recv_perf_ns = clock.trace()
+        transport.queue_recv(
+            {
+                "type": "action",
+                "action": [[0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.010]],
+            }
+        )
+
+        step = session.tick(state_sample=self._make_state(clock.control()), camera_samples=self._make_cameras(clock.control()))
+
+        self.assertEqual(step.metadata["online_obs_send_ns"], obs_send_start_ns)
+        self.assertEqual(step.metadata["online_obs_send_perf_ns"], obs_send_start_perf_ns)
+        self.assertEqual(step.metadata["online_action_recv_ns"], action_recv_ns)
+        self.assertEqual(step.metadata["online_action_recv_perf_ns"], action_recv_perf_ns)
+        self.assertAlmostEqual(step.metadata["online_obs_send_to_action_recv_ms"], 20.0)
 
     def test_control_feedback_fatal_aborts_chunk(self):
         from teleop.utils.online_inference import OnlineInferenceSession
