@@ -62,6 +62,15 @@ class FakeTransport:
         self.recv_queue.append(payload)
 
 
+class ResetCaptureTransport(FakeTransport):
+    def __init__(self, connected: bool = True) -> None:
+        super().__init__(connected=connected)
+        self.reset_calls = []
+
+    def reset(self, *args, **kwargs) -> None:
+        self.reset_calls.append((args, kwargs))
+
+
 class AdvancingSendTransport(FakeTransport):
     def __init__(self, clock: DualFakeClock, send_ms: float) -> None:
         super().__init__()
@@ -355,6 +364,23 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         clock.advance_ms(40)
         session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
         self.assertEqual(transport.reset_calls, 2)
+
+    def test_transport_reset_is_called_without_reason(self):
+        from teleop.utils.online_inference import OnlineInferenceSession
+
+        clock = FakeClock()
+        transport = ResetCaptureTransport()
+        session = OnlineInferenceSession(
+            config=self._make_config(),
+            transport=transport,
+            clock_ns=clock,
+        )
+
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
+        clock.advance_ms(40)
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_cameras(clock()))
+
+        self.assertEqual(transport.reset_calls, [((), {})])
 
     def test_real_motion_requires_pose_transformer(self):
         from teleop.utils.online_inference import OnlineInferenceSession

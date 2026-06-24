@@ -300,14 +300,11 @@ class OnlineInferenceSession:
             clear_pending_rx()
         reset = getattr(self.transport, "reset", None)
         if callable(reset):
-            try:
-                reset(reason="online_inference_start")
-            except TypeError:
-                reset()
+            reset()
         else:
             send_json = getattr(self.transport, "send_json", None)
             if callable(send_json):
-                send_json({"type": "reset", "reason": "online_inference_start"})
+                send_json({"type": "reset"})
         if callable(clear_pending_rx):
             clear_pending_rx()
         self._transport_reset_done = True
