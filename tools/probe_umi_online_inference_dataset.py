@@ -125,6 +125,32 @@ def recv_action_response(sock: socket.socket) -> dict[str, Any]:
         raise ValueError(f"unexpected response type: {payload.get('type')!r}, payload={payload!r}")
 
 
+def send_reset_then_observation(
+    sock: socket.socket,
+    *,
+    observation: dict[str, Any],
+) -> dict[str, Any]:
+    send_json_line(sock, {"type": "reset"})
+    reset_payload = recv_json_line(sock)
+    if reset_payload.get("type") != "reset_ack":
+        raise ValueError(f"unexpected reset response type: {reset_payload.get('type')!r}, payload={reset_payload!r}")
+    print("reset:", json.dumps(reset_payload, ensure_ascii=False))
+    send_json_line(sock, observation)
+    return recv_action_response(sock)
+
+
+def request_action(
+    *,
+    host: str,
+    port: int,
+    timeout_sec: float,
+    observation: dict[str, Any],
+) -> dict[str, Any]:
+    with socket.create_connection((host, int(port)), timeout=float(timeout_sec)) as sock:
+        sock.settimeout(float(timeout_sec))
+        return send_reset_then_observation(sock, observation=observation)
+
+
 def parse_action_steps(payload: dict[str, Any], arm_side: str) -> list[list[float]]:
     action_key = f"action_{arm_side[0]}"
     raw_steps = payload.get(action_key)
@@ -231,14 +257,12 @@ def run_probe(args: argparse.Namespace) -> dict[str, Any]:
             f"{args.compare_horizon} >= {len(tcp_items)}"
         )
 
-    with socket.create_connection((args.host, int(args.port)), timeout=float(args.timeout_sec)) as sock:
-        sock.settimeout(float(args.timeout_sec))
-        if args.reset:
-            send_json_line(sock, {"type": "reset", "reason": "offline_dataset_probe"})
-            reset_payload = recv_json_line(sock)
-            print("reset:", json.dumps(reset_payload, ensure_ascii=False))
-        send_json_line(sock, observation)
-        response = recv_action_response(sock)
+    response = request_action(
+        host=args.host,
+        port=int(args.port),
+        timeout_sec=float(args.timeout_sec),
+        observation=observation,
+    )
 
     action_steps = parse_action_steps(response, args.arm_side)
     current_pose = item_pose7(tcp_items, args.frame_index)
@@ -311,8 +335,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--compare-horizon", type=int, default=16)
     parser.add_argument("--timeout-sec", type=float, default=10.0)
     parser.add_argument("--output-json", default="")
-    parser.add_argument("--no-reset", dest="reset", action="store_false")
-    parser.set_defaults(reset=True)
     return parser.parse_args()
 
 

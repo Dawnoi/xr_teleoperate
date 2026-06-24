@@ -28,9 +28,7 @@ from tools.probe_umi_online_inference_dataset import (  # noqa: E402
     item_pose7,
     load_episode_items,
     parse_action_steps,
-    recv_action_response,
-    recv_json_line,
-    send_json_line,
+    send_reset_then_observation,
     xyz_delta,
 )
 
@@ -193,17 +191,10 @@ def request_action(
     port: int,
     timeout_sec: float,
     observation: dict[str, Any],
-    reset: bool,
-    reset_reason: str,
 ) -> dict[str, Any]:
     with socket.create_connection((host, int(port)), timeout=float(timeout_sec)) as sock:
         sock.settimeout(float(timeout_sec))
-        if reset:
-            send_json_line(sock, {"type": "reset", "reason": reset_reason})
-            reset_payload = recv_json_line(sock)
-            print("reset:", json.dumps(reset_payload, ensure_ascii=False))
-        send_json_line(sock, observation)
-        return recv_action_response(sock)
+        return send_reset_then_observation(sock, observation=observation)
 
 
 def run_rollout(args: argparse.Namespace) -> dict[str, Any]:
@@ -244,12 +235,12 @@ def run_rollout(args: argparse.Namespace) -> dict[str, Any]:
                     port=int(args.port),
                     timeout_sec=float(args.timeout_sec),
                     observation=observation,
-                    reset=bool(args.reset and ordinal == 0),
-                    reset_reason="teacher_forcing_dataset_rollout_per_frame",
                 )
             else:
-                send_json_line(sock, observation)
-                response = recv_action_response(sock)
+                response = send_reset_then_observation(
+                    sock,
+                    observation=observation,
+                )
             action_steps = parse_action_steps(response, args.arm_side)
             if args.chunk_size > len(action_steps):
                 raise IndexError(
@@ -325,12 +316,68 @@ def run_rollout(args: argparse.Namespace) -> dict[str, Any]:
         else:
             with socket.create_connection((args.host, int(args.port)), timeout=float(args.timeout_sec)) as sock:
                 sock.settimeout(float(args.timeout_sec))
-                if args.reset:
-                    send_json_line(sock, {"type": "reset", "reason": "teacher_forcing_dataset_rollout"})
-                    reset_payload = recv_json_line(sock)
-                    print("reset:", json.dumps(reset_payload, ensure_ascii=False))
                 for ordinal, frame_index in enumerate(frame_indices):
-                    process_frame(ordinal, frame_index, sock)
+                    response = None
+                    observation, obs_indices = build_observation(
+                        episode_dir=episode_dir,
+                        tcp_items=tcp_items,
+                        gripper_items=gripper_items,
+                        arm_side=args.arm_side,
+                        frame_index=frame_index,
+                        n_obs_steps=args.n_obs_steps,
+                        camera_order=camera_order,
+                        image_layout=args.image_layout,
+                        jpeg_quality=args.jpeg_quality,
+                    )
+                    response = send_reset_then_observation(
+                        sock,
+                        observation=observation,
+                    )
+                    action_steps = parse_action_steps(response, args.arm_side)
+                    if args.chunk_size > len(action_steps):
+                        raise IndexError(
+                            f"chunk_size={args.chunk_size} exceeds returned action chunk length {len(action_steps)} "
+                            f"at frame_index={frame_index}"
+                        )
+                    dataset_poses = []
+                    dataset_grippers = []
+                    expanded_actions = []
+                    expanded_errors = []
+                    expanded_gripper_errors = []
+                    for action_offset in range(args.chunk_size):
+                        target_index = frame_index + action_offset
+                        selected_action = action_steps[action_offset]
+                        dataset_pose = item_pose7(tcp_items, target_index)
+                        dataset_gripper = item_gripper(gripper_items, target_index)
+                        dataset_poses.append(dataset_pose)
+                        dataset_grippers.append(dataset_gripper)
+                        expanded_actions.append(selected_action)
+                        expanded_errors.append(xyz_delta(selected_action[:7], dataset_pose))
+                        expanded_gripper_errors.append(float(selected_action[7]) - float(dataset_gripper))
+                    sample = {
+                        "ordinal": ordinal,
+                        "frame_index": frame_index,
+                        "target_start_index": frame_index,
+                        "target_end_index": frame_index + args.chunk_size - 1,
+                        "obs_indices": obs_indices,
+                        "chunk_size": args.chunk_size,
+                        "dataset_poses": dataset_poses,
+                        "dataset_grippers": dataset_grippers,
+                        "expanded_actions": expanded_actions,
+                        "action_steps": action_steps,
+                        "mean_xyz_error_m": float(sum(expanded_errors) / len(expanded_errors)),
+                        "max_xyz_error_m": float(max(expanded_errors)),
+                        "mean_gripper_error": float(sum(expanded_gripper_errors) / len(expanded_gripper_errors)),
+                    }
+                    samples.append(sample)
+                    if args.progress_every > 0 and (ordinal == 0 or (ordinal + 1) % args.progress_every == 0):
+                        print(
+                            f"sample {ordinal + 1}/{len(frame_indices)} "
+                            f"frame={frame_index} mean_xyz_error_m={sample['mean_xyz_error_m']:.6f} "
+                            f"mean_gripper_error={sample['mean_gripper_error']:.6f}"
+                        )
+                    if args.sleep_sec > 0.0:
+                        time.sleep(float(args.sleep_sec))
                     if args.checkpoint_every > 0 and (ordinal + 1) % args.checkpoint_every == 0:
                         write_rollout_json(
                             partial_json,
@@ -423,8 +470,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--connect-per-frame", action="store_true")
     parser.add_argument("--checkpoint-every", type=int, default=0)
     parser.add_argument("--output-json", required=True)
-    parser.add_argument("--no-reset", dest="reset", action="store_false")
-    parser.set_defaults(reset=True)
     return parser.parse_args()
 
 
