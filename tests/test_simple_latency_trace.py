@@ -60,6 +60,49 @@ class SimpleLatencyTraceTest(unittest.TestCase):
         self.assertEqual(record["online_chunk_index"], 1)
         self.assertEqual(record["online_chunk_size"], 2)
 
+    def test_lowstate_thread_execute_marker_is_reported_separately(self):
+        from teleop.utils.simple_latency_trace import SimpleLatencyTracker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            trace_path = pathlib.Path(tmpdir) / "latency.jsonl"
+            tracker = SimpleLatencyTracker(str(trace_path), log_each_trace=False)
+            seq = tracker.begin_trace(
+                recv_ts_ns=1_000_000_000,
+                recv_q=np.zeros(2, dtype=float),
+                extra={
+                    "online_step_output_perf_ns": 990_000_000,
+                    "online_provider_output_perf_ns": 1_000_000_000,
+                },
+            )
+
+            tracker.mark_publish(seq, publish_ts_ns=1_010_000_000, dds_write_ms=0.4)
+            tracker.maybe_mark_execute_thread(
+                current_q=np.array([0.02, 0.0], dtype=float),
+                current_dq=np.zeros(2, dtype=float),
+                q_threshold=0.01,
+                dq_threshold=0.05,
+                detect_ts_ns=1_018_000_000,
+            )
+            tracker.maybe_mark_execute(
+                current_q=np.array([0.03, 0.0], dtype=float),
+                current_dq=np.zeros(2, dtype=float),
+                q_threshold=0.01,
+                dq_threshold=0.05,
+                detect_ts_ns=1_025_000_000,
+            )
+
+            record = json.loads(trace_path.read_text(encoding="utf-8").splitlines()[0])
+
+        self.assertEqual(record["status"], "completed")
+        self.assertEqual(record["t_exec_thread_ns"], 1_018_000_000)
+        self.assertEqual(record["t_exec_ns"], 1_025_000_000)
+        self.assertAlmostEqual(record["pub_to_exec_thread_ms"], 8.0)
+        self.assertAlmostEqual(record["recv_to_exec_thread_ms"], 18.0)
+        self.assertAlmostEqual(record["online_step_output_to_exec_thread_ms"], 28.0)
+        self.assertAlmostEqual(record["pub_to_exec_ms"], 15.0)
+        self.assertAlmostEqual(record["q_delta_thread_trigger"], 0.02)
+        self.assertAlmostEqual(record["dq_peak_thread_trigger"], 0.0)
+
     def test_non_online_trace_does_not_emit_online_latency_values(self):
         from teleop.utils.simple_latency_trace import SimpleLatencyTracker
 

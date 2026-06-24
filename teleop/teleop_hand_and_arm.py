@@ -1049,6 +1049,11 @@ if __name__ == '__main__':
             )
             if hasattr(arm_ctrl, 'set_latency_tracker'):
                 arm_ctrl.set_latency_tracker(latency_tracker)
+            if hasattr(arm_ctrl, 'set_latency_exec_thresholds'):
+                arm_ctrl.set_latency_exec_thresholds(
+                    args.latency_exec_q_threshold,
+                    args.latency_exec_dq_threshold,
+                )
             logger_mp.info(
                 "[LATENCY] tracing enabled: output=%s, command_threshold=%.4f rad, exec_q_threshold=%.4f rad, exec_dq_threshold=%.4f rad/s",
                 args.latency_trace_path,

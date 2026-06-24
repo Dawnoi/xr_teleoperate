@@ -14,10 +14,14 @@ TOP_LEVEL_ORDER = [
     "online_step_output_to_provider_return_ms",
     "online_provider_return_to_pub_ms",
     "online_step_output_to_pub_ms",
+    "online_step_output_to_exec_thread_ms",
     "online_step_output_to_exec_ms",
+    "online_obs_send_to_exec_thread_ms",
     "online_obs_send_to_exec_ms",
     "recv_to_pub_ms",
+    "pub_to_exec_thread_ms",
     "pub_to_exec_ms",
+    "recv_to_exec_thread_ms",
     "recv_to_exec_ms",
     "fetch_to_exec_ms",
 ]
@@ -27,12 +31,16 @@ TOP_LEVEL_LABELS = {
     "online_step_output_to_provider_return_ms": "Online Step -> Provider Return",
     "online_provider_return_to_pub_ms": "Online Provider Return -> DDS Publish",
     "online_step_output_to_pub_ms": "Online Step -> DDS Publish",
-    "online_step_output_to_exec_ms": "Online Step -> Motion Detected",
-    "online_obs_send_to_exec_ms": "Online Obs Send -> Motion Detected",
+    "online_step_output_to_exec_thread_ms": "Online Step -> Motion Detected (lowstate thread)",
+    "online_step_output_to_exec_ms": "Online Step -> Motion Detected (main loop)",
+    "online_obs_send_to_exec_thread_ms": "Online Obs Send -> Motion Detected (lowstate thread)",
+    "online_obs_send_to_exec_ms": "Online Obs Send -> Motion Detected (main loop)",
     "recv_to_pub_ms": "Receive -> DDS Publish",
-    "pub_to_exec_ms": "DDS Publish -> Motion Detected",
-    "recv_to_exec_ms": "Receive -> Motion Detected",
-    "fetch_to_exec_ms": "XR Fetch Start -> Motion Detected",
+    "pub_to_exec_thread_ms": "DDS Publish -> Motion Detected (lowstate thread)",
+    "pub_to_exec_ms": "DDS Publish -> Motion Detected (main loop)",
+    "recv_to_exec_thread_ms": "Receive -> Motion Detected (lowstate thread)",
+    "recv_to_exec_ms": "Receive -> Motion Detected (main loop)",
+    "fetch_to_exec_ms": "XR Fetch Start -> Motion Detected (main loop)",
 }
 
 TOP_LEVEL_STYLES = {
@@ -40,10 +48,14 @@ TOP_LEVEL_STYLES = {
     "online_step_output_to_provider_return_ms": {"color": "#F2CF5B", "marker": ">"},
     "online_provider_return_to_pub_ms": {"color": "#59A14F", "marker": "<"},
     "online_step_output_to_pub_ms": {"color": "#72B7B2", "marker": "X"},
+    "online_step_output_to_exec_thread_ms": {"color": "#FFB000", "marker": "1"},
     "online_step_output_to_exec_ms": {"color": "#FF9DA6", "marker": "v"},
+    "online_obs_send_to_exec_thread_ms": {"color": "#8CD17D", "marker": "2"},
     "online_obs_send_to_exec_ms": {"color": "#9C755F", "marker": "*"},
     "recv_to_pub_ms": {"color": "#4C78A8", "marker": "o"},
+    "pub_to_exec_thread_ms": {"color": "#B6992D", "marker": "p"},
     "pub_to_exec_ms": {"color": "#F58518", "marker": "s"},
+    "recv_to_exec_thread_ms": {"color": "#499894", "marker": "h"},
     "recv_to_exec_ms": {"color": "#54A24B", "marker": "^"},
     "fetch_to_exec_ms": {"color": "#B279A2", "marker": "D"},
 }
@@ -58,7 +70,7 @@ SEGMENT_SPECS = [
     ("controller_wait_ms", "ctrl_wait", "#4C78A8"),
     ("dds_write_ms", "dds_write", "#1F77B4"),
     ("unaccounted_pre_publish_ms", "unknown_pre_pub", "#BAB0AC"),
-    ("pub_to_exec_ms", "pub_to_exec", "#F58518"),
+    ("pub_to_exec_ms", "pub_to_exec_main", "#F58518"),
 ]
 
 BASE_SEGMENT_SPECS = [
@@ -73,7 +85,8 @@ TREND_KEYS = [
     ("base_height_ms", "base_height", "#F58518"),
     ("ik_ms", "ik", "#E45756"),
     ("enqueue_to_publish_ms", "queue_total", "#7F3C8D"),
-    ("pub_to_exec_ms", "pub_to_exec", "#11A579"),
+    ("pub_to_exec_thread_ms", "pub_to_exec_thread", "#B6992D"),
+    ("pub_to_exec_ms", "pub_to_exec_main", "#11A579"),
 ]
 
 MODE_COLORS = {
@@ -650,8 +663,12 @@ def write_top_latency_report(records, out_path: Path, top_k: int = 20):
         "online_observation_seq", "online_chunk_seq", "online_chunk_index", "online_chunk_size", "online_chunk_step_mode",
         "online_obs_send_to_action_recv_ms", "online_action_recv_to_step_output_ms",
         "online_step_output_to_provider_return_ms", "online_provider_return_to_pub_ms",
-        "online_step_output_to_pub_ms", "online_step_output_to_exec_ms", "online_obs_send_to_exec_ms",
-        "recv_to_pub_ms", "pub_to_exec_ms", "recv_to_exec_ms", "fetch_to_exec_ms",
+        "online_step_output_to_pub_ms",
+        "online_step_output_to_exec_thread_ms", "online_step_output_to_exec_ms",
+        "online_obs_send_to_exec_thread_ms", "online_obs_send_to_exec_ms",
+        "recv_to_pub_ms",
+        "pub_to_exec_thread_ms", "pub_to_exec_ms",
+        "recv_to_exec_thread_ms", "recv_to_exec_ms", "fetch_to_exec_ms",
         "tele_fetch_ms", "takeover_logic_ms", "base_control_ms", "base_move_ms", "base_height_ms", "base_misc_ms",
         "base_control_mode", "base_vx_cmd", "base_vy_cmd", "base_wz_cmd", "base_z_cmd",
         "base_async_publish_hz", "base_async_move_avg_ms", "base_async_height_avg_ms",
@@ -659,6 +676,7 @@ def write_top_latency_report(records, out_path: Path, top_k: int = 20):
         "ik_ms", "safety_ms", "gravity_ms", "enqueue_to_publish_ms", "controller_wait_ms", "dds_write_ms",
         "known_pre_publish_ms", "unaccounted_pre_publish_ms", "known_post_receive_ms", "unaccounted_post_receive_ms",
         "max_command_delta", "left_joint_delta_norm", "right_joint_delta_norm",
+        "q_delta_thread_trigger", "dq_peak_thread_trigger",
         "q_delta_trigger", "dq_peak_trigger",
         "left_arm_enabled", "right_arm_enabled", "home_return_active",
         "left_takeover_rising_edge", "right_takeover_rising_edge",
@@ -666,7 +684,7 @@ def write_top_latency_report(records, out_path: Path, top_k: int = 20):
         "online_obs_send_ns", "online_action_recv_ns", "online_step_output_ns",
         "online_obs_send_perf_ns", "online_action_recv_perf_ns", "online_step_output_perf_ns",
         "online_provider_output_perf_ns", "online_step_output_trace_ns",
-        "t_recv_ns", "t_pub_ns", "t_exec_ns",
+        "t_recv_ns", "t_pub_ns", "t_exec_thread_ns", "t_exec_ns",
     ]
     lines.extend(["", "## Detailed records", ""])
     for idx, record in enumerate(top_records, start=1):

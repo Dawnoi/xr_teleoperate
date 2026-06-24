@@ -19,6 +19,18 @@
 
 ---
 
+## 当前环境约定
+
+- 当前项目测试默认使用 conda 环境 `dex`
+- 远程主机是 `luopengcheng@yxgn-unitree-001`
+- 远程对应仓库路径是 `~/programs/xr_teleoperate`
+- 远程环境是 `tv`
+- 本地对应的同名仓库在 `/home/luopengcheng/Programs/Unitree`
+- 进入那个仓库时，优先遵守它自己的 `AGENTS.md`
+- 本仓库所有 `python` / 单测相关命令都应在已激活的 `dex` 环境中执行，不要直接用系统 Python
+
+---
+
 ## 当前主链路
 
 ```text
