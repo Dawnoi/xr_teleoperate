@@ -151,6 +151,94 @@ def matrix_to_pose7_xyzw(matrix: Any) -> List[float]:
     ]
 
 
+def matrix_to_rot6d(matrix: Any) -> List[float]:
+    validated = validate_matrix4x4(matrix)
+    return [
+        validated[0][0],
+        validated[1][0],
+        validated[2][0],
+        validated[0][1],
+        validated[1][1],
+        validated[2][1],
+    ]
+
+
+def rot6d_to_matrix(rot6d: Any) -> List[List[float]]:
+    if not isinstance(rot6d, (list, tuple)) and hasattr(rot6d, "tolist"):
+        rot6d = rot6d.tolist()
+    if not isinstance(rot6d, (list, tuple)) or len(rot6d) != 6:
+        raise ValueError("rot6d must contain exactly 6 values")
+    values = [float(value) for value in rot6d]
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("rot6d must contain finite values")
+
+    x1 = values[0:3]
+    x2 = values[3:6]
+    n1 = math.sqrt(sum(value * value for value in x1))
+    if n1 <= 0.0:
+        raise ValueError("rot6d first column norm must be non-zero")
+    c1 = [value / n1 for value in x1]
+
+    dot12 = sum(c1[idx] * x2[idx] for idx in range(3))
+    c2_raw = [x2[idx] - dot12 * c1[idx] for idx in range(3)]
+    n2 = math.sqrt(sum(value * value for value in c2_raw))
+    if n2 <= 0.0:
+        raise ValueError("rot6d second column is degenerate")
+    c2 = [value / n2 for value in c2_raw]
+
+    c3 = [
+        c1[1] * c2[2] - c1[2] * c2[1],
+        c1[2] * c2[0] - c1[0] * c2[2],
+        c1[0] * c2[1] - c1[1] * c2[0],
+    ]
+    n3 = math.sqrt(sum(value * value for value in c3))
+    if n3 <= 0.0:
+        raise ValueError("rot6d third column is degenerate")
+    c3 = [value / n3 for value in c3]
+
+    return [
+        [c1[0], c2[0], c3[0], 0.0],
+        [c1[1], c2[1], c3[1], 0.0],
+        [c1[2], c2[2], c3[2], 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+
+def pose7_xyzw_to_rot6d(pose7: Any) -> List[float]:
+    return matrix_to_rot6d(pose7_xyzw_to_matrix(pose7))
+
+
+def matrix_to_pose9_rot6d(matrix: Any) -> List[float]:
+    validated = validate_matrix4x4(matrix)
+    rot6d = matrix_to_rot6d(validated)
+    return [
+        validated[0][3],
+        validated[1][3],
+        validated[2][3],
+        rot6d[0],
+        rot6d[1],
+        rot6d[2],
+        rot6d[3],
+        rot6d[4],
+        rot6d[5],
+    ]
+
+
+def pose9_rot6d_to_matrix(pose9: Any) -> List[List[float]]:
+    if not isinstance(pose9, (list, tuple)) and hasattr(pose9, "tolist"):
+        pose9 = pose9.tolist()
+    if not isinstance(pose9, (list, tuple)) or len(pose9) != 9:
+        raise ValueError("pose9 must be [x, y, z, r6_0, r6_1, r6_2, r6_3, r6_4, r6_5]")
+    values = [float(value) for value in pose9]
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("pose9 must contain finite values")
+    matrix = rot6d_to_matrix(values[3:9])
+    matrix[0][3] = values[0]
+    matrix[1][3] = values[1]
+    matrix[2][3] = values[2]
+    return matrix
+
+
 def _normalized_side(side: str) -> str:
     normalized = str(side).strip().lower()
     if normalized not in {"left", "right"}:

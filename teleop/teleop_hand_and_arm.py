@@ -362,6 +362,18 @@ if __name__ == '__main__':
                         help='Pika-compatible online inference TCP server host.')
     parser.add_argument('--online-inference-port', type=int, default=5555,
                         help='Pika-compatible online inference TCP server port.')
+    parser.add_argument('--online-inference-transport', type=str, choices=['tcp_jsonl', 'http'], default='tcp_jsonl',
+                        help='Online inference transport. Use http for pi0.5 service on /handshake and /infer.')
+    parser.add_argument('--online-inference-base-url', type=str, default='',
+                        help='HTTP base URL for online inference, e.g. http://115.190.134.186:8017. If empty, host/port are used.')
+    parser.add_argument('--online-inference-http-handshake-path', type=str, default='/handshake',
+                        help='HTTP handshake path for online inference.')
+    parser.add_argument('--online-inference-http-infer-path', type=str, default='/infer',
+                        help='HTTP infer path for online inference.')
+    parser.add_argument('--online-inference-protocol-profile', type=str, choices=['pika_pose7', 'pi05_dual_arm_20d'], default='pika_pose7',
+                        help='Online inference payload/action schema profile.')
+    parser.add_argument('--online-inference-prompt', type=str, default='',
+                        help='Task prompt sent to online inference services such as pi0.5.')
     parser.add_argument('--online-inference-arm-side', type=str, choices=['left', 'right', 'both'], default='both',
                         help='Arm side controlled by online inference.')
     parser.add_argument('--online-inference-n-obs-steps', type=int, default=2,

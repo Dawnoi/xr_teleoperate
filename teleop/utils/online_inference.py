@@ -7,7 +7,13 @@ import logging
 import numpy as np
 
 from teleop.utils.inference_protocol import encode_jpeg_base64, parse_action_chunk
-from teleop.utils.pose_transform import matrix_to_pose7_xyzw, pose7_xyzw_to_matrix
+from teleop.utils.pi05_protocol import (
+    PI05_IMAGE_ROLES,
+    build_pi05_observation_payload,
+    pi05_action_sequence_to_pose7_chunks,
+    validate_pi05_action_sequence,
+)
+from teleop.utils.pose_transform import matrix_to_pose7_xyzw, matrix_to_pose9_rot6d, pose7_xyzw_to_matrix
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +33,8 @@ def _perf_counter_ns() -> int:
 @dataclass
 class OnlineInferenceConfig:
     arm_side: str
+    protocol_profile: str = "pika_pose7"
+    task_prompt: str = ""
     n_obs_steps: int = 2
     camera_freq: float = 30.0
     action_step_sec: float = 0.10
@@ -40,6 +48,9 @@ class OnlineInferenceConfig:
     dry_run: bool = False
 
     def __post_init__(self) -> None:
+        self.protocol_profile = str(self.protocol_profile or "pika_pose7").strip()
+        if self.protocol_profile not in {"pika_pose7", "pi05_dual_arm_20d"}:
+            raise ValueError(f"unsupported protocol_profile: {self.protocol_profile!r}")
         if self.arm_side not in {"left", "right", "both"}:
             raise ValueError(f"unsupported arm_side: {self.arm_side!r}")
         if self.n_obs_steps <= 0:
@@ -172,6 +183,7 @@ class OnlineInferenceSession:
     def get_debug_snapshot(self) -> Dict[str, Any]:
         return {
             "arm_side": self.config.arm_side,
+            "protocol_profile": self.config.protocol_profile,
             "status": self.status,
             "error": self.error,
             "last_observation": dict(self._last_observation_debug),
@@ -313,6 +325,8 @@ class OnlineInferenceSession:
         self._last_action_debug = {}
 
     def _build_observation_message(self) -> Dict[str, Any]:
+        if self.config.protocol_profile == "pi05_dual_arm_20d":
+            return self._build_pi05_observation_message()
         message: Dict[str, Any] = {"type": "observation"}
         if self.config.arm_side in {"left", "both"}:
             message["arm_l"] = self._build_arm_observation("left")
@@ -354,7 +368,112 @@ class OnlineInferenceSession:
             "arm_current_pose": list(poses[-1]),
         }
 
+    def _build_pi05_observation_message(self) -> Dict[str, Any]:
+        state_window, camera_window = self._select_observation_window()
+        poses_left = [self._observation_pose9_for_pi05("left", self._pose_for_side(sample, "left")) for sample in state_window]
+        poses_right = [
+            self._observation_pose9_for_pi05("right", self._pose_for_side(sample, "right")) for sample in state_window
+        ]
+        grippers_left = [[float(self._gripper_for_side(sample, "left"))] for sample in state_window]
+        grippers_right = [[float(self._gripper_for_side(sample, "right"))] for sample in state_window]
+        images = self._build_pi05_images(camera_window)
+        return build_pi05_observation_payload(
+            images=images,
+            poses_left=poses_left,
+            grippers_left=grippers_left,
+            poses_right=poses_right,
+            grippers_right=grippers_right,
+            prompt=self.config.task_prompt,
+        )
+
+    def _build_pi05_images(self, camera_window: Dict[str, List[CameraSample]]) -> Dict[str, bytes | str]:
+        if not self._camera_order:
+            raise ValueError("no camera sources available")
+        images: Dict[str, bytes | str] = {role: "" for role in PI05_IMAGE_ROLES}
+        for camera_name in self._camera_order:
+            role = self._pi05_role_for_camera_name(camera_name)
+            if role is None:
+                continue
+            samples = camera_window.get(camera_name)
+            if not samples:
+                raise ValueError(f"missing camera sample for {camera_name}")
+            jpeg = self._encode_jpeg_bytes(np.asarray(samples[-1].frame), self.config.jpeg_quality)
+            images[role] = jpeg
+        right_hand = images.get("right_hand")
+        third_front = images.get("third_front")
+        if (not isinstance(third_front, (bytes, bytearray)) or not third_front) and isinstance(
+            right_hand, (bytes, bytearray)
+        ) and right_hand:
+            # 兼容当前 8017 服务端：在未提供独立 front view 时，用右手图填 third_front。
+            images["third_front"] = bytes(right_hand)
+        for role in ("head_fpv", "right_hand", "third_front"):
+            value = images.get(role)
+            if not isinstance(value, (bytes, bytearray)) or not value:
+                raise ValueError(f"pi05 observation requires non-empty image role: {role}")
+        return images
+
+    @staticmethod
+    def _pi05_role_for_camera_name(camera_name: str) -> Optional[str]:
+        normalized = str(camera_name).strip().lower()
+        mapping = {
+            "front": "third_front",
+            "third_front": "third_front",
+            "head": "head_fpv",
+            "head_fpv": "head_fpv",
+            "left": "left_hand",
+            "left_wrist": "left_hand",
+            "left_hand": "left_hand",
+            "right": "right_hand",
+            "right_wrist": "right_hand",
+            "right_hand": "right_hand",
+        }
+        return mapping.get(normalized)
+
+    @staticmethod
+    def _encode_jpeg_bytes(image: np.ndarray, quality: int) -> bytes:
+        import cv2
+
+        array = np.asarray(image)
+        if array.ndim != 3 or array.shape[2] != 3:
+            raise ValueError("image must have shape HxWx3")
+        if array.dtype != np.uint8:
+            array = np.clip(array, 0, 255).astype(np.uint8)
+        ok, encoded = cv2.imencode(".jpg", array, [int(cv2.IMWRITE_JPEG_QUALITY), int(quality)])
+        if not ok:
+            raise ValueError("failed to encode JPEG")
+        return bytes(encoded.tobytes())
+
+    def _observation_pose9_for_pi05(self, side: str, pose: Any) -> List[float]:
+        if self.pose_transformer is not None:
+            server_pose7 = self.pose_transformer.observation_to_server(side, pose)
+            matrix = pose7_xyzw_to_matrix(server_pose7)
+        else:
+            matrix = np.asarray(pose, dtype=np.float64).tolist()
+        return list(matrix_to_pose9_rot6d(matrix))
+
     def _log_current_observation_point(self, observation: Dict[str, Any]) -> None:
+        if self.config.protocol_profile == "pi05_dual_arm_20d":
+            poses_left = observation.get("poses_left")
+            poses_right = observation.get("poses_right")
+            images = observation.get("images")
+            if not isinstance(poses_left, list) or not poses_left or len(poses_left[-1]) != 9:
+                raise ValueError("pi05 poses_left must be non-empty pose9 history")
+            if not isinstance(poses_right, list) or not poses_right or len(poses_right[-1]) != 9:
+                raise ValueError("pi05 poses_right must be non-empty pose9 history")
+            if not isinstance(images, dict):
+                raise ValueError("pi05 images must be a role mapping")
+            logger.info(
+                "[ONLINE_INFERENCE][OBS][pi05] camera_order=%s image_roles=%s n_left=%d n_right=%d "
+                "left_current_pose9=%s right_current_pose9=%s prompt=%r",
+                list(self._camera_order),
+                sorted(str(key) for key, value in images.items() if value),
+                len(poses_left),
+                len(poses_right),
+                [float(value) for value in poses_left[-1]],
+                [float(value) for value in poses_right[-1]],
+                self.config.task_prompt,
+            )
+            return
         for arm_key in ("arm_l", "arm_r"):
             arm_payload = observation.get(arm_key)
             if not isinstance(arm_payload, dict):
@@ -524,10 +643,13 @@ class OnlineInferenceSession:
         if not isinstance(payload, dict):
             raise ValueError("action payload must be an object")
 
-        parsed = parse_action_chunk(payload, self.config.arm_side)
-
-        left_steps = parsed.left
-        right_steps = parsed.right
+        if self.config.protocol_profile == "pi05_dual_arm_20d":
+            actions = validate_pi05_action_sequence(payload, expected_dim=20)
+            left_steps, right_steps = pi05_action_sequence_to_pose7_chunks(actions, self.config.arm_side)
+        else:
+            parsed = parse_action_chunk(payload, self.config.arm_side)
+            left_steps = parsed.left
+            right_steps = parsed.right
 
         if self.config.arm_side == "both":
             if left_steps is None or right_steps is None:
@@ -600,6 +722,27 @@ class OnlineInferenceSession:
             )
 
     def _make_observation_debug(self, observation: Dict[str, Any]) -> Dict[str, Any]:
+        if self.config.protocol_profile == "pi05_dual_arm_20d":
+            poses_left = observation.get("poses_left") or []
+            poses_right = observation.get("poses_right") or []
+            grippers_left = observation.get("grippers_left") or []
+            grippers_right = observation.get("grippers_right") or []
+            images = observation.get("images") or {}
+            return {
+                "profile": "pi05_dual_arm_20d",
+                "prompt": str(observation.get("prompt", "")),
+                "image_roles": sorted(str(key) for key, value in images.items() if value),
+                "left": {
+                    "n_poses": len(poses_left) if isinstance(poses_left, list) else 0,
+                    "arm_current_pose": self._float_list_or_none(poses_left[-1] if poses_left else None),
+                    "last_gripper": self._nested_last_float_or_none(grippers_left),
+                },
+                "right": {
+                    "n_poses": len(poses_right) if isinstance(poses_right, list) else 0,
+                    "arm_current_pose": self._float_list_or_none(poses_right[-1] if poses_right else None),
+                    "last_gripper": self._nested_last_float_or_none(grippers_right),
+                },
+            }
         debug: Dict[str, Any] = {}
         for key, side in (("arm_l", "left"), ("arm_r", "right")):
             arm_payload = observation.get(key)
@@ -625,6 +768,8 @@ class OnlineInferenceSession:
         chunk_size: int,
     ) -> Dict[str, Any]:
         debug: Dict[str, Any] = {}
+        if self.config.protocol_profile == "pi05_dual_arm_20d":
+            debug["profile"] = "pi05_dual_arm_20d"
         for side, steps in (("left", left_steps), ("right", right_steps)):
             if not steps:
                 continue
@@ -648,6 +793,15 @@ class OnlineInferenceSession:
         if not isinstance(values, (list, tuple)):
             return None
         return [float(value) for value in values]
+
+    @staticmethod
+    def _nested_last_float_or_none(values: Any) -> Optional[float]:
+        if not isinstance(values, (list, tuple)) or not values:
+            return None
+        last = values[-1]
+        if isinstance(last, (list, tuple)) and last:
+            return float(last[0])
+        return float(last)
 
     def _emit_action_step(self, state_sample: RobotStateSample) -> OnlineInferenceStep:
         if self._current_chunk_index >= self._current_chunk_size:

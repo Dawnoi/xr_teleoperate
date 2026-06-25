@@ -1,4 +1,5 @@
 import base64
+import json
 import pathlib
 import socket
 import sys
@@ -176,6 +177,89 @@ class InferenceProtocolTest(unittest.TestCase):
         transport.clear_pending_rx()
 
         self.assertIsNone(transport.recv_json_nonblocking())
+
+    def test_http_transport_reset_sends_reference_pi05_handshake_payload(self):
+        from teleop.utils.inference_protocol import HttpJsonInferenceTransport
+
+        captured = {}
+        transport = HttpJsonInferenceTransport(
+            "http://115.190.134.186:8017",
+            handshake_payload={
+                "action_dim": 20,
+                "action_space": "pose20",
+                "robot": "nero_dual_arm",
+                "transport": "http",
+            },
+        )
+
+        def fake_post_body(path, body, content_type, debug_extra):
+            captured["path"] = path
+            captured["body"] = json.loads(body.decode("utf-8"))
+            captured["content_type"] = content_type
+            captured["debug_extra"] = debug_extra
+            return {"type": "handshake_ack", "ok": True}
+
+        transport._post_body = fake_post_body
+        transport.reset()
+
+        self.assertEqual(captured["path"], "/handshake")
+        self.assertEqual(captured["content_type"], "application/json; charset=utf-8")
+        self.assertEqual(
+            captured["body"],
+            {
+                "type": "handshake",
+                "action_dim": 20,
+                "action_space": "pose20",
+                "robot": "nero_dual_arm",
+                "transport": "http",
+            },
+        )
+
+    def test_http_transport_multipart_matches_nero_vla_client_shape(self):
+        from teleop.utils.inference_protocol import HttpJsonInferenceTransport
+
+        captured = {}
+        transport = HttpJsonInferenceTransport("http://127.0.0.1:8017")
+
+        def fake_post_body(path, body, content_type, debug_extra):
+            captured["path"] = path
+            captured["body"] = body
+            captured["content_type"] = content_type
+            captured["debug_extra"] = debug_extra
+            return {"type": "action_sequence", "actions": [[0.0] * 20]}
+
+        transport._post_body = fake_post_body
+        transport.send_json(
+            {
+                "type": "observation",
+                "images": {
+                    "third_front": "",
+                    "head_fpv": b"head-jpeg",
+                    "left_hand": "",
+                    "right_hand": b"right-jpeg",
+                },
+                "poses_left": [[0.0] * 9],
+                "grippers_left": [[0.01]],
+                "poses_right": [[0.0] * 9],
+                "grippers_right": [[0.02]],
+                "prompt": "pick up the cube",
+            }
+        )
+
+        body = captured["body"].decode("latin1")
+        self.assertEqual(captured["path"], "/infer")
+        self.assertIn("multipart/form-data; boundary=", captured["content_type"])
+        self.assertTrue(captured["debug_extra"]["multipart"])
+        self.assertIn('name="meta"', body)
+        self.assertIn('"images":{"third_front":"","head_fpv":"","left_hand":"","right_hand":""}', body)
+        self.assertIn('name="image_head_fpv"; filename="head_fpv.jpg"', body)
+        self.assertIn('name="image_right_hand"; filename="right_hand.jpg"', body)
+        self.assertNotIn('name="image_third_front"', body)
+        self.assertNotIn('name="image_left_hand"', body)
+        self.assertEqual(
+            transport.recv_json_nonblocking(),
+            {"type": "action_sequence", "actions": [[0.0] * 20]},
+        )
 
 
 if __name__ == "__main__":

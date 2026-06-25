@@ -175,6 +175,14 @@ class OnlineInferenceSessionTest(unittest.TestCase):
             CameraSample(name="left_wrist", frame=_image(80), host_monotonic_ns=host_monotonic_ns),
         ]
 
+    def _make_pi05_cameras(self, host_monotonic_ns: int):
+        from teleop.utils.online_inference import CameraSample
+
+        return [
+            CameraSample(name="head", frame=_image(40), host_monotonic_ns=host_monotonic_ns),
+            CameraSample(name="right_wrist", frame=_image(120), host_monotonic_ns=host_monotonic_ns),
+        ]
+
     def _make_config(self, **overrides):
         from teleop.utils.online_inference import OnlineInferenceConfig
 
@@ -335,6 +343,116 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(message["arm_r"]["poses"][-1], [199.0, 198.0, 197.0, 0.0, 0.0, 0.0, 1.0])
         self.assertEqual(message["arm_r"]["grippers"], [0.034, 0.034])
         self.assertEqual(len(transformer.observation_calls), 4)
+
+    def test_pi05_profile_sends_dual_arm_pose9_observation_with_prompt(self):
+        from teleop.utils.online_inference import OnlineInferenceSession
+
+        clock = FakeClock()
+        transport = FakeTransport()
+        session = OnlineInferenceSession(
+            config=self._make_config(
+                arm_side="both",
+                protocol_profile="pi05_dual_arm_20d",
+                task_prompt="pick up the cube",
+            ),
+            transport=transport,
+            clock_ns=clock,
+        )
+
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_pi05_cameras(clock()))
+        clock.advance_ms(40)
+        step = session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_pi05_cameras(clock()))
+
+        self.assertEqual(step.status, "waiting_action")
+        self.assertEqual(len(transport.sent_messages), 1)
+        message = transport.sent_messages[0]
+        self.assertEqual(message["type"], "observation")
+        self.assertEqual(message["prompt"], "pick up the cube")
+        self.assertIn("images", message)
+        self.assertEqual(
+            list(message["images"].keys()),
+            ["third_front", "head_fpv", "left_hand", "right_hand"],
+        )
+        self.assertIsInstance(message["images"]["third_front"], bytes)
+        self.assertGreater(len(message["images"]["third_front"]), 0)
+        self.assertEqual(message["images"]["third_front"], message["images"]["right_hand"])
+        self.assertIsInstance(message["images"]["head_fpv"], bytes)
+        self.assertEqual(message["images"]["left_hand"], "")
+        self.assertIsInstance(message["images"]["right_hand"], bytes)
+        self.assertNotIn("right_wrist", message["images"])
+        self.assertEqual(len(message["poses_left"]), 2)
+        self.assertEqual(len(message["poses_right"]), 2)
+        self.assertEqual(len(message["poses_left"][-1]), 9)
+        self.assertEqual(len(message["poses_right"][-1]), 9)
+        self.assertEqual(message["grippers_left"], [[0.012], [0.012]])
+        self.assertEqual(message["grippers_right"], [[0.034], [0.034]])
+        snapshot = session.get_debug_snapshot()
+        self.assertEqual(snapshot["protocol_profile"], "pi05_dual_arm_20d")
+        self.assertEqual(snapshot["last_observation"]["profile"], "pi05_dual_arm_20d")
+        self.assertEqual(snapshot["last_observation"]["prompt"], "pick up the cube")
+
+    def test_pi05_profile_maps_local_camera_names_to_nero_reference_roles(self):
+        from teleop.utils.online_inference import OnlineInferenceSession
+
+        clock = FakeClock()
+        transport = FakeTransport()
+        session = OnlineInferenceSession(
+            config=self._make_config(
+                arm_side="both",
+                protocol_profile="pi05_dual_arm_20d",
+                task_prompt="pick up the cube",
+            ),
+            transport=transport,
+            clock_ns=clock,
+        )
+
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_pi05_cameras(clock()))
+        clock.advance_ms(40)
+        step = session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_pi05_cameras(clock()))
+
+        self.assertEqual(step.status, "waiting_action")
+        message = transport.sent_messages[0]
+        self.assertEqual(
+            list(message["images"].keys()),
+            ["third_front", "head_fpv", "left_hand", "right_hand"],
+        )
+        self.assertIsInstance(message["images"]["third_front"], bytes)
+        self.assertGreater(len(message["images"]["third_front"]), 0)
+        self.assertEqual(message["images"]["third_front"], message["images"]["right_hand"])
+        self.assertIsInstance(message["images"]["head_fpv"], bytes)
+        self.assertGreater(len(message["images"]["head_fpv"]), 0)
+        self.assertEqual(message["images"]["left_hand"], "")
+        self.assertIsInstance(message["images"]["right_hand"], bytes)
+        self.assertGreater(len(message["images"]["right_hand"]), 0)
+        self.assertNotIn("right_wrist", message["images"])
+        self.assertEqual(
+            session.get_debug_snapshot()["last_observation"]["image_roles"],
+            ["head_fpv", "right_hand", "third_front"],
+        )
+
+    def test_pi05_profile_fails_closed_when_required_head_or_right_hand_image_missing(self):
+        from teleop.utils.online_inference import OnlineInferenceSession
+
+        clock = FakeClock()
+        transport = FakeTransport()
+        session = OnlineInferenceSession(
+            config=self._make_config(
+                arm_side="both",
+                protocol_profile="pi05_dual_arm_20d",
+            ),
+            transport=transport,
+            clock_ns=clock,
+        )
+
+        cameras_without_right = [self._make_pi05_cameras(clock())[0]]
+        session.tick(state_sample=self._make_state(clock()), camera_samples=cameras_without_right)
+        clock.advance_ms(40)
+        cameras_without_right = [self._make_pi05_cameras(clock())[0]]
+        step = session.tick(state_sample=self._make_state(clock()), camera_samples=cameras_without_right)
+
+        self.assertEqual(step.status, "failed")
+        self.assertIn("pi05 observation requires non-empty image role: right_hand", session.error)
+        self.assertEqual(transport.sent_messages, [])
 
     def test_reconnect_rearms_reset(self):
         from teleop.utils.online_inference import OnlineInferenceSession
@@ -554,6 +672,48 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertAlmostEqual(step.right_gripper_width, 0.034)
         self.assertEqual(len(transformer.action_calls), 1)
         self.assertEqual(transformer.action_calls[0][0], "left")
+
+    def test_pi05_profile_loads_action_sequence20_as_dual_pose7_chunks(self):
+        from teleop.utils.online_inference import OnlineInferenceSession
+
+        clock = FakeClock()
+        transport = FakeTransport()
+        transformer = FakePoseTransformer()
+        session = OnlineInferenceSession(
+            config=self._make_config(
+                arm_side="both",
+                protocol_profile="pi05_dual_arm_20d",
+                enable_motion=True,
+            ),
+            transport=transport,
+            pose_transformer=transformer,
+            clock_ns=clock,
+        )
+
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_pi05_cameras(clock()))
+        clock.advance_ms(40)
+        session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_pi05_cameras(clock()))
+        transport.queue_recv(
+            {
+                "type": "action_sequence",
+                "actions": [
+                    [
+                        1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.01,
+                        4.0, 5.0, 6.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.02,
+                    ]
+                ],
+            }
+        )
+
+        step = session.tick(state_sample=self._make_state(clock()), camera_samples=self._make_pi05_cameras(clock()))
+
+        self.assertEqual(step.status, "executing_chunk")
+        self.assertEqual(step.enabled_arms, ["left", "right"])
+        self.assertTrue(np.allclose(step.left_pose, _pose_matrix(11.0, 12.0, 13.0)))
+        self.assertTrue(np.allclose(step.right_pose, _pose_matrix(24.0, 25.0, 26.0)))
+        self.assertAlmostEqual(step.left_gripper_width, 0.01)
+        self.assertAlmostEqual(step.right_gripper_width, 0.02)
+        self.assertEqual(session.get_debug_snapshot()["last_action"]["profile"], "pi05_dual_arm_20d")
 
     def test_dry_run_advances_action_but_disables_enabled_arms(self):
         from teleop.utils.online_inference import OnlineInferenceSession

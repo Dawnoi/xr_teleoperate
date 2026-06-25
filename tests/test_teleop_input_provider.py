@@ -511,6 +511,55 @@ class TeleopInputProviderTest(unittest.TestCase):
 
         self.assertEqual(provider.session.config.chunk_step_mode, "per_tick")
 
+    def test_create_online_provider_pi05_uses_http_transport_profile_and_prompt(self):
+        import teleop.utils.teleop_input_provider as input_provider_module
+
+        args = SimpleNamespace(
+            input_provider="online_inference",
+            online_inference_transport="http",
+            online_inference_base_url="http://115.190.134.186:8017",
+            online_inference_http_handshake_path="/handshake",
+            online_inference_http_infer_path="/infer",
+            online_inference_protocol_profile="pi05_dual_arm_20d",
+            online_inference_prompt="pick up the cube",
+            online_inference_host="115.190.134.186",
+            online_inference_port=8017,
+            online_inference_arm_side="both",
+            online_inference_n_obs_steps=2,
+            online_inference_camera_freq=30.0,
+            online_inference_jpeg_quality=85,
+            online_inference_action_step_sec=0.10,
+            online_inference_chunk_step_mode="per_tick",
+            online_inference_interp_sec=0.01,
+            online_inference_post_action_delay_ms=75,
+            online_inference_response_timeout_sec=2.0,
+            online_inference_transform_config="",
+            online_inference_enable_motion=False,
+            online_inference_dry_run=True,
+            ee="dex1",
+            no_gripper=False,
+        )
+
+        fake_transport = mock.Mock()
+        with mock.patch.object(input_provider_module.HttpJsonInferenceTransport, "connect", return_value=fake_transport) as connect:
+            provider = input_provider_module.create_teleop_input_provider(args)
+
+        connect.assert_called_once_with(
+            base_url="http://115.190.134.186:8017",
+            handshake_path="/handshake",
+            infer_path="/infer",
+            timeout_sec=2.0,
+            handshake_payload={
+                "action_dim": 20,
+                "action_space": "pose20",
+                "robot": "nero_dual_arm",
+                "transport": "http",
+            },
+        )
+        self.assertIs(provider.session.transport, fake_transport)
+        self.assertEqual(provider.session.config.protocol_profile, "pi05_dual_arm_20d")
+        self.assertEqual(provider.session.config.task_prompt, "pick up the cube")
+
 
 if __name__ == "__main__":
     unittest.main()

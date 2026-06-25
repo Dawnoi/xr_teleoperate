@@ -11,9 +11,14 @@ if str(REPO_ROOT) not in sys.path:
 
 from teleop.utils.pose_transform import (
     PoseTransformer,
+    matrix_to_pose9_rot6d,
+    matrix_to_rot6d,
     load_pose_transformer,
     matrix_to_pose7_xyzw,
     pose7_xyzw_to_matrix,
+    pose7_xyzw_to_rot6d,
+    pose9_rot6d_to_matrix,
+    rot6d_to_matrix,
     validate_matrix4x4,
 )
 
@@ -73,6 +78,33 @@ class PoseTransformTest(unittest.TestCase):
         _assert_matrix_close(self, matrix, pose7_xyzw_to_matrix(roundtrip_pose7))
         _assert_vector_close(self, roundtrip_pose7[:3], pose7[:3])
         self.assertAlmostEqual(math.sqrt(sum(value * value for value in roundtrip_pose7[3:])), 1.0)
+
+    def test_rot6d_roundtrip_preserves_rotation_matrix(self):
+        pose7 = [0.25, -0.5, 1.2, 0.2, 0.3, 0.4, 0.5]
+
+        rot6d = pose7_xyzw_to_rot6d(pose7)
+        matrix = rot6d_to_matrix(rot6d)
+        roundtrip_rot6d = matrix_to_rot6d(matrix)
+
+        _assert_vector_close(self, roundtrip_rot6d, rot6d)
+
+    def test_pose9_rot6d_packs_xyz_and_rot6d(self):
+        matrix = pose7_xyzw_to_matrix([0.25, -0.5, 1.2, 0.0, 0.0, 0.0, 1.0])
+
+        pose9 = matrix_to_pose9_rot6d(matrix)
+
+        self.assertEqual(len(pose9), 9)
+        _assert_vector_close(self, pose9[:3], [0.25, -0.5, 1.2])
+        _assert_vector_close(self, pose9[3:], [1.0, 0.0, 0.0, 0.0, 1.0, 0.0])
+
+    def test_pose9_rot6d_roundtrip_preserves_translation_and_rotation(self):
+        pose7 = [0.25, -0.5, 1.2, 0.2, 0.3, 0.4, 0.5]
+
+        pose9 = matrix_to_pose9_rot6d(pose7_xyzw_to_matrix(pose7))
+        matrix = pose9_rot6d_to_matrix(pose9)
+        roundtrip_pose9 = matrix_to_pose9_rot6d(matrix)
+
+        _assert_vector_close(self, roundtrip_pose9, pose9)
 
     def test_pose7_to_matrix_accepts_array_like_vector(self):
         pose7 = _ArrayLikeVector([0.25, -0.5, 1.2, 0.0, 0.0, 0.0, 1.0])

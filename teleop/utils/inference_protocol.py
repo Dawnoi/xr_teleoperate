@@ -1,9 +1,12 @@
 import base64
+import http.client
 import json
 import select
 import socket
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlparse
 
 import cv2
 import numpy as np
@@ -208,6 +211,192 @@ class TcpJsonTransport:
         except Exception:
             pass
 
+
+class HttpJsonInferenceTransport:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        handshake_path: str = "/handshake",
+        infer_path: str = "/infer",
+        timeout_sec: float = 30.0,
+        handshake_payload: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        parsed = urlparse(str(base_url).strip())
+        if parsed.scheme not in {"http", ""}:
+            raise ValueError("only http:// inference transport is supported")
+        if not parsed.hostname:
+            raise ValueError("HTTP inference base_url host is required")
+        self.host = str(parsed.hostname)
+        self.port = int(parsed.port or 80)
+        self.base_path = str(parsed.path or "").rstrip("/")
+        self.handshake_path = self._normalize_path(handshake_path)
+        self.infer_path = self._normalize_path(infer_path)
+        self.timeout_sec = float(timeout_sec)
+        if self.timeout_sec <= 0.0:
+            raise ValueError("timeout_sec must be positive")
+        self.handshake_payload = dict(handshake_payload or {"transport": "http"})
+        self._conn: http.client.HTTPConnection | None = None
+        self._closed = False
+        self._connected = True
+        self._pending_rx: List[Dict[str, Any]] = []
+        self.last_debug: Dict[str, Any] = {}
+
+    @classmethod
+    def connect(
+        cls,
+        *,
+        base_url: str,
+        handshake_path: str = "/handshake",
+        infer_path: str = "/infer",
+        timeout_sec: float = 30.0,
+        handshake_payload: Optional[Dict[str, Any]] = None,
+    ) -> "HttpJsonInferenceTransport":
+        return cls(
+            base_url=base_url,
+            handshake_path=handshake_path,
+            infer_path=infer_path,
+            timeout_sec=timeout_sec,
+            handshake_payload=handshake_payload,
+        )
+
+    def is_connected(self) -> bool:
+        return bool(self._connected and not self._closed)
+
+    def clear_pending_rx(self) -> None:
+        self._pending_rx.clear()
+
+    def reset(self, reason: Optional[str] = None) -> None:
+        payload = {"type": "handshake", **self.handshake_payload}
+        if reason is not None:
+            payload["reason"] = reason
+        response = self._post_json(self.handshake_path, payload)
+        self.last_debug = {
+            "ok": True,
+            "path": self.handshake_path,
+            "response_keys": sorted(str(key) for key in response.keys()),
+        }
+
+    def send_json(self, payload: Dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            raise TypeError("payload must be an object")
+        response = self._post_infer(payload)
+        self._pending_rx.append(response)
+
+    def recv_json_nonblocking(self):
+        if self._pending_rx:
+            return self._pending_rx.pop(0)
+        return None
+
+    def close(self) -> None:
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
+        self._closed = True
+        self._connected = False
+
+    @staticmethod
+    def _normalize_path(path: str) -> str:
+        path_s = str(path or "").strip()
+        if not path_s:
+            raise ValueError("HTTP path is required")
+        return path_s if path_s.startswith("/") else f"/{path_s}"
+
+    def _path(self, path: str) -> str:
+        return f"{self.base_path}{path}" if self.base_path else path
+
+    def _connect(self) -> http.client.HTTPConnection:
+        if self._conn is None:
+            self._conn = http.client.HTTPConnection(self.host, self.port, timeout=self.timeout_sec)
+        return self._conn
+
+    def _post_infer(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        images = payload.get("images")
+        if isinstance(images, dict) and any(isinstance(value, (bytes, bytearray)) and value for value in images.values()):
+            return self._post_multipart(self.infer_path, payload)
+        return self._post_json(self.infer_path, payload)
+
+    def _post_json(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        body = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        return self._post_body(path, body, "application/json; charset=utf-8", {"multipart": False})
+
+    def _post_multipart(self, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        boundary = f"xrteleop-{uuid.uuid4().hex}"
+        images = payload.get("images") if isinstance(payload.get("images"), dict) else {}
+        attached_images = {
+            str(role): bytes(raw)
+            for role, raw in images.items()
+            if isinstance(raw, (bytes, bytearray)) and raw
+        }
+        meta = dict(payload)
+        meta["images"] = {str(role): "" for role in images.keys()}
+        parts: List[bytes] = []
+
+        def add_part(name: str, content: bytes, content_type: str, filename: Optional[str] = None) -> None:
+            disposition = f'form-data; name="{name}"'
+            if filename:
+                disposition += f'; filename="{filename}"'
+            header = (
+                f"--{boundary}\r\n"
+                f"Content-Disposition: {disposition}\r\n"
+                f"Content-Type: {content_type}\r\n\r\n"
+            ).encode("utf-8")
+            parts.append(header + content + b"\r\n")
+
+        add_part(
+            "meta",
+            json.dumps(meta, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"),
+            "application/json",
+        )
+        image_bytes = 0
+        for role_str, content in attached_images.items():
+            image_bytes += len(content)
+            add_part(f"image_{role_str}", content, "image/jpeg", f"{role_str}.jpg")
+        body = b"".join(parts) + f"--{boundary}--\r\n".encode("utf-8")
+        return self._post_body(
+            path,
+            body,
+            f"multipart/form-data; boundary={boundary}",
+            {"multipart": True, "image_bytes": int(image_bytes)},
+        )
+
+    def _post_body(
+        self,
+        path: str,
+        body: bytes,
+        content_type: str,
+        debug_extra: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        req_path = self._path(path)
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": content_type,
+            "Content-Length": str(len(body)),
+            "Connection": "keep-alive",
+        }
+        self.last_debug = {
+            "path": path,
+            "request_bytes": len(body),
+            "reused_connection": self._conn is not None,
+            **debug_extra,
+        }
+        conn = self._connect()
+        conn.request("POST", req_path, body=body, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read()
+
+        status = int(resp.status)
+        reason = str(resp.reason or "")
+        text = raw.decode("utf-8", errors="replace") if raw else "{}"
+        if status < 200 or status >= 300:
+            self.last_debug.update({"ok": False, "status": status, "error": text or reason})
+            raise RuntimeError(f"HTTP POST {path} failed: status={status}; reason={reason}; detail={text}")
+        decoded = json.loads(text)
+        if not isinstance(decoded, dict):
+            self.last_debug.update({"ok": False, "status": status, "error": "non-object JSON response"})
+            raise RuntimeError(f"HTTP POST {path} returned non-object JSON: {type(decoded).__name__}")
+        self.last_debug.update({"ok": True, "status": status, "response_keys": sorted(str(key) for key in decoded.keys())})
+        return decoded
 
 def parse_action_chunk(payload: Dict[str, Any], arm_side: str) -> ParsedActionChunk:
     if arm_side not in ("left", "right", "both"):

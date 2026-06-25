@@ -8,7 +8,7 @@ from typing import Any, Mapping
 import logging_mp
 import numpy as np
 
-from teleop.utils.inference_protocol import TcpJsonTransport
+from teleop.utils.inference_protocol import HttpJsonInferenceTransport, TcpJsonTransport
 from teleop.utils.online_inference import (
     CameraSample,
     OnlineInferenceConfig,
@@ -75,6 +75,18 @@ def _finite_gripper_width(value: Any, label: str) -> float:
     if not np.isfinite(width):
         raise ValueError(f"{label} contains NaN or Inf")
     return width
+
+
+def _online_inference_http_handshake_payload(protocol_profile: str) -> dict[str, Any]:
+    profile = str(protocol_profile or "pika_pose7").strip()
+    if profile == "pi05_dual_arm_20d":
+        return {
+            "action_dim": 20,
+            "action_space": "pose20",
+            "robot": "nero_dual_arm",
+            "transport": "http",
+        }
+    return {"transport": "http"}
 
 
 def pose6_to_matrix(pose6) -> np.ndarray:
@@ -713,13 +725,18 @@ def create_teleop_input_provider(args, arm_ik=None) -> BaseTeleopInputProvider:
     if input_provider == "online_inference":
         enable_motion = bool(getattr(args, "online_inference_enable_motion", False))
         dry_run = bool(getattr(args, "online_inference_dry_run", False))
+        protocol_profile = str(getattr(args, "online_inference_protocol_profile", "pika_pose7") or "pika_pose7").strip()
+        transport_kind = str(getattr(args, "online_inference_transport", "tcp_jsonl") or "tcp_jsonl").strip()
+        transform_arm_side = "both" if protocol_profile == "pi05_dual_arm_20d" else getattr(args, "online_inference_arm_side", "both")
         transformer = load_pose_transformer(
             enable_motion=enable_motion and not dry_run,
             transform_config_path=getattr(args, "online_inference_transform_config", None),
-            arm_side=getattr(args, "online_inference_arm_side", "both"),
+            arm_side=transform_arm_side,
         )
         config = OnlineInferenceConfig(
             arm_side=getattr(args, "online_inference_arm_side", "both"),
+            protocol_profile=protocol_profile,
+            task_prompt=getattr(args, "online_inference_prompt", ""),
             n_obs_steps=getattr(args, "online_inference_n_obs_steps", 2),
             camera_freq=getattr(args, "online_inference_camera_freq", 30.0),
             action_step_sec=getattr(args, "online_inference_action_step_sec", 0.10),
@@ -731,18 +748,34 @@ def create_teleop_input_provider(args, arm_ik=None) -> BaseTeleopInputProvider:
             enable_motion=enable_motion,
             dry_run=dry_run,
         )
-        transport = TcpJsonTransport.connect(
-            host=getattr(args, "online_inference_host", "127.0.0.1"),
-            port=getattr(args, "online_inference_port", 5555),
-            connect_timeout_sec=getattr(args, "online_inference_response_timeout_sec", 2.0),
-        )
+        if transport_kind in {"http", "http_json"}:
+            base_url = getattr(args, "online_inference_base_url", "")
+            if not base_url:
+                base_url = f"http://{getattr(args, 'online_inference_host', '127.0.0.1')}:{getattr(args, 'online_inference_port', 5555)}"
+            transport = HttpJsonInferenceTransport.connect(
+                base_url=base_url,
+                handshake_path=getattr(args, "online_inference_http_handshake_path", "/handshake"),
+                infer_path=getattr(args, "online_inference_http_infer_path", "/infer"),
+                timeout_sec=getattr(args, "online_inference_response_timeout_sec", 2.0),
+                handshake_payload=_online_inference_http_handshake_payload(protocol_profile),
+            )
+        elif transport_kind in {"tcp", "tcp_jsonl", "jsonl"}:
+            transport = TcpJsonTransport.connect(
+                host=getattr(args, "online_inference_host", "127.0.0.1"),
+                port=getattr(args, "online_inference_port", 5555),
+                connect_timeout_sec=getattr(args, "online_inference_response_timeout_sec", 2.0),
+            )
+        else:
+            raise ValueError(f"unsupported online_inference_transport: {transport_kind}")
         session = OnlineInferenceSession(
             config=config,
             transport=transport,
             pose_transformer=transformer,
         )
         logger_mp.info(
-            "Using online inference input provider: host=%s port=%s arm_side=%s enable_motion=%s dry_run=%s.",
+            "Using online inference input provider: transport=%s protocol_profile=%s host=%s port=%s arm_side=%s enable_motion=%s dry_run=%s.",
+            transport_kind,
+            config.protocol_profile,
             getattr(args, "online_inference_host", "127.0.0.1"),
             getattr(args, "online_inference_port", 5555),
             config.arm_side,
