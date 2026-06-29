@@ -176,6 +176,71 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertEqual(sample.motion_intent.kind, "joint_position")
         self.assertEqual(sample.motion_intent.arm_q.tolist(), [float(i + 20) for i in range(7)] + [float(i + 40) for i in range(7)])
 
+    def test_raw_fk_cmd_pose_source_uses_action_gripper_qpos(self):
+        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = pathlib.Path(tmp_dir)
+            _write_raw_episode(
+                task_root,
+                sample_overrides={
+                    0: {
+                        "states": {
+                            "left_arm": {"qpos": [float(i + 20) for i in range(7)]},
+                            "right_arm": {"qpos": [float(i + 40) for i in range(7)]},
+                            "left_ee": {"qpos": [4.1]},
+                            "right_ee": {"qpos": [4.2]},
+                        },
+                        "actions": {
+                            "left_arm": {
+                                "qpos": [float(i) for i in range(7)],
+                                "pose": {"matrix4x4": _pose_matrix(0.1, 0.2, 0.3).tolist()},
+                            },
+                            "right_arm": {
+                                "qpos": [float(i + 10) for i in range(7)],
+                                "pose": {"matrix4x4": _pose_matrix(0.4, 0.5, 0.6).tolist()},
+                            },
+                            "left_ee": {"qpos": [2.1]},
+                            "right_ee": {"qpos": [2.3]},
+                        },
+                    },
+                    1: {
+                        "states": {
+                            "left_arm": {"qpos": [float(i + 21) for i in range(7)]},
+                            "right_arm": {"qpos": [float(i + 41) for i in range(7)]},
+                            "left_ee": {"qpos": [4.3]},
+                            "right_ee": {"qpos": [4.4]},
+                        },
+                        "actions": {
+                            "left_arm": {
+                                "qpos": [float(i + 1) for i in range(7)],
+                                "pose": {"matrix4x4": _pose_matrix(0.2, 0.3, 0.4).tolist()},
+                            },
+                            "right_arm": {
+                                "qpos": [float(i + 11) for i in range(7)],
+                                "pose": {"matrix4x4": _pose_matrix(0.5, 0.6, 0.7).tolist()},
+                            },
+                            "left_ee": {"qpos": [2.2]},
+                            "right_ee": {"qpos": [2.4]},
+                        },
+                    }
+                },
+            )
+            args = SimpleNamespace(
+                input_provider="lerobot_offline",
+                offline_replay_dataset_root=str(task_root),
+                offline_replay_episode_index=1,
+                offline_replay_arm_source="fk_cmd_pose",
+                offline_replay_speed_scale=0.0,
+            )
+            provider = create_teleop_input_provider(args)
+            sample = provider.get_sample()
+
+        self.assertEqual(sample.motion_intent.kind, "pose")
+        self.assertEqual(sample.motion_intent.gripper_q.tolist(), [2.1, 2.3])
+        self.assertAlmostEqual(sample.tele_data.left_ctrl_triggerValue, 5.777777777777778)
+        self.assertAlmostEqual(sample.tele_data.right_ctrl_triggerValue, 5.851851851851852)
+
     def test_raw_episode_missing_qpos_raises(self):
         from teleop.utils.teleop_input_provider import create_teleop_input_provider
 

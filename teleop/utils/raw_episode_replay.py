@@ -23,6 +23,15 @@ ARM_SIZE = 14
 GRIPPER_SIZE = 2
 
 
+def raw_gripper_source_key(arm_source: str) -> str:
+    source = str(arm_source)
+    if source in {"action", "fk_cmd_pose"}:
+        return "actions"
+    if source == "state":
+        return "states"
+    raise ValueError(f"unsupported raw arm_source: {source}")
+
+
 def raw_episode_dir_path(dataset_root: str | Path, episode_index: int) -> Path:
     root = Path(dataset_root)
     if root.is_dir() and root.name.startswith("episode_") and (root / "data.json").is_file():
@@ -222,7 +231,7 @@ class RawEpisodeInputProvider:
             time.sleep(sleep_s)
 
     def _gripper_q(self, item: Mapping[str, Any], frame_index: int) -> np.ndarray:
-        source_key = "actions" if self.arm_source == "action" else "states"
+        source_key = raw_gripper_source_key(self.arm_source)
         left_q = _qpos_from_item(item, frame_index, source_key, "left_ee", 1)
         right_q = _qpos_from_item(item, frame_index, source_key, "right_ee", 1)
         return finite_vector([left_q[0], right_q[0]], GRIPPER_SIZE, f"frame {frame_index} gripper_q")
