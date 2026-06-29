@@ -16,7 +16,7 @@ from teleop.utils.online_inference import (
     RobotStateSample,
 )
 from teleop.utils.pose_transform import load_pose_transformer
-from teleop.utils.xr_input_types import TeleData
+from teleop.input.xr_input_types import TeleData
 
 
 logger_mp = logging_mp.getLogger(__name__)
@@ -123,7 +123,7 @@ def validate_lerobot_offline_episode(
     episode_index: int,
     arm_source: str,
 ) -> dict[str, Any]:
-    from teleop.utils.raw_episode_replay import raw_episode_exists, validate_raw_episode
+    from teleop.input.raw_episode_replay import raw_episode_exists, validate_raw_episode
 
     if raw_episode_exists(dataset_root, episode_index):
         motion_repr = "pose" if str(arm_source) == "fk_cmd_pose" else "qpos"
@@ -180,7 +180,7 @@ def validate_lerobot_offline_episode(
 
 
 def _load_xr_robotics_wrapper():
-    from teleop.utils.xr_robotics_wrapper import XRRoboticsWrapper
+    from teleop.input.xr_robotics_wrapper import XRRoboticsWrapper
 
     return XRRoboticsWrapper
 
@@ -732,7 +732,7 @@ def create_teleop_input_provider(args, arm_ik=None) -> BaseTeleopInputProvider:
             getattr(args, "offline_replay_episode_index"),
         )
         if validation.get("dataset_kind") == "raw_episode":
-            from teleop.utils.raw_episode_replay import RawEpisodeInputProvider
+            from teleop.input.raw_episode_replay import RawEpisodeInputProvider
 
             logger_mp.info(
                 "Detected raw episode replay input, episode_dir=%s arm_source=%s.",

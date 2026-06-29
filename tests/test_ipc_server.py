@@ -16,7 +16,7 @@ if "zmq" not in sys.modules:
         error=types.SimpleNamespace(ContextTerminated=RuntimeError),
     )
 
-from teleop.utils.ipc import IPC_Server
+from teleop.operator.ipc import IPC_Server
 
 
 class IPCServerMessageHandlingTest(unittest.TestCase):

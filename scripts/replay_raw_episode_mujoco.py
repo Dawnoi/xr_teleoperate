@@ -69,7 +69,7 @@ import mujoco as mj
 import mujoco.viewer as mjv
 import glfw
 
-from teleop.utils.g1d_mujoco_builder import prepare_g1d_mobile_scene
+from teleop.sim.g1d_mujoco_builder import prepare_g1d_mobile_scene
 
 
 def parse_args() -> argparse.Namespace:

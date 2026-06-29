@@ -18,7 +18,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teleop.utils.teleop_input_provider import validate_lerobot_offline_episode  # noqa: E402
+from teleop.input.teleop_input_provider import validate_lerobot_offline_episode  # noqa: E402
 
 
 @dataclass

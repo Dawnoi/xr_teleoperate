@@ -14,7 +14,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teleop.utils.gripper_state_ui import format_gripper_state_panel, render_gripper_state_panel_image
+from teleop.operator.gripper_state_ui import format_gripper_state_panel, render_gripper_state_panel_image
 
 SCRIPT_PATH = REPO_ROOT / "scripts" / "replay_raw_episode_real.py"
 SPEC = importlib.util.spec_from_file_location("replay_raw_episode_real", SCRIPT_PATH)

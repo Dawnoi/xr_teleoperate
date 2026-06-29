@@ -8,7 +8,7 @@ from typing import Any, Mapping
 import cv2
 import numpy as np
 
-from teleop.utils.teleop_input_provider import (
+from teleop.input.teleop_input_provider import (
     MotionIntent,
     TeleopInputSample,
     _build_offline_tele_data,

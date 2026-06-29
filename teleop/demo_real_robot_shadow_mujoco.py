@@ -69,7 +69,7 @@ from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorStates_
 
 from teleop.robot_control.robot_arm import G1_29_JointArmIndex, kTopicLowState
 from teleop.robot_control.robot_hand_unitree import kTopicGripperLeftState, kTopicGripperRightState
-from teleop.utils.g1d_mujoco_builder import prepare_g1d_mobile_scene
+from teleop.sim.g1d_mujoco_builder import prepare_g1d_mobile_scene
 
 
 def parse_args():

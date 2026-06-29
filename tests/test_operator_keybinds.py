@@ -6,7 +6,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teleop.utils.operator_keybinds import (
+from teleop.operator.keybinds import (
     resolve_operator_controller_buttons,
 )
 

@@ -1,6 +1,6 @@
 import logging_mp
 
-from teleop.utils.operator_keybinds import resolve_operator_controller_buttons
+from teleop.operator.keybinds import resolve_operator_controller_buttons
 
 
 logger_mp = logging_mp.getLogger(__name__)

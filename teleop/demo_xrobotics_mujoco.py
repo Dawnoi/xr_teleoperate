@@ -51,8 +51,8 @@ from teleop.utils.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,
     clamp_dual_wrist_poses_to_tapered_workspace,
 )
-from teleop.utils.g1d_mujoco_builder import prepare_g1d_mobile_scene
-from teleop.utils.xr_robotics_wrapper import XRRoboticsWrapper
+from teleop.sim.g1d_mujoco_builder import prepare_g1d_mobile_scene
+from teleop.input.xr_robotics_wrapper import XRRoboticsWrapper
 
 
 ARM_JOINT_NAMES = [

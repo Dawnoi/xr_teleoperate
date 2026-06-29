@@ -28,7 +28,7 @@ import mujoco as mj
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from teleop.utils.g1d_mujoco_builder import prepare_g1d_mobile_scene
+from teleop.sim.g1d_mujoco_builder import prepare_g1d_mobile_scene
 
 
 RGBA_DATASET = np.array([0.05, 0.55, 1.00, 1.0], dtype=np.float32)

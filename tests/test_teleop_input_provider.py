@@ -138,7 +138,7 @@ class FakeCameraSource:
 
 class TeleopInputProviderTest(unittest.TestCase):
     def test_raw_action_source_emits_joint_position_intent(self):
-        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+        from teleop.input.teleop_input_provider import create_teleop_input_provider
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = pathlib.Path(tmp_dir)
@@ -158,7 +158,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertEqual(sample.motion_intent.gripper_q.tolist(), [3.5, 4.5])
 
     def test_raw_state_source_emits_joint_position_intent(self):
-        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+        from teleop.input.teleop_input_provider import create_teleop_input_provider
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = pathlib.Path(tmp_dir)
@@ -177,7 +177,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertEqual(sample.motion_intent.arm_q.tolist(), [float(i + 20) for i in range(7)] + [float(i + 40) for i in range(7)])
 
     def test_raw_fk_cmd_pose_source_uses_action_gripper_qpos(self):
-        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+        from teleop.input.teleop_input_provider import create_teleop_input_provider
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = pathlib.Path(tmp_dir)
@@ -242,7 +242,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertAlmostEqual(sample.tele_data.right_ctrl_triggerValue, 5.851851851851852)
 
     def test_raw_episode_missing_qpos_raises(self):
-        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+        from teleop.input.teleop_input_provider import create_teleop_input_provider
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = pathlib.Path(tmp_dir)
@@ -270,7 +270,7 @@ class TeleopInputProviderTest(unittest.TestCase):
                 create_teleop_input_provider(args)
 
     def test_raw_episode_non_monotonic_timestamp_raises(self):
-        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+        from teleop.input.teleop_input_provider import create_teleop_input_provider
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             task_root = pathlib.Path(tmp_dir)
@@ -295,7 +295,7 @@ class TeleopInputProviderTest(unittest.TestCase):
                 create_teleop_input_provider(args)
 
     def test_lerobot_action_source_emits_joint_position_intent(self):
-        from teleop.utils.teleop_input_provider import LeRobotOfflineInputProvider
+        from teleop.input.teleop_input_provider import LeRobotOfflineInputProvider
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_root = pathlib.Path(tmp_dir)
@@ -310,7 +310,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertTrue(sample.tele_data.right_ctrl_squeeze)
 
     def test_lerobot_state_source_emits_joint_position_intent(self):
-        from teleop.utils.teleop_input_provider import LeRobotOfflineInputProvider
+        from teleop.input.teleop_input_provider import LeRobotOfflineInputProvider
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_root = pathlib.Path(tmp_dir)
@@ -322,7 +322,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertEqual(sample.motion_intent.arm_q.tolist(), [float(i + 20) for i in range(7)] + [float(i + 28) for i in range(7)])
 
     def test_lerobot_fk_cmd_pose_source_emits_pose_intent(self):
-        from teleop.utils.teleop_input_provider import LeRobotOfflineInputProvider
+        from teleop.input.teleop_input_provider import LeRobotOfflineInputProvider
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_root = pathlib.Path(tmp_dir)
@@ -335,14 +335,14 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertTrue(np.allclose(sample.motion_intent.right_wrist_pose[:3, 3], [0.4, 0.5, 0.6]))
 
     def test_gripper_q_maps_to_existing_dex1_trigger_value_range(self):
-        from teleop.utils.teleop_input_provider import dex1_q_to_trigger_value
+        from teleop.input.teleop_input_provider import dex1_q_to_trigger_value
 
         self.assertAlmostEqual(dex1_q_to_trigger_value(0.0), 5.0)
         self.assertAlmostEqual(dex1_q_to_trigger_value(2.7), 6.0)
         self.assertAlmostEqual(dex1_q_to_trigger_value(5.4), 7.0)
 
     def test_lerobot_provider_marks_done_after_final_frame(self):
-        from teleop.utils.teleop_input_provider import LeRobotOfflineInputProvider
+        from teleop.input.teleop_input_provider import LeRobotOfflineInputProvider
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_root = pathlib.Path(tmp_dir)
@@ -356,8 +356,8 @@ class TeleopInputProviderTest(unittest.TestCase):
             self.assertIsNone(provider.get_sample())
 
     def test_xr_provider_delegates_to_wrapped_xr_robotics_wrapper(self):
-        from teleop.utils.teleop_input_provider import XRTeleopInputProvider
-        from teleop.utils.xr_input_types import TeleData
+        from teleop.input.teleop_input_provider import XRTeleopInputProvider
+        from teleop.input.xr_input_types import TeleData
 
         tele_data = TeleData(head_pose=np.eye(4), left_wrist_pose=np.eye(4), right_wrist_pose=np.eye(4))
         wrapped = mock.Mock()
@@ -370,8 +370,8 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertEqual(sample.motion_intent.kind, "pose")
 
     def test_xr_provider_ignores_offline_only_kwargs(self):
-        from teleop.utils.teleop_input_provider import XRTeleopInputProvider
-        from teleop.utils.xr_input_types import TeleData
+        from teleop.input.teleop_input_provider import XRTeleopInputProvider
+        from teleop.input.xr_input_types import TeleData
 
         class StrictXRWrapper:
             def get_tele_data(self, current_left_robot_wrist_pose=None, current_right_robot_wrist_pose=None):
@@ -394,7 +394,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertTrue(np.allclose(wrapped.right_pose, np.eye(4)))
 
     def test_create_xr_provider_logs_provider_selection(self):
-        import teleop.utils.teleop_input_provider as input_provider_module
+        import teleop.input.teleop_input_provider as input_provider_module
 
         class FakeXRWrapper:
             def __init__(self, **kwargs):
@@ -408,7 +408,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         logger.info.assert_any_call("Using XR-Robotics as the teleop input provider.")
 
     def test_create_lerobot_provider_logs_provider_selection(self):
-        import teleop.utils.teleop_input_provider as input_provider_module
+        import teleop.input.teleop_input_provider as input_provider_module
 
         args = SimpleNamespace(
             input_provider="lerobot_offline",
@@ -434,7 +434,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         )
 
     def test_create_provider_rejects_lerobot_without_dataset(self):
-        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+        from teleop.input.teleop_input_provider import create_teleop_input_provider
 
         args = SimpleNamespace(input_provider="lerobot_offline", offline_replay_dataset_root="", offline_replay_episode_index=0)
         with self.assertRaises(ValueError):
@@ -442,7 +442,7 @@ class TeleopInputProviderTest(unittest.TestCase):
 
     def test_online_provider_left_arm_emits_pose_intent_and_dex1_qpos_trigger(self):
         from teleop.utils.online_inference import CameraSample, OnlineInferenceStep
-        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+        from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         current_left = _pose_matrix(1.0, 0.0, 0.0)
         current_right = _pose_matrix(2.0, 0.0, 0.0)
@@ -491,7 +491,7 @@ class TeleopInputProviderTest(unittest.TestCase):
 
     def test_online_provider_right_arm_holds_left_side(self):
         from teleop.utils.online_inference import OnlineInferenceStep
-        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+        from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         current_left = _pose_matrix(1.0, 0.0, 0.0)
         current_right = _pose_matrix(2.0, 0.0, 0.0)
@@ -528,7 +528,7 @@ class TeleopInputProviderTest(unittest.TestCase):
 
     def test_online_provider_both_arms_enabled(self):
         from teleop.utils.online_inference import OnlineInferenceStep
-        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+        from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         session = FakeOnlineSession(
             [
@@ -561,7 +561,7 @@ class TeleopInputProviderTest(unittest.TestCase):
 
     def test_online_provider_dry_run_status_does_not_enable_motion(self):
         from teleop.utils.online_inference import OnlineInferenceStep
-        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+        from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         current_left = _pose_matrix(1.0, 0.0, 0.0)
         current_right = _pose_matrix(2.0, 0.0, 0.0)
@@ -595,7 +595,7 @@ class TeleopInputProviderTest(unittest.TestCase):
 
     def test_online_provider_failed_session_returns_done(self):
         from teleop.utils.online_inference import OnlineInferenceStep
-        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+        from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         session = FakeOnlineSession(
             [
@@ -626,7 +626,7 @@ class TeleopInputProviderTest(unittest.TestCase):
 
     def test_online_provider_declares_non_empty_camera_sources_as_required(self):
         from teleop.utils.online_inference import OnlineInferenceStep
-        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+        from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         session = FakeOnlineSession(
             [
@@ -660,7 +660,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertEqual([sample.name for sample in camera_samples], ["head", "left_wrist"])
 
     def test_online_provider_rejects_unsupported_gripper_without_no_gripper(self):
-        from teleop.utils.teleop_input_provider import OnlineInferenceInputProvider
+        from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         with self.assertRaises(ValueError):
             OnlineInferenceInputProvider(
@@ -671,7 +671,7 @@ class TeleopInputProviderTest(unittest.TestCase):
             )
 
     def test_create_online_provider_requires_transform_config_for_real_motion_before_connecting(self):
-        import teleop.utils.teleop_input_provider as input_provider_module
+        import teleop.input.teleop_input_provider as input_provider_module
 
         args = SimpleNamespace(
             input_provider="online_inference",
@@ -699,7 +699,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         transport_cls.connect.assert_not_called()
 
     def test_create_online_provider_passes_chunk_step_mode(self):
-        import teleop.utils.teleop_input_provider as input_provider_module
+        import teleop.input.teleop_input_provider as input_provider_module
 
         args = SimpleNamespace(
             input_provider="online_inference",
@@ -727,7 +727,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertEqual(provider.session.config.chunk_step_mode, "per_tick")
 
     def test_create_online_provider_pi05_uses_http_transport_profile_and_prompt(self):
-        import teleop.utils.teleop_input_provider as input_provider_module
+        import teleop.input.teleop_input_provider as input_provider_module
 
         args = SimpleNamespace(
             input_provider="online_inference",

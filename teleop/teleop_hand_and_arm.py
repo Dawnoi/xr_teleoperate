@@ -35,9 +35,9 @@ from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmControl
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
 from teleop.utils.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
 from teleop.utils.g1d_agv_bridge import G1DAgvBridge
-from teleop.utils.ipc import IPC_Server
+from teleop.operator.ipc import IPC_Server
 from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
-from teleop.utils.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
+from teleop.input.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
 from teleop.utils.online_inference import online_inference_speed_limit_delta
 from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
 from teleop.utils.arm_workspace_safety import (
@@ -45,8 +45,8 @@ from teleop.utils.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_tapered_workspace,
 )
 from teleop.utils.local_camera import LocalCameraStream
-from teleop.utils.simple_latency_trace import SimpleLatencyTracker
-from teleop.utils.operator_runtime import OperatorRuntime
+from teleop.diagnostics.simple_latency_trace import SimpleLatencyTracker
+from teleop.operator.runtime import OperatorRuntime
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -884,7 +884,7 @@ if __name__ == '__main__':
         else:
             ChannelFactoryInitialize(0, networkInterface=args.network_interface)
 
-        # ipc communication mode. client usage: see utils/ipc.py
+        # ipc communication mode. client usage: see operator/ipc.py
         if args.ipc:
             ipc_server = IPC_Server(on_press=on_press,get_state=get_state)
             ipc_server.start()
@@ -1038,7 +1038,7 @@ if __name__ == '__main__':
         if args.sim:
             reset_pose_publisher = ChannelPublisher("rt/reset_pose/cmd", String_)
             reset_pose_publisher.Init()
-            from teleop.utils.sim_state_topic import start_sim_state_subscribe
+            from teleop.sim.sim_state_topic import start_sim_state_subscribe
             sim_state_subscriber = start_sim_state_subscribe()
 
         head_remote_camera = None

@@ -13,7 +13,7 @@ if str(REPO_ROOT) not in sys.path:
 
 class SimpleLatencyTraceTest(unittest.TestCase):
     def test_online_inference_timestamps_derive_response_latency_fields(self):
-        from teleop.utils.simple_latency_trace import SimpleLatencyTracker
+        from teleop.diagnostics.simple_latency_trace import SimpleLatencyTracker
 
         with tempfile.TemporaryDirectory() as tmpdir:
             trace_path = pathlib.Path(tmpdir) / "latency.jsonl"
@@ -61,7 +61,7 @@ class SimpleLatencyTraceTest(unittest.TestCase):
         self.assertEqual(record["online_chunk_size"], 2)
 
     def test_lowstate_thread_execute_marker_is_reported_separately(self):
-        from teleop.utils.simple_latency_trace import SimpleLatencyTracker
+        from teleop.diagnostics.simple_latency_trace import SimpleLatencyTracker
 
         with tempfile.TemporaryDirectory() as tmpdir:
             trace_path = pathlib.Path(tmpdir) / "latency.jsonl"
@@ -104,7 +104,7 @@ class SimpleLatencyTraceTest(unittest.TestCase):
         self.assertAlmostEqual(record["dq_peak_thread_trigger"], 0.0)
 
     def test_non_online_trace_does_not_emit_online_latency_values(self):
-        from teleop.utils.simple_latency_trace import SimpleLatencyTracker
+        from teleop.diagnostics.simple_latency_trace import SimpleLatencyTracker
 
         with tempfile.TemporaryDirectory() as tmpdir:
             trace_path = pathlib.Path(tmpdir) / "latency.jsonl"
