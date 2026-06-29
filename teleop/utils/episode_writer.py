@@ -235,6 +235,7 @@ class EpisodeWriter():
         self.image_size = image_size
 
         self.rerun_log = rerun_log
+        self.online_logger = None
         self.rerun_logger = None
         if self.rerun_log:
             logger_mp.info("==> Rerun live logging enabled; logger will be created per episode.\n")
