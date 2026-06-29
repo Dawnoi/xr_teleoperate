@@ -123,6 +123,16 @@ def validate_lerobot_offline_episode(
     episode_index: int,
     arm_source: str,
 ) -> dict[str, Any]:
+    from teleop.utils.raw_episode_replay import raw_episode_exists, validate_raw_episode
+
+    if raw_episode_exists(dataset_root, episode_index):
+        motion_repr = "pose" if str(arm_source) == "fk_cmd_pose" else "qpos"
+        validation = validate_raw_episode(dataset_root, episode_index, arm_source, motion_repr=motion_repr)
+        validation["dataset_kind"] = "raw_episode"
+        validation["required_columns"] = []
+        validation["timestamp_range"] = tuple(float(value) / 1e9 for value in validation["sample_monotonic_ns_range"])
+        return validation
+
     import pyarrow.parquet as pq
 
     parquet_path = episode_parquet_path(dataset_root, episode_index)
@@ -161,6 +171,7 @@ def validate_lerobot_offline_episode(
             finite_vector(value, POSE6_SIZE, f"observation.fk.cmd.right.gripper_flange[{row_index}]")
 
     return {
+        "dataset_kind": "lerobot_parquet",
         "parquet_path": parquet_path,
         "frame_count": frame_count,
         "timestamp_range": (float(timestamps[0]), float(timestamps[-1])),
@@ -708,16 +719,37 @@ def create_teleop_input_provider(args, arm_ik=None) -> BaseTeleopInputProvider:
             raise ValueError("offline_replay_dataset_root is required for lerobot_offline input provider")
         if not hasattr(args, "offline_replay_episode_index"):
             raise ValueError("offline_replay_episode_index is required for lerobot_offline input provider")
+        arm_source = getattr(args, "offline_replay_arm_source", "action")
+        validation = validate_lerobot_offline_episode(
+            dataset_root,
+            getattr(args, "offline_replay_episode_index"),
+            arm_source,
+        )
         logger_mp.info(
             "Using offline teleop input provider (%s), dataset_root=%s, episode_index=%d.",
             input_provider,
             dataset_root,
             getattr(args, "offline_replay_episode_index"),
         )
+        if validation.get("dataset_kind") == "raw_episode":
+            from teleop.utils.raw_episode_replay import RawEpisodeInputProvider
+
+            logger_mp.info(
+                "Detected raw episode replay input, episode_dir=%s arm_source=%s.",
+                validation.get("episode_dir"),
+                arm_source,
+            )
+            return RawEpisodeInputProvider(
+                dataset_root=dataset_root,
+                episode_index=getattr(args, "offline_replay_episode_index"),
+                arm_source=arm_source,
+                speed_scale=getattr(args, "offline_replay_speed_scale", 1.0),
+                motion_repr="pose" if str(arm_source) == "fk_cmd_pose" else "qpos",
+            )
         return LeRobotOfflineInputProvider(
             dataset_root=dataset_root,
             episode_index=getattr(args, "offline_replay_episode_index"),
-            arm_source=getattr(args, "offline_replay_arm_source", "action"),
+            arm_source=arm_source,
             speed_scale=getattr(args, "offline_replay_speed_scale", 1.0),
             arm_ik=arm_ik,
         )

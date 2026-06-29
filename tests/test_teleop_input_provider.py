@@ -1,4 +1,5 @@
 import pathlib
+import json
 import sys
 import tempfile
 import unittest
@@ -54,6 +55,58 @@ def _pose_matrix(x: float, y: float, z: float) -> np.ndarray:
     return pose
 
 
+def _write_raw_episode(task_root: pathlib.Path, sample_overrides=None):
+    episode_dir = task_root / "episode_0001"
+    (episode_dir / "colors" / "head").mkdir(parents=True, exist_ok=True)
+    (episode_dir / "colors" / "wrist_left").mkdir(parents=True, exist_ok=True)
+    (episode_dir / "colors" / "wrist_right").mkdir(parents=True, exist_ok=True)
+
+    image = np.full((8, 10, 3), 32, dtype=np.uint8)
+    for idx in range(2):
+        for camera_name in ("head", "wrist_left", "wrist_right"):
+            camera_dir = episode_dir / "colors" / camera_name
+            file_name = f"{idx:06d}_{camera_name}.jpg"
+            image_path = camera_dir / file_name
+            ok = __import__("cv2").imwrite(str(image_path), image)
+            if not ok:
+                raise RuntimeError(f"failed to write test image: {image_path}")
+
+    samples = []
+    for idx in range(2):
+        sample = {
+            "idx": idx,
+            "colors": {
+                "head": f"colors/head/{idx:06d}_head.jpg",
+                "left_wrist": f"colors/wrist_left/{idx:06d}_wrist_left.jpg",
+                "right_wrist": f"colors/wrist_right/{idx:06d}_wrist_right.jpg",
+            },
+            "states": {
+                "left_arm": {"qpos": [float(idx + i + 20) for i in range(7)]},
+                "right_arm": {"qpos": [float(idx + i + 40) for i in range(7)]},
+                "left_ee": {"qpos": [float(idx + 1.5)]},
+                "right_ee": {"qpos": [float(idx + 2.5)]},
+            },
+            "actions": {
+                "left_arm": {"qpos": [float(idx + i) for i in range(7)]},
+                "right_arm": {"qpos": [float(idx + i + 10) for i in range(7)]},
+                "left_ee": {"qpos": [float(idx + 3.5)]},
+                "right_ee": {"qpos": [float(idx + 4.5)]},
+            },
+            "timestamps": {
+                "sample_monotonic_ns": 1_000_000_000 + idx * 33_333_333,
+            },
+        }
+        if sample_overrides and idx in sample_overrides:
+            override = sample_overrides[idx]
+            for key, value in override.items():
+                sample[key] = value
+        samples.append(sample)
+
+    payload = {"info": {}, "text": {}, "data": samples}
+    (episode_dir / "data.json").write_text(json.dumps(payload), encoding="utf-8")
+    return episode_dir
+
+
 class FakeOnlineSession:
     def __init__(self, steps):
         self.steps = list(steps)
@@ -84,6 +137,98 @@ class FakeCameraSource:
 
 
 class TeleopInputProviderTest(unittest.TestCase):
+    def test_raw_action_source_emits_joint_position_intent(self):
+        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = pathlib.Path(tmp_dir)
+            _write_raw_episode(task_root)
+            args = SimpleNamespace(
+                input_provider="lerobot_offline",
+                offline_replay_dataset_root=str(task_root),
+                offline_replay_episode_index=1,
+                offline_replay_arm_source="action",
+                offline_replay_speed_scale=0.0,
+            )
+            provider = create_teleop_input_provider(args)
+            sample = provider.get_sample()
+
+        self.assertEqual(sample.motion_intent.kind, "joint_position")
+        self.assertEqual(sample.motion_intent.arm_q.tolist(), [float(i) for i in range(7)] + [float(i + 10) for i in range(7)])
+        self.assertEqual(sample.motion_intent.gripper_q.tolist(), [3.5, 4.5])
+
+    def test_raw_state_source_emits_joint_position_intent(self):
+        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = pathlib.Path(tmp_dir)
+            _write_raw_episode(task_root)
+            args = SimpleNamespace(
+                input_provider="lerobot_offline",
+                offline_replay_dataset_root=str(task_root),
+                offline_replay_episode_index=1,
+                offline_replay_arm_source="state",
+                offline_replay_speed_scale=0.0,
+            )
+            provider = create_teleop_input_provider(args)
+            sample = provider.get_sample()
+
+        self.assertEqual(sample.motion_intent.kind, "joint_position")
+        self.assertEqual(sample.motion_intent.arm_q.tolist(), [float(i + 20) for i in range(7)] + [float(i + 40) for i in range(7)])
+
+    def test_raw_episode_missing_qpos_raises(self):
+        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = pathlib.Path(tmp_dir)
+            _write_raw_episode(
+                task_root,
+                sample_overrides={
+                    0: {
+                        "actions": {
+                            "left_arm": {},
+                            "right_arm": {"qpos": [float(i + 10) for i in range(7)]},
+                            "left_ee": {"qpos": [3.5]},
+                            "right_ee": {"qpos": [4.5]},
+                        }
+                    }
+                },
+            )
+            args = SimpleNamespace(
+                input_provider="lerobot_offline",
+                offline_replay_dataset_root=str(task_root),
+                offline_replay_episode_index=1,
+                offline_replay_arm_source="action",
+                offline_replay_speed_scale=0.0,
+            )
+            with self.assertRaises(KeyError):
+                create_teleop_input_provider(args)
+
+    def test_raw_episode_non_monotonic_timestamp_raises(self):
+        from teleop.utils.teleop_input_provider import create_teleop_input_provider
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            task_root = pathlib.Path(tmp_dir)
+            _write_raw_episode(
+                task_root,
+                sample_overrides={
+                    1: {
+                        "timestamps": {
+                            "sample_monotonic_ns": 1_000_000_000,
+                        }
+                    }
+                },
+            )
+            args = SimpleNamespace(
+                input_provider="lerobot_offline",
+                offline_replay_dataset_root=str(task_root),
+                offline_replay_episode_index=1,
+                offline_replay_arm_source="action",
+                offline_replay_speed_scale=0.0,
+            )
+            with self.assertRaises(ValueError):
+                create_teleop_input_provider(args)
+
     def test_lerobot_action_source_emits_joint_position_intent(self):
         from teleop.utils.teleop_input_provider import LeRobotOfflineInputProvider
 
@@ -207,9 +352,14 @@ class TeleopInputProviderTest(unittest.TestCase):
             offline_replay_arm_source="action",
             offline_replay_speed_scale=0.5,
         )
-        with mock.patch.object(input_provider_module, "LeRobotOfflineInputProvider", return_value=mock.Mock()):
-            with mock.patch.object(input_provider_module, "logger_mp", create=True) as logger:
-                input_provider_module.create_teleop_input_provider(args)
+        with mock.patch.object(
+            input_provider_module,
+            "validate_lerobot_offline_episode",
+            return_value={"dataset_kind": "lerobot_parquet"},
+        ):
+            with mock.patch.object(input_provider_module, "LeRobotOfflineInputProvider", return_value=mock.Mock()):
+                with mock.patch.object(input_provider_module, "logger_mp", create=True) as logger:
+                    input_provider_module.create_teleop_input_provider(args)
 
         logger.info.assert_any_call(
             "Using offline teleop input provider (%s), dataset_root=%s, episode_index=%d.",
