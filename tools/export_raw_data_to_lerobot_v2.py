@@ -46,6 +46,15 @@ STATE_ACTION_QPOS = (
 )
 
 
+def parse_bool_flag(value: Any, label: str) -> bool:
+    text = str(value).strip().lower()
+    if text in ("1", "true", "yes", "y", "on"):
+        return True
+    if text in ("0", "false", "no", "n", "off"):
+        return False
+    raise ValueError(f"{label} must be one of 0/1/true/false/yes/no/on/off, got {value!r}")
+
+
 def finite_vector(values: Any, expected_len: int, label: str) -> np.ndarray:
     arr = np.asarray(values, dtype=float).reshape(-1)
     if arr.shape[0] != int(expected_len):
@@ -110,6 +119,26 @@ def read_color_image(path: Path, label: str) -> np.ndarray:
     if image.ndim != 3 or image.shape[2] != 3:
         raise ValueError(f"{label} image must decode to HxWx3, got shape={image.shape}")
     return np.ascontiguousarray(image)
+
+
+def read_color_images_for_frame(item: Mapping[str, Any], episode_dir: Path, frame_index: int) -> Dict[str, np.ndarray]:
+    colors = item.get("colors")
+    if not isinstance(colors, Mapping):
+        raise KeyError(f"frame {frame_index} missing colors")
+
+    images: Dict[str, np.ndarray] = {}
+    for slot in CAMERA_SLOTS:
+        raw_key, image_path = pick_color_path(colors, episode_dir, slot, frame_index)
+        image = read_color_image(image_path, f"frame {frame_index} colors.{raw_key}")
+        if slot == "cam0":
+            images["head"] = image
+        elif slot == "cam1":
+            images["left_wrist"] = image
+        elif slot == "cam2":
+            images["right_wrist"] = image
+        else:
+            raise KeyError(f"unsupported camera slot: {slot}")
+    return images
 
 
 def pick_color_path(colors: Mapping[str, Any], episode_dir: Path, slot: str, frame_index: int) -> Tuple[str, Path]:
@@ -213,12 +242,28 @@ def write_jsonl_atomic(path: Path, rows: Sequence[Mapping[str, Any]]) -> None:
 
 
 def preprocess_episode(episode_dir: Path, raw_items: Sequence[Mapping[str, Any]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    return preprocess_episode_with_progress(
+        episode_dir,
+        raw_items,
+        progress_label="",
+        frame_progress_every=0,
+    )
+
+
+def preprocess_episode_with_progress(
+    episode_dir: Path,
+    raw_items: Sequence[Mapping[str, Any]],
+    progress_label: str,
+    frame_progress_every: int,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     prepared_items: List[Dict[str, Any]] = []
     shapes_by_slot: Dict[str, Tuple[int, int, int]] = {}
     previous_sample_ns = None
     complete_pose_count = 0
+    frame_count = len(raw_items)
 
     for frame_index, item in enumerate(raw_items):
+        frame_number = frame_index + 1
         validate_qpos(item, frame_index)
         sample_ns = sample_monotonic_ns(item, frame_index)
         if previous_sample_ns is not None and sample_ns <= previous_sample_ns:
@@ -264,6 +309,9 @@ def preprocess_episode(episode_dir: Path, raw_items: Sequence[Mapping[str, Any]]
             }
         )
 
+        if progress_label and should_report_frame(frame_number, frame_count, frame_progress_every):
+            print_progress(f"{progress_label} preprocess frame {frame_number}/{frame_count}")
+
     return prepared_items, {
         "frame_count": len(prepared_items),
         "camera_shapes": {slot: list(shape) for slot, shape in shapes_by_slot.items()},
@@ -272,11 +320,43 @@ def preprocess_episode(episode_dir: Path, raw_items: Sequence[Mapping[str, Any]]
 
 
 def validate_raw_episode(episode_dir: Path, raw_items: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    return validate_raw_episode_with_progress(
+        episode_dir,
+        raw_items,
+        progress_label="",
+        frame_progress_every=0,
+        decode_images=True,
+    )
+
+
+def print_progress(message: str) -> None:
+    print(f"[EXPORT_PROGRESS] {message}", flush=True)
+
+
+def should_report_frame(frame_number: int, frame_count: int, frame_progress_every: int) -> bool:
+    if frame_count <= 0:
+        return False
+    if frame_number == frame_count:
+        return True
+    if frame_progress_every <= 0:
+        return False
+    return frame_number % frame_progress_every == 0
+
+
+def validate_raw_episode_with_progress(
+    episode_dir: Path,
+    raw_items: Sequence[Mapping[str, Any]],
+    progress_label: str,
+    frame_progress_every: int,
+    decode_images: bool = False,
+) -> Dict[str, Any]:
     shapes_by_slot: Dict[str, Tuple[int, int, int]] = {}
     previous_sample_ns = None
     complete_pose_count = 0
+    frame_count = len(raw_items)
 
     for frame_index, item in enumerate(raw_items):
+        frame_number = frame_index + 1
         validate_qpos(item, frame_index)
         sample_ns = sample_monotonic_ns(item, frame_index)
         if previous_sample_ns is not None and sample_ns <= previous_sample_ns:
@@ -291,18 +371,22 @@ def validate_raw_episode(episode_dir: Path, raw_items: Sequence[Mapping[str, Any
             raise KeyError(f"frame {frame_index} missing colors")
         for slot in CAMERA_SLOTS:
             raw_key, image_path = pick_color_path(colors, episode_dir, slot, frame_index)
-            image = read_color_image(image_path, f"frame {frame_index} colors.{raw_key}")
-            shape = (int(image.shape[0]), int(image.shape[1]), int(image.shape[2]))
-            if slot not in shapes_by_slot:
-                shapes_by_slot[slot] = shape
-            elif shapes_by_slot[slot] != shape:
-                raise ValueError(
-                    f"camera shape mismatch for {slot} in {episode_dir.name}: "
-                    f"expected {shapes_by_slot[slot]}, got {shape} at frame {frame_index}"
-                )
+            if decode_images:
+                image = read_color_image(image_path, f"frame {frame_index} colors.{raw_key}")
+                shape = (int(image.shape[0]), int(image.shape[1]), int(image.shape[2]))
+                if slot not in shapes_by_slot:
+                    shapes_by_slot[slot] = shape
+                elif shapes_by_slot[slot] != shape:
+                    raise ValueError(
+                        f"camera shape mismatch for {slot} in {episode_dir.name}: "
+                        f"expected {shapes_by_slot[slot]}, got {shape} at frame {frame_index}"
+                    )
 
         if pose_row_if_complete(item, 0, frame_index, 0.0, sample_ns) is not None:
             complete_pose_count += 1
+
+        if progress_label and should_report_frame(frame_number, frame_count, frame_progress_every):
+            print_progress(f"{progress_label} validate frame {frame_number}/{frame_count}")
 
     return {
         "frame_count": len(raw_items),
@@ -337,6 +421,22 @@ def count_jsonl_rows(path: Path) -> int:
 
 
 def verify_exported_episode(output_root: Path, episode_index: int, expected_rows: int, pose_sidecar: bool) -> Dict[str, Any]:
+    return verify_exported_episode_with_options(
+        output_root,
+        episode_index,
+        expected_rows,
+        pose_sidecar,
+        verify_video_frames=True,
+    )
+
+
+def verify_exported_episode_with_options(
+    output_root: Path,
+    episode_index: int,
+    expected_rows: int,
+    pose_sidecar: bool,
+    verify_video_frames: bool,
+) -> Dict[str, Any]:
     parquet_path = output_root / "data" / CHUNK_NAME / f"episode_{episode_index:06d}.parquet"
     if not parquet_path.is_file():
         raise FileNotFoundError(f"exported parquet not found: {parquet_path}")
@@ -354,9 +454,16 @@ def verify_exported_episode(output_root: Path, episode_index: int, expected_rows
     video_counts: Dict[str, int] = {}
     for slot in CAMERA_SLOTS:
         video_path = output_root / "videos" / CHUNK_NAME / f"observation.images.{slot}" / f"episode_{episode_index:06d}.mp4"
-        video_counts[slot] = count_video_frames(video_path)
-        if video_counts[slot] != int(expected_rows):
-            raise RuntimeError(f"{slot} video frame count mismatch: {video_counts[slot]} != {expected_rows}")
+        if not video_path.is_file():
+            raise FileNotFoundError(f"exported video not found: {video_path}")
+        if video_path.stat().st_size <= 0:
+            raise RuntimeError(f"exported video is empty: {video_path}")
+        if verify_video_frames:
+            video_counts[slot] = count_video_frames(video_path)
+            if video_counts[slot] != int(expected_rows):
+                raise RuntimeError(f"{slot} video frame count mismatch: {video_counts[slot]} != {expected_rows}")
+        else:
+            video_counts[slot] = -1
 
     alignment_path = output_root / "meta" / "alignment" / f"episode_{episode_index:06d}.jsonl"
     alignment_rows = count_jsonl_rows(alignment_path)
@@ -372,6 +479,7 @@ def verify_exported_episode(output_root: Path, episode_index: int, expected_rows
 
     return {
         "parquet_rows": row_count,
+        "video_frame_verification": bool(verify_video_frames),
         "video_frames": video_counts,
         "alignment_rows": alignment_rows,
         "raw_pose_rows": pose_rows,
@@ -415,27 +523,41 @@ def export_prepared_episode(
     episode_dir: Path,
     prepared_items: Sequence[Mapping[str, Any]],
     preprocess_meta: Mapping[str, Any],
+    progress_label: str = "",
+    frame_progress_every: int = 0,
 ) -> Dict[str, Any]:
     if not writer.create_episode():
         raise RuntimeError("LeRobotV2Writer refused to create a new episode")
     episode_index = int(writer._current_episode_index)
-    for prepared in prepared_items:
+    frame_count = len(prepared_items)
+    for frame_index, prepared in enumerate(prepared_items):
         writer.add_item(
             colors=prepared["colors"],
             states=prepared["states"],
             actions=prepared["actions"],
             timestamps=prepared["timestamps"],
         )
+        frame_number = frame_index + 1
+        if progress_label and should_report_frame(frame_number, frame_count, frame_progress_every):
+            print_progress(f"{progress_label} queue frame {frame_number}/{frame_count}")
+    if progress_label:
+        print_progress(f"{progress_label} waiting writer queue")
     writer._item_queue.join()
+    if progress_label:
+        print_progress(f"{progress_label} saving episode_{episode_index:06d}")
     writer.save_episode()
     wait_for_writer(writer)
 
+    if progress_label:
+        print_progress(f"{progress_label} writing pose sidecar")
     pose_sidecar, pose_missing_count, pose_skip_reason = write_pose_sidecar_if_complete(
         output_root,
         episode_index,
         prepared_items,
         int(preprocess_meta["complete_pose_count"]),
     )
+    if progress_label:
+        print_progress(f"{progress_label} verifying episode_{episode_index:06d}")
     verification = verify_exported_episode(output_root, episode_index, len(prepared_items), pose_sidecar)
     return {
         "source_episode": episode_dir.name,
@@ -445,6 +567,106 @@ def export_prepared_episode(
         "pose_sidecar": pose_sidecar,
         "pose_missing_frame_count": int(pose_missing_count),
         "pose_skip_reason": pose_skip_reason,
+        "verification": verification,
+    }
+
+
+def export_raw_episode(
+    writer: LeRobotV2Writer,
+    output_root: Path,
+    episode_dir: Path,
+    raw_items: Sequence[Mapping[str, Any]],
+    episode_meta: Mapping[str, Any],
+    progress_label: str = "",
+    frame_progress_every: int = 0,
+    verify_export: bool = True,
+    verify_video_frames: bool = False,
+) -> Dict[str, Any]:
+    if not writer.create_episode():
+        raise RuntimeError("LeRobotV2Writer refused to create a new episode")
+    episode_index = int(writer._current_episode_index)
+    frame_count = len(raw_items)
+    first_sample_ns = int(sample_monotonic_ns(raw_items[0], 0))
+    pose_rows: List[Dict[str, Any]] = []
+    shapes_by_slot: Dict[str, Tuple[int, int, int]] = {}
+
+    for frame_index, item in enumerate(raw_items):
+        frame_number = frame_index + 1
+        images = read_color_images_for_frame(item, episode_dir, frame_index)
+        for raw_name, image in images.items():
+            slot = {
+                "head": "cam0",
+                "left_wrist": "cam1",
+                "right_wrist": "cam2",
+            }[raw_name]
+            shape = (int(image.shape[0]), int(image.shape[1]), int(image.shape[2]))
+            if slot not in shapes_by_slot:
+                shapes_by_slot[slot] = shape
+            elif shapes_by_slot[slot] != shape:
+                raise ValueError(
+                    f"camera shape mismatch for {slot} in {episode_dir.name}: "
+                    f"expected {shapes_by_slot[slot]}, got {shape} at frame {frame_index}"
+                )
+
+        sample_ns = int(sample_monotonic_ns(item, frame_index))
+        timestamp_s = float(sample_ns - first_sample_ns) / 1e9
+        pose_row = pose_row_if_complete(item, episode_index, frame_index, timestamp_s, sample_ns)
+        if pose_row is not None:
+            pose_rows.append(pose_row)
+
+        writer.add_item(
+            colors=images,
+            states=item["states"],
+            actions=item["actions"],
+            timestamps=item["timestamps"],
+        )
+        if progress_label and should_report_frame(frame_number, frame_count, frame_progress_every):
+            print_progress(f"{progress_label} decode/write frame {frame_number}/{frame_count}")
+
+    if progress_label:
+        print_progress(f"{progress_label} waiting writer queue")
+    writer._item_queue.join()
+    if progress_label:
+        print_progress(f"{progress_label} saving episode_{episode_index:06d}")
+    writer.save_episode()
+    wait_for_writer(writer)
+
+    pose_missing_count = int(frame_count - len(pose_rows))
+    pose_sidecar = pose_missing_count == 0
+    pose_skip_reason = "" if pose_sidecar else "raw pose is incomplete for this episode"
+    if pose_sidecar:
+        if progress_label:
+            print_progress(f"{progress_label} writing pose sidecar")
+        pose_path = output_root / "extras" / "raw_pose" / CHUNK_NAME / f"episode_{episode_index:06d}.jsonl"
+        write_jsonl_atomic(pose_path, pose_rows)
+
+    verification: Dict[str, Any] = {
+        "enabled": bool(verify_export),
+        "video_frame_verification": bool(verify_video_frames),
+    }
+    if verify_export:
+        if progress_label:
+            print_progress(f"{progress_label} verifying episode_{episode_index:06d}")
+        verification = verify_exported_episode_with_options(
+            output_root,
+            episode_index,
+            frame_count,
+            pose_sidecar,
+            verify_video_frames=verify_video_frames,
+        )
+
+    return {
+        "source_episode": episode_dir.name,
+        "episode_index": episode_index,
+        "frame_count": frame_count,
+        "camera_shapes": {slot: list(shape) for slot, shape in shapes_by_slot.items()},
+        "pose_sidecar": pose_sidecar,
+        "pose_missing_frame_count": int(pose_missing_count),
+        "pose_skip_reason": pose_skip_reason,
+        "precheck": {
+            "complete_pose_count": int(episode_meta["complete_pose_count"]),
+            "image_decode_prevalidated": bool(episode_meta.get("image_decode_prevalidated", False)),
+        },
         "verification": verification,
     }
 
@@ -465,6 +687,11 @@ def export_raw_task_dir(
     task: str,
     fps: float,
     overwrite: bool = False,
+    progress_every: int = 1,
+    frame_progress_every: int = 100,
+    strict_image_validate: bool = False,
+    verify_export: bool = True,
+    verify_video_frames: bool = False,
 ) -> Dict[str, Any]:
     input_task_dir = Path(input_task_dir).resolve()
     output_root = Path(output_root).resolve()
@@ -474,16 +701,45 @@ def export_raw_task_dir(
     frequency = float(fps)
     if not np.isfinite(frequency) or frequency <= 0.0:
         raise ValueError("fps must be a positive finite number")
+    progress_every = int(progress_every)
+    frame_progress_every = int(frame_progress_every)
+    if progress_every < 0:
+        raise ValueError("progress_every must be non-negative")
+    if frame_progress_every < 0:
+        raise ValueError("frame_progress_every must be non-negative")
 
     episode_dirs = list_raw_episode_dirs(input_task_dir)
+    print_progress(f"found {len(episode_dirs)} episodes under {input_task_dir}")
     raw_episode_plan = []
-    for episode_dir in episode_dirs:
+    for episode_number, episode_dir in enumerate(episode_dirs, start=1):
+        label = f"[{episode_number}/{len(episode_dirs)}] {episode_dir.name}"
+        report_episode = progress_every > 0 and (
+            episode_number == 1
+            or episode_number == len(episode_dirs)
+            or episode_number % progress_every == 0
+        )
+        if report_episode:
+            print_progress(f"{label} loading data.json")
         raw_items = load_raw_episode_data(episode_dir)
-        validate_raw_episode(episode_dir, raw_items)
-        raw_episode_plan.append((episode_dir, raw_items))
+        if report_episode:
+            mode = "strict image validate" if strict_image_validate else "light precheck"
+            print_progress(f"{label} {mode} {len(raw_items)} frames")
+        episode_meta = validate_raw_episode_with_progress(
+            episode_dir,
+            raw_items,
+            progress_label=label if report_episode else "",
+            frame_progress_every=frame_progress_every,
+            decode_images=bool(strict_image_validate),
+        )
+        episode_meta["image_decode_prevalidated"] = bool(strict_image_validate)
+        raw_episode_plan.append((episode_dir, raw_items, episode_meta))
+        if report_episode:
+            print_progress(f"{label} precheck done")
 
+    print_progress(f"preparing output root {output_root}")
     prepare_output_root(input_task_dir, output_root, overwrite)
 
+    print_progress("initializing LeRobot writer")
     arm_ik = create_arm_ik()
     writer = LeRobotV2Writer(
         task_dir=str(output_root),
@@ -491,14 +747,34 @@ def export_raw_task_dir(
         task_goal=task_text,
         frequency=frequency,
         rerun_log=False,
+        verify_encoded_video=bool(verify_video_frames),
     )
 
     episode_summaries: List[Dict[str, Any]] = []
-    for episode_dir, raw_items in raw_episode_plan:
-        prepared_items, preprocess_meta = preprocess_episode(episode_dir, raw_items)
-        episode_summaries.append(
-            export_prepared_episode(writer, output_root, episode_dir, prepared_items, preprocess_meta)
+    for episode_number, (episode_dir, raw_items, episode_meta) in enumerate(raw_episode_plan, start=1):
+        label = f"[{episode_number}/{len(raw_episode_plan)}] {episode_dir.name}"
+        report_episode = progress_every > 0 and (
+            episode_number == 1
+            or episode_number == len(raw_episode_plan)
+            or episode_number % progress_every == 0
         )
+        if report_episode:
+            print_progress(f"{label} exporting {len(raw_items)} frames")
+        episode_summaries.append(
+            export_raw_episode(
+                writer,
+                output_root,
+                episode_dir,
+                raw_items,
+                episode_meta,
+                progress_label=label if report_episode else "",
+                frame_progress_every=frame_progress_every,
+                verify_export=bool(verify_export),
+                verify_video_frames=bool(verify_video_frames),
+            )
+        )
+        if report_episode:
+            print_progress(f"{label} export done")
     writer.close()
 
     summary = {
@@ -506,6 +782,9 @@ def export_raw_task_dir(
         "output_root": str(output_root),
         "task": task_text,
         "fps": frequency,
+        "strict_image_validate": bool(strict_image_validate),
+        "verify_export": bool(verify_export),
+        "verify_video_frames": bool(verify_video_frames),
         "episodes_total": len(episode_dirs),
         "episodes_exported": len(episode_summaries),
         "frames_total": int(sum(item["frame_count"] for item in episode_summaries)),
@@ -524,6 +803,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--task", required=True, help="Single task prompt written to LeRobot meta/tasks.jsonl.")
     parser.add_argument("--fps", required=True, type=float, help="Nominal LeRobot video/dataset FPS.")
     parser.add_argument("--overwrite", action="store_true", help="Replace a non-empty output root.")
+    parser.add_argument(
+        "--progress-every",
+        type=int,
+        default=1,
+        help="Print episode-level progress every N episodes. Use 0 to disable progress lines.",
+    )
+    parser.add_argument(
+        "--frame-progress-every",
+        type=int,
+        default=100,
+        help="Print frame-level progress every N frames inside reported episodes. Use 0 to print only episode boundaries.",
+    )
+    parser.add_argument(
+        "--strict-image-validate",
+        default="0",
+        help="Decode every source image during precheck before export. Default 0; images are otherwise decoded once during video writing.",
+    )
+    parser.add_argument(
+        "--verify-export",
+        default="1",
+        help="Verify parquet/alignment/video files after each episode. Default 1.",
+    )
+    parser.add_argument(
+        "--verify-video-frames",
+        default="0",
+        help="Decode exported mp4 files to count frames after writing. Default 0.",
+    )
     return parser
 
 
@@ -535,6 +841,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         task=args.task,
         fps=args.fps,
         overwrite=args.overwrite,
+        progress_every=args.progress_every,
+        frame_progress_every=args.frame_progress_every,
+        strict_image_validate=parse_bool_flag(args.strict_image_validate, "--strict-image-validate"),
+        verify_export=parse_bool_flag(args.verify_export, "--verify-export"),
+        verify_video_frames=parse_bool_flag(args.verify_video_frames, "--verify-video-frames"),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

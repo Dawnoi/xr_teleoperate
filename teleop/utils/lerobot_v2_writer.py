@@ -648,11 +648,13 @@ class LeRobotV2Writer:
         frequency: float = 30.0,
         image_size: Optional[List[int]] = None,
         rerun_log: bool = False,
+        verify_encoded_video: bool = True,
     ):
         self.dataset_root = os.path.abspath(task_dir)
         self.frequency = float(frequency)
         self.image_size = image_size
         self.rerun_log = rerun_log
+        self.verify_encoded_video = bool(verify_encoded_video)
         self.task_goal = _normalize_text(task_goal, fallback=_normalize_text(task_desc, fallback=_normalize_text(task_steps, fallback="unnamed task")))
         self.task_desc = _normalize_text(task_desc)
         self.task_steps = _normalize_text(task_steps)
@@ -1576,26 +1578,29 @@ class LeRobotV2Writer:
 
             video_stats: Dict[str, Dict[str, Any]] = {}
             for slot in CAMERA_SLOTS:
-                capture = cv2.VideoCapture(video_tmp_paths[slot])
-                if not capture.isOpened():
-                    raise RuntimeError(f"failed to open encoded video for validation: {video_tmp_paths[slot]}")
                 decoded_count = 0
                 decoded_shape: Optional[Tuple[int, int, int]] = None
-                while True:
-                    ok, frame = capture.read()
-                    if not ok or frame is None:
-                        break
-                    decoded_count += 1
-                    decoded_shape = (int(frame.shape[0]), int(frame.shape[1]), int(frame.shape[2]) if frame.ndim == 3 else 1)
-                capture.release()
-                if decoded_count != len(samples):
-                    raise RuntimeError(
-                        f"decoded frame count mismatch for {slot}: {decoded_count} != {len(samples)}"
-                    )
+                if self.verify_encoded_video:
+                    capture = cv2.VideoCapture(video_tmp_paths[slot])
+                    if not capture.isOpened():
+                        raise RuntimeError(f"failed to open encoded video for validation: {video_tmp_paths[slot]}")
+                    while True:
+                        ok, frame = capture.read()
+                        if not ok or frame is None:
+                            break
+                        decoded_count += 1
+                        decoded_shape = (int(frame.shape[0]), int(frame.shape[1]), int(frame.shape[2]) if frame.ndim == 3 else 1)
+                    capture.release()
+                    if decoded_count != len(samples):
+                        raise RuntimeError(
+                            f"decoded frame count mismatch for {slot}: {decoded_count} != {len(samples)}"
+                        )
                 video_stats[slot] = {
                     "path": _dataset_relpath(video_final_paths[slot], self.dataset_root),
                     "expected_frames": len(samples),
-                    "decoded_frames": decoded_count,
+                    "streamed_frames": int(self._current_video_frame_counts.get(slot, 0)),
+                    "decoded_frames": decoded_count if self.verify_encoded_video else None,
+                    "decode_verification": bool(self.verify_encoded_video),
                     "shape": list(self._current_video_writer_sizes[slot][::-1]) + [3],
                     "decoded_shape": list(decoded_shape) if decoded_shape is not None else None,
                     "codec": self._current_video_writer_fourcc.get(slot, ""),

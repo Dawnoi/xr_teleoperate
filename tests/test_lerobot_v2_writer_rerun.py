@@ -25,7 +25,7 @@ class _FakeVideoWriter:
         self.frames.append(frame)
 
     def release(self):
-        pass
+        self.path.write_bytes(b"fake-video")
 
 
 def _fake_video_writer(self, path, size, fps):

@@ -30,6 +30,7 @@ class _FakeVideoWriter:
 
     def release(self):
         self.released = True
+        self.path.write_bytes(b"fake-video")
 
 
 def _fake_video_writer(self, path, size, fps):
