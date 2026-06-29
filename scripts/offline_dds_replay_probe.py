@@ -9,7 +9,7 @@ from typing import Iterable
 
 import numpy as np
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -136,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--dds-smoke", action="store_true", help="Initialize Unitree DDS and send arm targets.")
     parser.add_argument("--network-interface", type=str, default=None)
     parser.add_argument("--motion", action="store_true")
-    parser.add_argument("--max-arm-joint-speed", type=float, default=0.5)
+    parser.add_argument("--max-arm-joint-speed", type=float, default=1.5)
     parser.add_argument("--publish-frequency", type=float, default=30.0)
     parser.add_argument("--settle-time", type=float, default=0.2)
     return parser

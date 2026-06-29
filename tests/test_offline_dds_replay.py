@@ -2,6 +2,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import importlib.util
 from unittest import mock
 
 import pyarrow as pa
@@ -10,6 +11,11 @@ import pyarrow.parquet as pq
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+SCRIPT_PATH = REPO_ROOT / "scripts" / "offline_dds_replay_probe.py"
+SPEC = importlib.util.spec_from_file_location("offline_dds_replay_probe", SCRIPT_PATH)
+offline_dds_replay_probe = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(offline_dds_replay_probe)
 
 
 def _write_episode(dataset_root: pathlib.Path, episode_index: int = 0):
@@ -34,8 +40,6 @@ def _write_episode(dataset_root: pathlib.Path, episode_index: int = 0):
 
 class OfflineDDSReplayScriptTest(unittest.TestCase):
     def test_cli_prints_joint_targets_in_dry_run(self):
-        from tests.manual import offline_dds_replay_probe
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_root = pathlib.Path(tmp_dir)
             _write_episode(dataset_root)
@@ -57,8 +61,6 @@ class OfflineDDSReplayScriptTest(unittest.TestCase):
         self.assertIn("gripper_q=", printed)
 
     def test_cli_builds_dds_smoke_path(self):
-        from tests.manual import offline_dds_replay_probe
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_root = pathlib.Path(tmp_dir)
             _write_episode(dataset_root)
@@ -82,8 +84,6 @@ class OfflineDDSReplayScriptTest(unittest.TestCase):
         publish_mock.assert_called_once()
 
     def test_dds_smoke_routes_joint_position_samples_to_ctrl_dual_arm(self):
-        from tests.manual import offline_dds_replay_probe
-
         with tempfile.TemporaryDirectory() as tmp_dir:
             dataset_root = pathlib.Path(tmp_dir)
             _write_episode(dataset_root)
