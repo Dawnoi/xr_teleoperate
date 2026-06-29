@@ -46,6 +46,7 @@ from teleop.utils.arm_workspace_safety import (
 )
 from teleop.utils.local_camera import LocalCameraStream
 from teleop.utils.simple_latency_trace import SimpleLatencyTracker
+from teleop.utils.operator_runtime import OperatorRuntime
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -64,6 +65,7 @@ RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
 RECORD_CANCEL  = False  # Cancel active/armed recording without saving
 RECENTER       = False  # Recalibrate fixed head reference for controller-space teleop
+operator_runtime = None
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -77,7 +79,7 @@ RECENTER       = False  # Recalibrate fixed head reference for controller-space 
 #  --> auto  : Auto-transition after saving data.
 
 def on_press(key):
-    global STOP, START, RECORD_TOGGLE, RECORD_CANCEL, RECENTER
+    global STOP, START, RECORD_TOGGLE, RECORD_CANCEL, RECENTER, operator_runtime
     if key == 'r':
         START = True
     elif key == 'c':
@@ -86,9 +88,20 @@ def on_press(key):
         START = False
         STOP = True
     elif key == 's' and START == True:
-        RECORD_TOGGLE = True
-    elif key == 'x' and START == True:
-        RECORD_CANCEL = True
+        if operator_runtime is not None and not operator_runtime.record_enabled:
+            operator_runtime.warn_record_disabled("keyboard shortcut [s]")
+        else:
+            RECORD_TOGGLE = True
+    elif key == 'v' and START == True:
+        if operator_runtime is not None and not operator_runtime.record_enabled:
+            operator_runtime.warn_record_disabled("keyboard shortcut [v]")
+        else:
+            RECORD_CANCEL = True
+    elif key == 'h' and START == True:
+        if operator_runtime is None:
+            logger_mp.warning("[HOME] ignored keyboard shortcut [h]: operator runtime is not initialized.")
+        else:
+            operator_runtime.request_home("keyboard/IPC")
     else:
         logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
 
@@ -473,6 +486,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     logger_mp.debug(f"args: {args}")
+    operator_runtime = OperatorRuntime(record_enabled=bool(args.record))
     normalized_head_mode = "head_coupled" if args.head_reference_mode == "calibrated" else (
         "live_head_reference" if args.head_reference_mode in {"live", "head_decoupled_live"} else args.head_reference_mode
     )
@@ -1090,9 +1104,13 @@ if __name__ == '__main__':
             logger_mp.info("🟣  After calibration, press [c] anytime to recenter the reference.")
         if args.record:
             logger_mp.info("🟡  Press [s] to START or SAVE recording (toggle cycle).")
-            logger_mp.info("🟠  Press [x] to CANCEL the active recording without saving.")
+            logger_mp.info("🟠  Press [v] to CANCEL the active recording without saving.")
+            if args.input_mode == "controller":
+                logger_mp.info("🟡  Controller [left X] mirrors [s] for START or SAVE recording.")
+                logger_mp.info("🟠  Controller [right B] mirrors [v] for CANCEL recording without saving.")
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
+        logger_mp.info("🟤  Press [h] to return both arms to the ready/home pose.")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter START state
@@ -1291,6 +1309,11 @@ if __name__ == '__main__':
             tele_fetch_ms = tele_fetch_dt * 1000.0
 
             takeover_logic_start = time.perf_counter()
+            tele_data = operator_runtime.apply_to_tele_data(
+                tele_data,
+                started=bool(START),
+                on_press=on_press,
+            )
 
             home_button_pressed = bool(tele_data.left_ctrl_bButton)
             if home_button_pressed and not prev_home_button_pressed:
