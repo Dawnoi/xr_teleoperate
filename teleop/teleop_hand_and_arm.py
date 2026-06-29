@@ -320,6 +320,7 @@ if __name__ == '__main__':
     ipc_server = None
     sim_state_subscriber = None
     exit_go_home = True
+    exit_home_hold_sec = 5.0
     head_camera = None
     left_camera = None
     right_camera = None
@@ -2085,10 +2086,18 @@ if __name__ == '__main__':
         logger_mp.error(traceback.format_exc())
     finally:
         try:
-            if arm_ctrl is not None and exit_go_home:
-                arm_ctrl.ctrl_dual_arm_go_home()
+            if arm_ctrl is not None:
+                if exit_go_home:
+                    logger_mp.info("[EXIT] returning dual arms to home before shutdown...")
+                    arm_ctrl.ctrl_dual_arm_go_home()
+                logger_mp.warning(
+                    "[EXIT] holding dual arms at home for %.1fs before shutdown. "
+                    "Keep clear and support the robot if needed.",
+                    exit_home_hold_sec,
+                )
+                time.sleep(exit_home_hold_sec)
         except Exception as e:
-            logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
+            logger_mp.error(f"Failed to hold dual arms at home before shutdown: {e}")
         
         try:
             if args.ipc and ipc_server is not None:
