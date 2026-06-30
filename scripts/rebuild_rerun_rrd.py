@@ -8,7 +8,7 @@ REPO_ROOT = os.path.dirname(SCRIPT_DIR)
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from teleop.utils.rerun_visualizer import RerunEpisodeReader, RerunLogger
+from teleop.recording.rerun_visualizer import RerunEpisodeReader, RerunLogger
 
 
 def main():

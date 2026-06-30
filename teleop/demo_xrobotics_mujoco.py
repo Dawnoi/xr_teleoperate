@@ -46,8 +46,8 @@ import glfw
 import pinocchio as pin
 
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK
-from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
-from teleop.utils.arm_workspace_safety import (
+from teleop.control_utils.arm_target_safety import limit_arm_joint_target_velocity
+from teleop.control_utils.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,
     clamp_dual_wrist_poses_to_tapered_workspace,
 )

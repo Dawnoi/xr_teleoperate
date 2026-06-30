@@ -13,7 +13,7 @@ logger_mp = logging_mp.getLogger(__name__)
 parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(parent2_dir)
 
-from teleop.utils.weighted_moving_filter import WeightedMovingFilter
+from teleop.control_utils.weighted_moving_filter import WeightedMovingFilter
 
 
 def _resolve_asset_paths(asset_subdir: str, urdf_name: str):

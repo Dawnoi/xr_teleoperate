@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teleop.utils.lerobot_v2_writer import CAMERA_SLOTS, CHUNK_NAME, LeRobotV2Writer
+from teleop.recording.lerobot_v2_writer import CAMERA_SLOTS, CHUNK_NAME, LeRobotV2Writer
 
 
 SLOT_TO_RAW_CAMERA_KEY = {

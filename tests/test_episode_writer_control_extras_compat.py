@@ -45,7 +45,7 @@ def _import_episode_writer():
     try:
         for name, attrs in stubbed_modules.items():
             _install_stub(name, **attrs)
-        from teleop.utils.episode_writer import EpisodeWriter
+        from teleop.recording.episode_writer import EpisodeWriter
 
         return EpisodeWriter
     finally:

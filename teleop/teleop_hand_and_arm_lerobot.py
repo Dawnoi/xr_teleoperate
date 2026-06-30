@@ -17,8 +17,8 @@ SOURCE_PATH = pathlib.Path(__file__).with_name("teleop_hand_and_arm.py")
 def _rewrite_source(source: str) -> str:
     replacements = [
         (
-            "from teleop.utils.episode_writer import EpisodeWriter, ZMQRawCameraReceiver",
-            "from teleop.utils.lerobot_v2_writer import EpisodeWriter, ZMQRawCameraReceiver",
+            "from teleop.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver",
+            "from teleop.recording.lerobot_v2_writer import EpisodeWriter, ZMQRawCameraReceiver",
         ),
         (
             "parser.add_argument('--record-arm-repr', type=str, choices=['qpos', 'pose', 'both'], default='qpos',",

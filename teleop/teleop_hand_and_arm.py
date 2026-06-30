@@ -33,18 +33,18 @@ import pinocchio as pin
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize # dds 
 from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmController, H1_2_ArmController, H1_ArmController, H2_ArmController
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
-from teleop.utils.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
-from teleop.utils.g1d_agv_bridge import G1DAgvBridge
+from teleop.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
+from teleop.control_utils.g1d_agv_bridge import G1DAgvBridge
 from teleop.operator.ipc import IPC_Server
-from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
+from teleop.control_utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.input.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
 from teleop.utils.online_inference import online_inference_speed_limit_delta
-from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
-from teleop.utils.arm_workspace_safety import (
+from teleop.control_utils.arm_target_safety import limit_arm_joint_target_velocity
+from teleop.control_utils.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,
     clamp_dual_wrist_poses_to_tapered_workspace,
 )
-from teleop.utils.local_camera import LocalCameraStream
+from teleop.camera.local_camera import LocalCameraStream
 from teleop.diagnostics.simple_latency_trace import SimpleLatencyTracker
 from teleop.operator.runtime import OperatorRuntime
 from sshkeyboard import listen_keyboard, stop_listening
