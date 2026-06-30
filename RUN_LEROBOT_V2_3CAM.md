@@ -52,7 +52,7 @@ ffmpeg 备用链路仍支持 `LEROBOT_VIDEO_PROFILE=baseline|main` 和 `LEROBOT_
 回放数据时，优先使用已录入的控制 sidecar：
 
 ```bash
-python teleop/replay_lerobot_real.py \
+python scripts/replay_lerobot_real.py \
   --dataset-root /path/to/dataset_root \
   --episode-index 0 \
   --use-recorded-tauff \
@@ -62,7 +62,7 @@ python teleop/replay_lerobot_real.py \
 真实回放示例：
 
 ```bash
-python teleop/replay_lerobot_real.py \
+python scripts/replay_lerobot_real.py \
   --dataset-root /path/to/dataset_root \
   --episode-index 0 \
   --network-interface eno1 \

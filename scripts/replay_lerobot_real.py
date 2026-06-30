@@ -101,7 +101,7 @@ def print_dry_run_summary(summary: dict) -> None:
 
 
 def teleop_entry_path() -> Path:
-    return (Path(__file__).resolve().parent / "teleop_hand_and_arm.py").resolve()
+    return (REPO_ROOT / "teleop" / "teleop_hand_and_arm.py").resolve()
 
 
 def build_subprocess_command(

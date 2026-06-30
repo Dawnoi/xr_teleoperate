@@ -16,9 +16,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teleop.input.raw_episode_replay import load_raw_dry_run_summary
-from teleop.input.raw_episode_replay import load_raw_episode_items
-from teleop.input.raw_episode_replay import raw_gripper_source_key
+from teleop.input.raw_offline import load_raw_dry_run_summary
+from teleop.input.raw_offline import load_raw_episode_items
+from teleop.input.raw_offline import raw_gripper_source_key
 from teleop.input.teleop_input_provider import dex1_q_to_trigger_value
 from teleop.operator.gripper_state_ui import OpenCVGripperStateUI
 
