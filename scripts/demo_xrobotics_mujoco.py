@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_G1_XML = REPO_ROOT / "assets/g1/g1_body29_hand14.xml"
 DEFAULT_DEX1_XML = REPO_ROOT / "assets/.generated/g1_29dof_mode_15_with_dex1_1_scene.xml"
 DEFAULT_G1D_XML = REPO_ROOT / "assets/g1_d/g1_d_scene.xml"
@@ -46,13 +46,13 @@ import glfw
 import pinocchio as pin
 
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK
-from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
-from teleop.utils.arm_workspace_safety import (
+from teleop.control_utils.arm_target_safety import limit_arm_joint_target_velocity
+from teleop.control_utils.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,
     clamp_dual_wrist_poses_to_tapered_workspace,
 )
-from teleop.utils.g1d_mujoco_builder import prepare_g1d_mobile_scene
-from teleop.utils.xr_robotics_wrapper import XRRoboticsWrapper
+from teleop.sim.g1d_mujoco_builder import prepare_g1d_mobile_scene
+from teleop.input.xr_robotics_wrapper import XRRoboticsWrapper
 
 
 ARM_JOINT_NAMES = [
@@ -529,10 +529,9 @@ def main():
         controller_mapping_mode=args.controller_mapping_mode,
     )
 
-    # G1_29_ArmIK uses relative asset paths internally. Force cwd to this teleop
-    # directory so its ../assets/... references resolve exactly like the original
-    # teleop_hand_and_arm.py launch flow.
-    os.chdir(Path(__file__).resolve().parent)
+    # G1_29_ArmIK uses relative asset paths internally. Force cwd to teleop/
+    # so its ../assets/... references resolve like teleop_hand_and_arm.py.
+    os.chdir(REPO_ROOT / "teleop")
     arm_ik = G1_29_ArmIK()
     workspace_limit_enabled = not args.disable_arm_workspace_limit
     workspace_mode = args.arm_workspace_mode

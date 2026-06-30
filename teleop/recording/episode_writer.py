@@ -4,8 +4,8 @@ import json
 import datetime
 import numpy as np
 import time
-import zmq
 import struct
+import shutil
 from collections import deque
 from .rerun_visualizer import RerunLogger
 from queue import Queue, Empty
@@ -48,8 +48,11 @@ class ZMQRawCameraReceiver:
     LEGACY_HEADER_SIZE = struct.calcsize(LEGACY_HEADER_FMT)
 
     def __init__(self, endpoint: str, name: str = "camera"):
+        import zmq as zmq_module
+
         self.endpoint = endpoint
         self.name = name
+        self._zmq = zmq_module
         self._running = True
         self._frame = None
         self._meta = None
@@ -57,20 +60,21 @@ class ZMQRawCameraReceiver:
         self._frame_seq_local = -1
         self._lock = Lock()
 
-        self._ctx = zmq.Context.instance()
-        self._socket = self._ctx.socket(zmq.SUB)
-        self._socket.setsockopt(zmq.RCVHWM, 1)
-        self._socket.setsockopt(zmq.LINGER, 0)
+        self._ctx = self._zmq.Context.instance()
+        self._socket = self._ctx.socket(self._zmq.SUB)
+        self._socket.setsockopt(self._zmq.RCVHWM, 1)
+        self._socket.setsockopt(self._zmq.LINGER, 0)
         self._socket.connect(self.endpoint)
-        self._socket.setsockopt(zmq.SUBSCRIBE, b"")
+        self._socket.setsockopt(self._zmq.SUBSCRIBE, b"")
 
         self._thread = Thread(target=self._recv_loop, daemon=True)
         self._thread.start()
         logger_mp.info(f"[ZMQRawCameraReceiver:{self.name}] connected to {self.endpoint}")
 
     def _recv_loop(self):
-        poller = zmq.Poller()
-        poller.register(self._socket, zmq.POLLIN)
+        zmq_module = self._zmq
+        poller = zmq_module.Poller()
+        poller.register(self._socket, zmq_module.POLLIN)
         while self._running:
             try:
                 socks = dict(poller.poll(timeout=100))
@@ -78,7 +82,7 @@ class ZMQRawCameraReceiver:
                     continue
                 recv_wall_ns = time.time_ns()
                 recv_mono_ns = time.monotonic_ns()
-                message = self._socket.recv(flags=zmq.NOBLOCK)
+                message = self._socket.recv(flags=zmq_module.NOBLOCK)
                 frame, meta = self._decode_message(message, recv_wall_ns, recv_mono_ns)
                 if frame is None:
                     continue
@@ -86,7 +90,7 @@ class ZMQRawCameraReceiver:
                     self._frame = frame
                     self._meta = meta
                     self._history.append((frame, dict(meta)))
-            except zmq.Again:
+            except zmq_module.Again:
                 continue
             except Exception as e:
                 logger_mp.warning(f"[ZMQRawCameraReceiver:{self.name}] recv loop error: {e}")
@@ -234,6 +238,7 @@ class EpisodeWriter():
         self.image_size = image_size
 
         self.rerun_log = rerun_log
+        self.online_logger = None
         self.rerun_logger = None
         if self.rerun_log:
             logger_mp.info("==> Rerun live logging enabled; logger will be created per episode.\n")
@@ -347,7 +352,7 @@ class EpisodeWriter():
         logger_mp.info(f"==> New episode created: {self.episode_dir}")
         return True  # Return True if the episode is successfully created
         
-    def add_item(self, colors, depths=None, states=None, actions=None, tactiles=None, audios=None, sim_state=None, timestamps=None):
+    def add_item(self, colors, depths=None, states=None, actions=None, tactiles=None, audios=None, sim_state=None, timestamps=None, control_extras=None):
         # Increment the item ID
         self.item_id += 1
         # Create the item data dictionary
@@ -362,6 +367,7 @@ class EpisodeWriter():
             'sim_state': sim_state,
             'timestamps': timestamps,
         }
+        # `control_extras` is accepted for compatibility but intentionally not serialized.
         # Enqueue the item data
         self.item_data_queue.put(item_data)
 
@@ -457,6 +463,34 @@ class EpisodeWriter():
         """
         self.need_save = True  # Set the save flag
         logger_mp.info(f"==> Episode saved start...")
+
+    def cancel_episode(self):
+        """
+        Drop the active episode and reuse its episode index for the next recording.
+        """
+        if self.is_available:
+            return
+        self.need_save = False
+        while True:
+            try:
+                self.item_data_queue.get_nowait()
+                self.item_data_queue.task_done()
+            except Empty:
+                break
+        if self.rerun_log and self.online_logger is not None:
+            try:
+                self.online_logger.close()
+            except Exception:
+                pass
+            self.online_logger = None
+        episode_dir = getattr(self, "episode_dir", None)
+        if episode_dir and os.path.isdir(episode_dir):
+            shutil.rmtree(episode_dir, ignore_errors=True)
+        self.item_id = -1
+        self.episode_id = self.episode_id - 1
+        self.first_item = True
+        self.is_available = True
+        logger_mp.info("==> Episode canceled; next recording will reuse this episode index.")
 
     def _save_episode(self):
         """

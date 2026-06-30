@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
+REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_G1_XML = REPO_ROOT / "assets/g1/g1_body29_hand14.xml"
 DEFAULT_DEX1_XML = REPO_ROOT / "assets/.generated/g1_29dof_mode_15_with_dex1_1_scene.xml"
 DEFAULT_G1D_XML = REPO_ROOT / "assets/g1_d/g1_d_scene.xml"
@@ -69,7 +69,7 @@ from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorStates_
 
 from teleop.robot_control.robot_arm import G1_29_JointArmIndex, kTopicLowState
 from teleop.robot_control.robot_hand_unitree import kTopicGripperLeftState, kTopicGripperRightState
-from teleop.utils.g1d_mujoco_builder import prepare_g1d_mobile_scene
+from teleop.sim.g1d_mujoco_builder import prepare_g1d_mobile_scene
 
 
 def parse_args():

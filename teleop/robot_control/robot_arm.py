@@ -81,10 +81,30 @@ class DataBuffer:
 def _init_latency_trace_fields(controller):
     controller._latency_tracker = None
     controller._pending_trace_seq = 0
+    controller._latency_exec_q_threshold = 0.01
+    controller._latency_exec_dq_threshold = 0.05
 
 
 def _set_latency_tracker(controller, tracker):
     controller._latency_tracker = tracker
+
+
+def _set_latency_exec_thresholds(controller, q_threshold: float, dq_threshold: float):
+    controller._latency_exec_q_threshold = float(q_threshold)
+    controller._latency_exec_dq_threshold = float(dq_threshold)
+
+
+def _maybe_mark_trace_execute_thread(controller, arm_q, arm_dq, detect_ts_ns):
+    tracker = getattr(controller, "_latency_tracker", None)
+    if tracker is None:
+        return
+    tracker.maybe_mark_execute_thread(
+        arm_q,
+        arm_dq,
+        q_threshold=getattr(controller, "_latency_exec_q_threshold", 0.01),
+        dq_threshold=getattr(controller, "_latency_exec_dq_threshold", 0.05),
+        detect_ts_ns=detect_ts_ns,
+    )
 
 
 def _mark_trace_published(
@@ -248,10 +268,14 @@ class G1_29_ArmController:
         while True:
             msg = self.lowstate_subscriber.Read()
             if msg is not None:
+                detect_ts_ns = time.perf_counter_ns()
                 lowstate = G1_29_LowState()
                 for id in range(G1_29_Num_Motors):
                     lowstate.motor_state[id].q  = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
+                arm_q = np.array([lowstate.motor_state[id].q for id in G1_29_JointArmIndex])
+                arm_dq = np.array([lowstate.motor_state[id].dq for id in G1_29_JointArmIndex])
+                _maybe_mark_trace_execute_thread(self, arm_q, arm_dq, detect_ts_ns)
                 self.lowstate_buffer.SetData(lowstate)
             time.sleep(0.002)
 
@@ -325,6 +349,9 @@ class G1_29_ArmController:
 
     def set_latency_tracker(self, tracker):
         _set_latency_tracker(self, tracker)
+
+    def set_latency_exec_thresholds(self, q_threshold: float, dq_threshold: float):
+        _set_latency_exec_thresholds(self, q_threshold, dq_threshold)
 
     def get_timing_snapshot(self):
         return _get_controller_timing_snapshot(self)
@@ -570,10 +597,14 @@ class G1_23_ArmController:
         while True:
             msg = self.lowstate_subscriber.Read()
             if msg is not None:
+                detect_ts_ns = time.perf_counter_ns()
                 lowstate = G1_23_LowState()
                 for id in range(G1_23_Num_Motors):
                     lowstate.motor_state[id].q  = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
+                arm_q = np.array([lowstate.motor_state[id].q for id in G1_23_JointArmIndex])
+                arm_dq = np.array([lowstate.motor_state[id].dq for id in G1_23_JointArmIndex])
+                _maybe_mark_trace_execute_thread(self, arm_q, arm_dq, detect_ts_ns)
                 self.lowstate_buffer.SetData(lowstate)
             time.sleep(0.002)
 
@@ -647,6 +678,9 @@ class G1_23_ArmController:
 
     def set_latency_tracker(self, tracker):
         _set_latency_tracker(self, tracker)
+
+    def set_latency_exec_thresholds(self, q_threshold: float, dq_threshold: float):
+        _set_latency_exec_thresholds(self, q_threshold, dq_threshold)
 
     def get_timing_snapshot(self):
         return _get_controller_timing_snapshot(self)
@@ -884,10 +918,14 @@ class H1_2_ArmController:
         while True:
             msg = self.lowstate_subscriber.Read()
             if msg is not None:
+                detect_ts_ns = time.perf_counter_ns()
                 lowstate = H1_2_LowState()
                 for id in range(H1_2_Num_Motors):
                     lowstate.motor_state[id].q  = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
+                arm_q = np.array([lowstate.motor_state[id].q for id in H1_2_JointArmIndex])
+                arm_dq = np.array([lowstate.motor_state[id].dq for id in H1_2_JointArmIndex])
+                _maybe_mark_trace_execute_thread(self, arm_q, arm_dq, detect_ts_ns)
                 self.lowstate_buffer.SetData(lowstate)
             time.sleep(0.002)
 
@@ -961,6 +999,9 @@ class H1_2_ArmController:
 
     def set_latency_tracker(self, tracker):
         _set_latency_tracker(self, tracker)
+
+    def set_latency_exec_thresholds(self, q_threshold: float, dq_threshold: float):
+        _set_latency_exec_thresholds(self, q_threshold, dq_threshold)
 
     def get_timing_snapshot(self):
         return _get_controller_timing_snapshot(self)
@@ -1192,10 +1233,14 @@ class H1_ArmController:
         while True:
             msg = self.lowstate_subscriber.Read()
             if msg is not None:
+                detect_ts_ns = time.perf_counter_ns()
                 lowstate = H1_LowState()
                 for id in range(H1_Num_Motors):
                     lowstate.motor_state[id].q  = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
+                arm_q = np.array([lowstate.motor_state[id].q for id in H1_JointArmIndex])
+                arm_dq = np.array([lowstate.motor_state[id].dq for id in H1_JointArmIndex])
+                _maybe_mark_trace_execute_thread(self, arm_q, arm_dq, detect_ts_ns)
                 self.lowstate_buffer.SetData(lowstate)
             time.sleep(0.002)
 
@@ -1266,6 +1311,9 @@ class H1_ArmController:
 
     def set_latency_tracker(self, tracker):
         _set_latency_tracker(self, tracker)
+
+    def set_latency_exec_thresholds(self, q_threshold: float, dq_threshold: float):
+        _set_latency_exec_thresholds(self, q_threshold, dq_threshold)
 
     def get_timing_snapshot(self):
         return _get_controller_timing_snapshot(self)
@@ -1464,10 +1512,14 @@ class H2_ArmController:
         while True:
             msg = self.lowstate_subscriber.Read()
             if msg is not None:
+                detect_ts_ns = time.perf_counter_ns()
                 lowstate = H2_LowState()
                 for id in range(35):
                     lowstate.motor_state[id].q = msg.motor_state[id].q
                     lowstate.motor_state[id].dq = msg.motor_state[id].dq
+                arm_q = np.array([lowstate.motor_state[id].q for id in H2_JointArmIndex])
+                arm_dq = np.array([lowstate.motor_state[id].dq for id in H2_JointArmIndex])
+                _maybe_mark_trace_execute_thread(self, arm_q, arm_dq, detect_ts_ns)
                 self.lowstate_buffer.SetData(lowstate)
             time.sleep(0.002)
 
@@ -1539,6 +1591,9 @@ class H2_ArmController:
 
     def set_latency_tracker(self, tracker):
         _set_latency_tracker(self, tracker)
+
+    def set_latency_exec_thresholds(self, q_threshold: float, dq_threshold: float):
+        _set_latency_exec_thresholds(self, q_threshold, dq_threshold)
 
     def get_timing_snapshot(self):
         return _get_controller_timing_snapshot(self)

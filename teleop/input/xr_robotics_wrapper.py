@@ -20,7 +20,7 @@ def _bootstrap_xrobotoolkit():
 _bootstrap_xrobotoolkit()
 import xrobotoolkit_sdk as xrt  # noqa: E402
 
-from teleop.utils.xr_input_types import (
+from teleop.input.xr_input_types import (
     TeleData,
     T_ROBOT_OPENXR,
     T_OPENXR_ROBOT,

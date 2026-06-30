@@ -33,19 +33,21 @@ import pinocchio as pin
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize # dds 
 from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmController, H1_2_ArmController, H1_ArmController, H2_ArmController
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
-from teleop.utils.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
-from teleop.utils.g1d_agv_bridge import G1DAgvBridge
-from teleop.utils.ipc import IPC_Server
-from teleop.utils.motion_switcher import MotionSwitcher, LocoClientWrapper
-from teleop.utils.xr_robotics_wrapper import XRRoboticsWrapper
-from teleop.utils.arm_target_safety import limit_arm_joint_target_velocity
-from teleop.utils.arm_workspace_safety import (
+from teleop.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
+from teleop.control_utils.g1d_agv_bridge import G1DAgvBridge
+from teleop.operator.ipc import IPC_Server
+from teleop.control_utils.motion_switcher import MotionSwitcher, LocoClientWrapper
+from teleop.input.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
+from teleop.inference.online_session import online_inference_speed_limit_delta
+from teleop.control_utils.arm_target_safety import limit_arm_joint_target_velocity
+from teleop.control_utils.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,
     clamp_dual_wrist_poses_to_tapered_workspace,
 )
-from teleop.utils.local_camera import LocalCameraStream
-from teleop.utils.simple_latency_trace import SimpleLatencyTracker
-from teleop.utils.timing_debugger import TimingDebugger
+from teleop.camera.local_camera import LocalCameraStream
+from teleop.diagnostics.simple_latency_trace import SimpleLatencyTracker
+from teleop.control_utils.timing_debugger import TimingDebugger
+from teleop.operator.runtime import OperatorRuntime
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -62,7 +64,9 @@ STOP           = False  # Enable to begin system exit procedure
 READY          = False  # Ready to (1) enter START state, (2) enter RECORD_RUNNING state
 RECORD_RUNNING = False  # True if [Recording]
 RECORD_TOGGLE  = False  # Toggle recording state
+RECORD_CANCEL  = False  # Cancel active/armed recording without saving
 RECENTER       = False  # Recalibrate fixed head reference for controller-space teleop
+operator_runtime = None
 #  -------        ---------                -----------                -----------            ---------
 #   state          [Ready]      ==>        [Recording]     ==>         [AutoSave]     -->     [Ready]
 #  -------        ---------      |         -----------      |         -----------      |     ---------
@@ -76,7 +80,7 @@ RECENTER       = False  # Recalibrate fixed head reference for controller-space 
 #  --> auto  : Auto-transition after saving data.
 
 def on_press(key):
-    global STOP, START, RECORD_TOGGLE, RECENTER
+    global STOP, START, RECORD_TOGGLE, RECORD_CANCEL, RECENTER, operator_runtime
     if key == 'r':
         START = True
     elif key == 'c':
@@ -85,18 +89,32 @@ def on_press(key):
         START = False
         STOP = True
     elif key == 's' and START == True:
-        RECORD_TOGGLE = True
+        if operator_runtime is not None and not operator_runtime.record_enabled:
+            operator_runtime.warn_record_disabled("keyboard shortcut [s]")
+        else:
+            RECORD_TOGGLE = True
+    elif key == 'v' and START == True:
+        if operator_runtime is not None and not operator_runtime.record_enabled:
+            operator_runtime.warn_record_disabled("keyboard shortcut [v]")
+        else:
+            RECORD_CANCEL = True
+    elif key == 'h' and START == True:
+        if operator_runtime is None:
+            logger_mp.warning("[HOME] ignored keyboard shortcut [h]: operator runtime is not initialized.")
+        else:
+            operator_runtime.request_home("keyboard/IPC")
     else:
         logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
 
 def get_state() -> dict:
     """Return current heartbeat state"""
-    global START, STOP, RECORD_RUNNING, READY
+    global START, STOP, RECORD_RUNNING, RECORD_CANCEL, READY
     return {
         "START": START,
         "STOP": STOP,
         "READY": READY,
         "RECORD_RUNNING": RECORD_RUNNING,
+        "RECORD_CANCEL": RECORD_CANCEL,
     }
 
 
@@ -142,6 +160,15 @@ def pose_matrix_to_record(pose_mat):
         "matrix4x4": pose.tolist(),
     }
 
+
+def require_finite_vector(value, size: int, name: str):
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    if arr.shape[0] != int(size):
+        raise ValueError(f"{name} must have shape ({size},), got {arr.shape}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} contains non-finite values")
+    return arr
+
 if __name__ == '__main__':
     arm_ctrl = None
     tv_wrapper = None
@@ -150,6 +177,8 @@ if __name__ == '__main__':
     recorder = None
     ipc_server = None
     sim_state_subscriber = None
+    exit_go_home = True
+    exit_home_hold_sec = 5.0
     head_camera = None
     left_camera = None
     right_camera = None
@@ -189,6 +218,60 @@ if __name__ == '__main__':
                         help='"legacy_main" reproduces the original main-branch controller mapping semantics as closely as possible. "anchored_safe" uses the newer grip-anchor based takeover-safe mapping.')
     parser.add_argument('--calibration-mode', type=str, choices=['manual', 'auto'], default='manual',
                         help='Calibration trigger in head_coupled/hybrid mode. "manual" waits for key c after r; "auto" calibrates once live pose data is available. fixed_per_grip/live_head_reference do not require manual calibration.')
+    parser.add_argument('--input-provider', type=str, choices=['xr', 'lerobot_offline', 'online_inference'], default='xr',
+                        help='Teleop input provider backend: live XR input, offline LeRobot replay, or Pika-style online inference.')
+    parser.add_argument('--offline-replay-dataset-root', type=str, default='',
+                        help='Dataset root for offline replay provider.')
+    parser.add_argument('--offline-replay-episode-index', type=int, default=0,
+                        help='Episode index for offline replay provider.')
+    parser.add_argument('--offline-replay-arm-source', type=str, choices=['action', 'state', 'fk_cmd_pose'], default='action',
+                        help='Arm source used by offline replay provider.')
+    parser.add_argument('--offline-replay-speed-scale', type=float, default=1.0,
+                        help='Playback speed scale for offline replay provider.')
+    parser.add_argument('--offline-replay-end-action', type=str, choices=['home', 'hold'], default='home',
+                        help='Robot action to take when offline replay reaches the end.')
+    parser.add_argument('--online-inference-host', type=str, default='127.0.0.1',
+                        help='Pika-compatible online inference TCP server host.')
+    parser.add_argument('--online-inference-port', type=int, default=5555,
+                        help='Pika-compatible online inference TCP server port.')
+    parser.add_argument('--online-inference-transport', type=str, choices=['tcp_jsonl', 'http'], default='tcp_jsonl',
+                        help='Online inference transport. Use http for pi0.5 service on /handshake and /infer.')
+    parser.add_argument('--online-inference-base-url', type=str, default='',
+                        help='HTTP base URL for online inference, e.g. http://115.190.134.186:8017. If empty, host/port are used.')
+    parser.add_argument('--online-inference-http-handshake-path', type=str, default='/handshake',
+                        help='HTTP handshake path for online inference.')
+    parser.add_argument('--online-inference-http-infer-path', type=str, default='/infer',
+                        help='HTTP infer path for online inference.')
+    parser.add_argument('--online-inference-protocol-profile', type=str, choices=['pika_pose7', 'pi05_dual_arm_20d'], default='pika_pose7',
+                        help='Online inference payload/action schema profile.')
+    parser.add_argument('--online-inference-prompt', type=str, default='',
+                        help='Task prompt sent to online inference services such as pi0.5.')
+    parser.add_argument('--online-inference-arm-side', type=str, choices=['left', 'right', 'both'], default='both',
+                        help='Arm side controlled by online inference.')
+    parser.add_argument('--online-inference-n-obs-steps', type=int, default=2,
+                        help='Number of observation history steps sent to online inference.')
+    parser.add_argument('--online-inference-camera-freq', type=float, default=30.0,
+                        help='Nominal camera frequency used for online inference observation history.')
+    parser.add_argument('--online-inference-jpeg-quality', type=int, default=85,
+                        help='JPEG quality for online inference observation images.')
+    parser.add_argument('--online-inference-action-step-sec', type=float, default=0.10,
+                        help='Nominal server action step duration in seconds.')
+    parser.add_argument('--online-inference-chunk-step-mode', type=str, choices=['timed', 'per_tick'], default='timed',
+                        help='How to advance action steps inside an online inference chunk.')
+    parser.add_argument('--online-inference-interp-sec', type=float, default=0.01,
+                        help='Nominal server interpolation interval in seconds.')
+    parser.add_argument('--online-inference-post-action-delay-ms', type=int, default=75,
+                        help='Delay after executing an action chunk before sending the next observation.')
+    parser.add_argument('--online-inference-response-timeout-sec', type=float, default=2.0,
+                        help='Timeout while waiting for an online inference action response.')
+    parser.add_argument('--online-inference-transform-config', type=str, default='',
+                        help='JSON pose transform config. Required with --online-inference-enable-motion.')
+    parser.add_argument('--online-inference-enable-motion', action='store_true',
+                        help='Allow online inference provider to enable robot motion when all safety checks pass.')
+    parser.add_argument('--online-inference-dry-run', action='store_true',
+                        help='Send observations and parse actions without enabling arm motion.')
+    parser.add_argument('--auto-start', action='store_true',
+                        help='Enter START state automatically after initialization. Intended for offline replay entrypoints.')
     parser.add_argument('--disable-arm-workspace-limit', action='store_true',
                         help='Disable wrist workspace clamping before IK.')
     parser.add_argument('--arm-workspace-mode', type=str, choices=['tapered', 'box'], default='tapered',
@@ -237,6 +320,8 @@ if __name__ == '__main__':
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
+    parser.add_argument('--no-gripper', action='store_true',
+                        help='Disable end-effector controller initialization and commands. Useful for arm-only offline replay.')
     # record mode and task info
     parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
     parser.add_argument('--record-arm-repr', type=str, choices=['qpos', 'pose', 'both'], default='qpos',
@@ -260,6 +345,7 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     logger_mp.debug(f"args: {args}")
+    operator_runtime = OperatorRuntime(record_enabled=bool(args.record))
     normalized_head_mode = "head_coupled" if args.head_reference_mode == "calibrated" else (
         "live_head_reference" if args.head_reference_mode in {"live", "head_decoupled_live"} else args.head_reference_mode
     )
@@ -290,8 +376,15 @@ if __name__ == '__main__':
     action_nearest_fallback_max_delta_ns = state_nearest_fallback_max_delta_ns
     record_future_wait_timeout_ns = int(max(120_000_000, (2.0 / max(args.frequency, 1e-6)) * 1e9))
     pending_sample_timeout_ns = int(1_000_000_000)
+    control_dt = 1.0 / max(args.frequency, 1e-6)
     if args.base_controller == "g1d_agv" and args.motion:
         raise ValueError("Do not combine --base-controller g1d_agv with --motion. G1D AGV base control should run with the arms kept in debug mode.")
+    if args.input_provider == "lerobot_offline":
+        validate_lerobot_offline_episode(
+            args.offline_replay_dataset_root,
+            args.offline_replay_episode_index,
+            args.offline_replay_arm_source,
+        )
 
     def compute_arm_gravity_tauff(arm_ik_obj, arm_q):
         try:
@@ -649,7 +742,7 @@ if __name__ == '__main__':
         else:
             ChannelFactoryInitialize(0, networkInterface=args.network_interface)
 
-        # ipc communication mode. client usage: see utils/ipc.py
+        # ipc communication mode. client usage: see operator/ipc.py
         if args.ipc:
             ipc_server = IPC_Server(on_press=on_press,get_state=get_state)
             ipc_server.start()
@@ -660,13 +753,6 @@ if __name__ == '__main__':
                                                       daemon=True)
             listen_keyboard_thread.start()
 
-        tv_wrapper = XRRoboticsWrapper(
-            use_hand_tracking=args.input_mode == "hand",
-            head_reference_mode=args.head_reference_mode,
-            controller_orientation_mode=args.controller_orientation_mode,
-            controller_mapping_mode=args.controller_mapping_mode,
-        )
-        logger_mp.info("Using XR-Robotics as the only Pico input source.")
         if workspace_limit_enabled:
             if workspace_mode == "box":
                 logger_mp.info(
@@ -736,8 +822,12 @@ if __name__ == '__main__':
             arm_ik = H2_ArmIK()
             arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
 
+        tv_wrapper = create_teleop_input_provider(args, arm_ik=arm_ik)
+
         # end-effector
-        if args.ee == "dex3":
+        if args.no_gripper:
+            logger_mp.info("[EE] --no-gripper enabled; end-effector controller is disabled.")
+        elif args.ee == "dex3":
             from teleop.robot_control.robot_hand_unitree import Dex3_1_Controller
             left_hand_pos_array = Array('d', 75, lock = True)      # [input]
             right_hand_pos_array = Array('d', 75, lock = True)     # [input]
@@ -806,10 +896,18 @@ if __name__ == '__main__':
         if args.sim:
             reset_pose_publisher = ChannelPublisher("rt/reset_pose/cmd", String_)
             reset_pose_publisher.Init()
-            from teleop.utils.sim_state_topic import start_sim_state_subscribe
+            from teleop.sim.sim_state_topic import start_sim_state_subscribe
             sim_state_subscriber = start_sim_state_subscribe()
 
-        # record + headless / non-headless mode
+        head_remote_camera = None
+        left_remote_camera = None
+        right_remote_camera = None
+        head_camera = None
+        left_camera = None
+        right_camera = None
+
+        # record / online inference camera sources are shared so each camera is opened once.
+        needs_camera = bool(args.record or args.input_provider == "online_inference")
         if args.record:
             recorder = EpisodeWriter(task_dir = os.path.join(args.task_dir, args.task_name),
                                      task_goal = args.task_goal,
@@ -818,6 +916,7 @@ if __name__ == '__main__':
                                      frequency = args.frequency,
                                      image_size = [args.camera_width, args.camera_height],
                                      rerun_log = not args.headless)
+        if needs_camera:
             head_remote_camera = maybe_open_remote_camera("head", args.head_zmq_endpoint)
             left_remote_camera = maybe_open_remote_camera("left_wrist", args.left_zmq_endpoint)
             right_remote_camera = maybe_open_remote_camera("right_wrist", args.right_zmq_endpoint)
@@ -835,6 +934,11 @@ if __name__ == '__main__':
             )
             if hasattr(arm_ctrl, 'set_latency_tracker'):
                 arm_ctrl.set_latency_tracker(latency_tracker)
+            if hasattr(arm_ctrl, 'set_latency_exec_thresholds'):
+                arm_ctrl.set_latency_exec_thresholds(
+                    args.latency_exec_q_threshold,
+                    args.latency_exec_dq_threshold,
+                )
             logger_mp.info(
                 "[LATENCY] tracing enabled: output=%s, command_threshold=%.4f rad, exec_q_threshold=%.4f rad, exec_dq_threshold=%.4f rad/s",
                 args.latency_trace_path,
@@ -859,11 +963,19 @@ if __name__ == '__main__':
             logger_mp.info("🟣  After calibration, press [c] anytime to recenter the reference.")
         if args.record:
             logger_mp.info("🟡  Press [s] to START or SAVE recording (toggle cycle).")
+            logger_mp.info("🟠  Press [v] to CANCEL the active recording without saving.")
+            if args.input_mode == "controller":
+                logger_mp.info("🟡  Controller [left X] mirrors [s] for START or SAVE recording.")
+                logger_mp.info("🟠  Controller [right B] mirrors [v] for CANCEL recording without saving.")
         else:
             logger_mp.info("🔵  Recording is DISABLED (run with --record to enable).")
+        logger_mp.info("🟤  Press [h] to return both arms to the ready/home pose.")
         logger_mp.info("🔴  Press [q] to stop and exit the program.")
         logger_mp.info("⚠️  IMPORTANT: Please keep your distance and stay safe.")
         READY = True                  # now ready to (1) enter START state
+        if args.auto_start:
+            START = True
+            logger_mp.info("[AUTO_START] entering START state automatically.")
         while not START and not STOP: # wait for start or stop signal.
             time.sleep(0.033)
 
@@ -892,7 +1004,9 @@ if __name__ == '__main__':
         prev_right_grip_pressed = False
         left_takeover_settle_frames = 0
         right_takeover_settle_frames = 0
-        TAKEOVER_SETTLE_FRAMES = 0 if args.controller_mapping_mode == "legacy_main" else 2
+        TAKEOVER_SETTLE_FRAMES = 0 if (
+            args.controller_mapping_mode == "legacy_main" or args.input_provider in {"lerobot_offline", "online_inference"}
+        ) else 2
         recording_waiting_for_first_frame = False
         last_record_wait_log_ns = 0
         last_enqueued_primary_frame_id = None
@@ -902,6 +1016,19 @@ if __name__ == '__main__':
             start_time = time.time()
 
             # record mode
+            if args.record and RECORD_CANCEL:
+                RECORD_CANCEL = False
+                if RECORD_RUNNING or recording_waiting_for_first_frame:
+                    RECORD_RUNNING = False
+                    recording_waiting_for_first_frame = False
+                    record_start_monotonic_ns = None
+                    pending_record_samples.clear()
+                    last_enqueued_primary_frame_id = None
+                    recorder.cancel_episode()
+                    logger_mp.info("[RECORD_CANCEL] active episode canceled; next recording will reuse the episode index.")
+                else:
+                    logger_mp.info("[RECORD_CANCEL] ignored: no active recording to cancel.")
+
             if args.record and RECORD_TOGGLE:
                 RECORD_TOGGLE = False
                 if not RECORD_RUNNING and not recording_waiting_for_first_frame:
@@ -980,22 +1107,72 @@ if __name__ == '__main__':
                 )
             current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, current_lr_arm_q)
 
+            online_left_gripper_q = 0.0
+            online_right_gripper_q = 0.0
+            if (not args.no_gripper) and args.ee == "dex1":
+                try:
+                    with dual_gripper_data_lock:
+                        online_left_gripper_q = float(dual_gripper_state_array[0])
+                        online_right_gripper_q = float(dual_gripper_state_array[1])
+                except Exception:
+                    online_left_gripper_q = 0.0
+                    online_right_gripper_q = 0.0
+            camera_sources = {
+                "head": head_remote_camera if head_remote_camera is not None else head_camera,
+                "left_wrist": left_remote_camera if left_remote_camera is not None else left_camera,
+                "right_wrist": right_remote_camera if right_remote_camera is not None else right_camera,
+            }
+
             # get xr's tele data
             tele_fetch_start = time.perf_counter()
-            tele_data = tv_wrapper.get_tele_data(
+            sample = tv_wrapper.get_sample(
                 current_left_robot_wrist_pose=current_left_wrist_pose,
                 current_right_robot_wrist_pose=current_right_wrist_pose,
+                current_state_host_monotonic_ns=current_state_sample_ns,
+                current_arm_q=current_lr_arm_q,
+                current_arm_dq=current_lr_arm_dq,
+                current_left_gripper_width=online_left_gripper_q,
+                current_right_gripper_width=online_right_gripper_q,
+                camera_sources=camera_sources,
+                dt=control_dt,
             )
             tele_fetch_dt = time.perf_counter() - tele_fetch_start
-            timing_debugger.add_tele_fetch(tele_fetch_dt, tele_data is not None)
-            if tele_data is None:
+            timing_debugger.add_tele_fetch(tele_fetch_dt, sample is not None)
+            if sample is None:
+                if bool(getattr(tv_wrapper, "done", False)):
+                    if args.input_provider == "lerobot_offline":
+                        exit_go_home = args.offline_replay_end_action == "home"
+                        logger_mp.info(
+                            "[OFFLINE_REPLAY] input provider finished. end_action=%s, stopping main loop.",
+                            args.offline_replay_end_action,
+                        )
+                    START = False
+                    STOP = True
+                    continue
                 timing_debugger.maybe_report(arm_ctrl=arm_ctrl, gripper_ctrl=gripper_ctrl)
                 time.sleep(0.01)
+                continue
+            tele_data = sample.tele_data
+            motion_intent = sample.motion_intent
+            if args.input_provider == "online_inference" and bool(getattr(sample, "done", False)):
+                metadata = getattr(motion_intent, "metadata", {}) or {}
+                logger_mp.error(
+                    "[ONLINE_INFERENCE] provider entered fail-closed state: status=%s error=%s",
+                    metadata.get("online_inference_status"),
+                    metadata.get("error"),
+                )
+                START = False
+                STOP = True
                 continue
             tele_data_recv_ts_ns = time.perf_counter_ns()
             tele_fetch_ms = tele_fetch_dt * 1000.0
 
             takeover_logic_start = time.perf_counter()
+            tele_data = operator_runtime.apply_to_tele_data(
+                tele_data,
+                started=bool(START),
+                on_press=on_press,
+            )
 
             home_button_pressed = bool(tele_data.left_ctrl_bButton)
             if home_button_pressed and not prev_home_button_pressed:
@@ -1010,6 +1187,13 @@ if __name__ == '__main__':
             else:
                 left_arm_enabled = True
                 right_arm_enabled = True
+            provider_enabled_arms = None
+            if motion_intent is not None:
+                provider_enabled_arms = motion_intent.metadata.get("enabled_arms")
+            if provider_enabled_arms is not None:
+                provider_enabled_set = {str(side) for side in provider_enabled_arms}
+                left_arm_enabled = left_arm_enabled and ("left" in provider_enabled_set)
+                right_arm_enabled = right_arm_enabled and ("right" in provider_enabled_set)
             if home_wait_grip_release:
                 if not bool(tele_data.left_ctrl_squeeze) and not bool(tele_data.right_ctrl_squeeze):
                     home_wait_grip_release = False
@@ -1049,19 +1233,35 @@ if __name__ == '__main__':
             prev_right_grip_pressed = right_grip_pressed
             takeover_logic_ms = (time.perf_counter() - takeover_logic_start) * 1000.0
 
-            if (args.ee == "dex3" or args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
+            if (not args.no_gripper) and (args.ee == "dex3" or args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
                 with left_hand_pos_array.get_lock():
                     left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
                 with right_hand_pos_array.get_lock():
                     right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
-            elif args.ee == "dex1" and args.input_mode == "controller":
-                if left_arm_enabled:
+            elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "controller":
+                if args.input_provider == "online_inference":
+                    left_trigger_value = (
+                        tele_data.left_ctrl_triggerValue
+                        if left_arm_enabled
+                        else float(np.clip(online_left_gripper_q / 5.4 * 2.0 + 5.0, 5.0, 7.0))
+                    )
+                    right_trigger_value = (
+                        tele_data.right_ctrl_triggerValue
+                        if right_arm_enabled
+                        else float(np.clip(online_right_gripper_q / 5.4 * 2.0 + 5.0, 5.0, 7.0))
+                    )
                     with left_gripper_value.get_lock():
-                        left_gripper_value.value = tele_data.left_ctrl_triggerValue
-                if right_arm_enabled:
+                        left_gripper_value.value = left_trigger_value
                     with right_gripper_value.get_lock():
-                        right_gripper_value.value = tele_data.right_ctrl_triggerValue
-            elif args.ee == "dex1" and args.input_mode == "hand":
+                        right_gripper_value.value = right_trigger_value
+                else:
+                    if left_arm_enabled:
+                        with left_gripper_value.get_lock():
+                            left_gripper_value.value = tele_data.left_ctrl_triggerValue
+                    if right_arm_enabled:
+                        with right_gripper_value.get_lock():
+                            right_gripper_value.value = tele_data.right_ctrl_triggerValue
+            elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "hand":
                 with left_gripper_value.get_lock():
                     left_gripper_value.value = tele_data.left_hand_pinchValue
                 with right_gripper_value.get_lock():
@@ -1186,6 +1386,7 @@ if __name__ == '__main__':
 
             # solve ik using motor data and wrist pose, then use ik results to control arms.
             ik_ms = 0.0
+            provider_feedback = None
             if any_zero_takeover_this_frame:
                 if post_home_takeover_armed and normalized_head_mode in {"head_coupled", "hybrid"}:
                     tv_wrapper.sync_reference_to_current_live_pose(require_live=False)
@@ -1195,37 +1396,78 @@ if __name__ == '__main__':
                 sol_q = home_target_q.copy()
                 sol_tauff = current_hold_tauff.copy()
             elif left_arm_enabled or right_arm_enabled:
-                left_target_pose = tele_data.left_wrist_pose
-                right_target_pose = tele_data.right_wrist_pose
-                if workspace_limit_enabled:
-                    if workspace_mode == "box":
-                        left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_box(
-                            left_target_pose,
-                            right_target_pose,
-                            workspace_min,
-                            workspace_max,
-                        )
-                    else:
-                        left_target_pose, right_target_pose, _ = clamp_dual_wrist_poses_to_tapered_workspace(
-                            left_target_pose,
-                            right_target_pose,
-                            tapered_workspace_params["z_min"],
-                            tapered_workspace_params["z_max"],
-                            tapered_workspace_params["x_min"],
-                            tapered_workspace_params["x_max_low"],
-                            tapered_workspace_params["x_max_high"],
-                            tapered_workspace_params["y_max_low"],
-                            tapered_workspace_params["y_max_high"],
-                        )
-                time_ik_start = time.perf_counter()
-                sol_q, sol_tauff  = arm_ik.solve_ik(left_target_pose, right_target_pose, current_lr_arm_q, current_lr_arm_dq)
-                ik_dt = time.perf_counter() - time_ik_start
-                ik_ms = ik_dt * 1000.0
-                timing_debugger.add_ik(ik_dt)
-                logger_mp.debug(f"ik:\t{round(ik_dt, 6)}")
+                motion_kind = str(getattr(motion_intent, "kind", "pose"))
+                if motion_kind == "pose":
+                    left_target_pose = motion_intent.left_wrist_pose
+                    right_target_pose = motion_intent.right_wrist_pose
+                    workspace_was_clamped = False
+                    if workspace_limit_enabled:
+                        if workspace_mode == "box":
+                            original_left_pose = np.asarray(left_target_pose, dtype=float).copy()
+                            original_right_pose = np.asarray(right_target_pose, dtype=float).copy()
+                            left_target_pose, right_target_pose, workspace_was_clamped = clamp_dual_wrist_poses_to_box(
+                                left_target_pose,
+                                right_target_pose,
+                                workspace_min,
+                                workspace_max,
+                            )
+                        else:
+                            original_left_pose = np.asarray(left_target_pose, dtype=float).copy()
+                            original_right_pose = np.asarray(right_target_pose, dtype=float).copy()
+                            left_target_pose, right_target_pose, workspace_was_clamped = clamp_dual_wrist_poses_to_tapered_workspace(
+                                left_target_pose,
+                                right_target_pose,
+                                tapered_workspace_params["z_min"],
+                                tapered_workspace_params["z_max"],
+                                tapered_workspace_params["x_min"],
+                                tapered_workspace_params["x_max_low"],
+                                tapered_workspace_params["x_max_high"],
+                                tapered_workspace_params["y_max_low"],
+                                tapered_workspace_params["y_max_high"],
+                            )
+                        if workspace_was_clamped and args.input_provider == "online_inference":
+                            left_clamp_delta = float(np.linalg.norm(np.asarray(left_target_pose)[:3, 3] - original_left_pose[:3, 3]))
+                            right_clamp_delta = float(np.linalg.norm(np.asarray(right_target_pose)[:3, 3] - original_right_pose[:3, 3]))
+                            provider_feedback = {
+                                "fatal": True,
+                                "reason": "online inference action exceeded workspace",
+                                "left_clamp_delta": left_clamp_delta,
+                                "right_clamp_delta": right_clamp_delta,
+                            }
+                    time_ik_start = time.perf_counter()
+                    sol_q, sol_tauff = arm_ik.solve_ik(left_target_pose, right_target_pose, current_lr_arm_q, current_lr_arm_dq)
+                    ik_dt = time.perf_counter() - time_ik_start
+                    ik_ms = ik_dt * 1000.0
+                    timing_debugger.add_ik(ik_dt)
+                    logger_mp.debug(f"ik:\t{round(ik_dt, 6)}")
+                elif motion_kind == "joint_position":
+                    sol_q = require_finite_vector(motion_intent.arm_q, 14, "motion_intent.arm_q")
+                    sol_tauff = current_hold_tauff.copy()
+                elif motion_kind == "joint_velocity":
+                    arm_dq = require_finite_vector(motion_intent.arm_dq, 14, "motion_intent.arm_dq")
+                    sol_q = current_lr_arm_q + arm_dq * control_dt
+                    sol_tauff = current_hold_tauff.copy()
+                else:
+                    logger_mp.error("Unsupported motion intent kind: %s", motion_kind)
+                    START = False
+                    STOP = True
+                    continue
+                if args.input_provider == "online_inference" and (
+                    not np.all(np.isfinite(sol_q)) or not np.all(np.isfinite(sol_tauff))
+                ):
+                    provider_feedback = {
+                        "fatal": True,
+                        "reason": "online inference produced non-finite IK/control target",
+                    }
             else:
                 sol_q = current_hold_q.copy()
                 sol_tauff = current_hold_tauff.copy()
+
+            if args.input_provider == "online_inference" and provider_feedback is not None:
+                sol_q = current_hold_q.copy()
+                sol_tauff = current_hold_tauff.copy()
+                left_arm_enabled = False
+                right_arm_enabled = False
 
             if ((not left_arm_enabled) or left_zero_takeover_this_frame) and (not home_return_active):
                 sol_q[:7] = current_hold_q[:7]
@@ -1250,6 +1492,7 @@ if __name__ == '__main__':
                 right_takeover_settle_frames -= 1
 
             safety_start = time.perf_counter()
+            sol_q_before_speed_limit = sol_q.copy()
             sol_q = limit_arm_joint_target_velocity(
                 sol_q,
                 current_lr_arm_q,
@@ -1257,9 +1500,27 @@ if __name__ == '__main__':
                 control_frequency=args.frequency,
             )
             safety_ms = (time.perf_counter() - safety_start) * 1000.0
+            if args.input_provider == "online_inference" and provider_feedback is None:
+                speed_limit_delta = online_inference_speed_limit_delta(
+                    target_q=sol_q_before_speed_limit,
+                    limited_q=sol_q,
+                    max_arm_joint_speed=args.max_arm_joint_speed,
+                    frequency=args.frequency,
+                )
+                if speed_limit_delta is not None:
+                    provider_feedback = {
+                        "fatal": True,
+                        "reason": "online inference action exceeded joint speed limit",
+                        "speed_limit_delta": speed_limit_delta,
+                    }
+                    sol_q = current_hold_q.copy()
             gravity_start = time.perf_counter()
             sol_tauff = compute_arm_gravity_tauff(arm_ik, sol_q)
             gravity_ms = (time.perf_counter() - gravity_start) * 1000.0
+            if args.input_provider == "online_inference" and provider_feedback is not None:
+                report_feedback = getattr(tv_wrapper, "report_control_feedback", None)
+                if callable(report_feedback):
+                    report_feedback(provider_feedback)
             current_hold_q = sol_q.copy()
             current_hold_tauff = sol_tauff.copy()
 
@@ -1267,10 +1528,19 @@ if __name__ == '__main__':
             if latency_tracker is not None and latency_tracker.can_start_new_trace():
                 max_command_delta = float(np.max(np.abs(sol_q - current_lr_arm_q)))
                 if max_command_delta >= args.latency_command_threshold:
+                    online_trace_extra = {}
+                    if args.input_provider == "online_inference" and motion_intent is not None:
+                        online_trace_extra = {
+                            key: value
+                            for key, value in (getattr(motion_intent, "metadata", {}) or {}).items()
+                            if str(key).startswith("online_")
+                        }
+                        online_trace_extra["online_provider_output_perf_ns"] = int(tele_data_recv_ts_ns)
                     trace_seq = latency_tracker.begin_trace(
                         recv_ts_ns=tele_data_recv_ts_ns,
                         recv_q=current_lr_arm_q,
                         extra={
+                            **online_trace_extra,
                             "tele_fetch_ms": tele_fetch_ms,
                             "takeover_logic_ms": takeover_logic_ms,
                             "base_control_ms": base_control_ms,
@@ -1321,25 +1591,25 @@ if __name__ == '__main__':
             if args.record:
                 READY = recorder.is_ready() # now ready to (2) enter RECORD_RUNNING state
                 # dex hand or gripper
-                if args.ee == "dex3" and args.input_mode == "hand":
+                if (not args.no_gripper) and args.ee == "dex3" and args.input_mode == "hand":
                     with dual_hand_data_lock:
                         left_ee_state = dual_hand_state_array[:7]
                         right_ee_state = dual_hand_state_array[-7:]
                         left_hand_action = dual_hand_action_array[:7]
                         right_hand_action = dual_hand_action_array[-7:]
-                elif args.ee == "dex1" and args.input_mode == "hand":
+                elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "hand":
                     with dual_gripper_data_lock:
                         left_ee_state = [dual_gripper_state_array[0]]
                         right_ee_state = [dual_gripper_state_array[1]]
                         left_hand_action = [dual_gripper_action_array[0]]
                         right_hand_action = [dual_gripper_action_array[1]]
-                elif args.ee == "dex1" and args.input_mode == "controller":
+                elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "controller":
                     with dual_gripper_data_lock:
                         left_ee_state = [dual_gripper_state_array[0]]
                         right_ee_state = [dual_gripper_state_array[1]]
                         left_hand_action = [dual_gripper_action_array[0]]
                         right_hand_action = [dual_gripper_action_array[1]]
-                elif (args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
+                elif (not args.no_gripper) and (args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
                     with dual_hand_data_lock:
                         left_ee_state = dual_hand_state_array[:6]
                         right_ee_state = dual_hand_state_array[-6:]
@@ -1642,11 +1912,21 @@ if __name__ == '__main__':
                             "action": build_alignment_timestamp_entry(aligned_action, sample_monotonic_ns),
                             "camera": camera_timestamps,
                         }
+                        aligned_arm_tauff = np.asarray(aligned_action["tauff"], dtype=float).reshape(-1)
+                        if aligned_arm_tauff.shape[0] != 14 or not np.all(np.isfinite(aligned_arm_tauff)):
+                            logger_mp.warning(
+                                "[RECORD_ALIGN] drop pending sample: invalid aligned arm tauff for control sidecar."
+                            )
+                            pending_record_samples.popleft()
+                            continue
+                        control_extras = {
+                            "arm_tauff": aligned_arm_tauff.tolist(),
+                        }
                         if args.sim:
                             sim_state = sim_state_subscriber.read_data()
-                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state, timestamps=timestamps)
+                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state, timestamps=timestamps, control_extras=control_extras)
                         else:
-                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, timestamps=timestamps)
+                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, timestamps=timestamps, control_extras=control_extras)
                         pending_record_samples.popleft()
 
             current_time = time.time()
@@ -1665,9 +1945,17 @@ if __name__ == '__main__':
     finally:
         try:
             if arm_ctrl is not None:
-                arm_ctrl.ctrl_dual_arm_go_home()
+                if exit_go_home:
+                    logger_mp.info("[EXIT] returning dual arms to home before shutdown...")
+                    arm_ctrl.ctrl_dual_arm_go_home()
+                logger_mp.warning(
+                    "[EXIT] holding dual arms at home for %.1fs before shutdown. "
+                    "Keep clear and support the robot if needed.",
+                    exit_home_hold_sec,
+                )
+                time.sleep(exit_home_hold_sec)
         except Exception as e:
-            logger_mp.error(f"Failed to ctrl_dual_arm_go_home: {e}")
+            logger_mp.error(f"Failed to hold dual arms at home before shutdown: {e}")
         
         try:
             if args.ipc and ipc_server is not None:
@@ -1680,9 +1968,10 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to stop keyboard listener or ipc server: {e}")
         
         try:
-            tv_wrapper.close()
+            if tv_wrapper is not None:
+                tv_wrapper.close()
         except Exception as e:
-            logger_mp.error(f"Failed to close XR wrapper: {e}")
+            logger_mp.error(f"Failed to close teleop input provider: {e}")
 
         try:
             if 'agv_bridge' in locals() and agv_bridge is not None:
