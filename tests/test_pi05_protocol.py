@@ -11,8 +11,8 @@ if str(REPO_ROOT) not in sys.path:
 
 class Pi05ProtocolTest(unittest.TestCase):
     def test_build_observation_payload_packs_reference_image_roles_prompt_and_pose9(self):
-        from teleop.utils.pi05_protocol import build_pi05_observation_payload
-        from teleop.utils.pose_transform import matrix_to_pose9_rot6d
+        from teleop.inference.pi05_protocol import build_pi05_observation_payload
+        from teleop.inference.pose_transform import matrix_to_pose9_rot6d
 
         pose = np.eye(4, dtype=float)
         pose[0, 3] = 0.25
@@ -46,7 +46,7 @@ class Pi05ProtocolTest(unittest.TestCase):
         self.assertEqual(payload["grippers_right"], [[0.02]])
 
     def test_build_observation_payload_rejects_unknown_image_roles(self):
-        from teleop.utils.pi05_protocol import build_pi05_observation_payload
+        from teleop.inference.pi05_protocol import build_pi05_observation_payload
 
         with self.assertRaises(ValueError):
             build_pi05_observation_payload(
@@ -58,7 +58,7 @@ class Pi05ProtocolTest(unittest.TestCase):
             )
 
     def test_normalize_action_response_combines_dual_arm_action_payload(self):
-        from teleop.utils.pi05_protocol import normalize_pi05_action_response
+        from teleop.inference.pi05_protocol import normalize_pi05_action_response
 
         payload = normalize_pi05_action_response(
             {
@@ -72,7 +72,7 @@ class Pi05ProtocolTest(unittest.TestCase):
         self.assertEqual(payload["actions"], [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]])
 
     def test_validate_action_sequence_requires_expected_dim(self):
-        from teleop.utils.pi05_protocol import validate_pi05_action_sequence
+        from teleop.inference.pi05_protocol import validate_pi05_action_sequence
 
         actions = validate_pi05_action_sequence(
             {"type": "action_sequence", "actions": [[1.0] * 20]},
@@ -84,7 +84,7 @@ class Pi05ProtocolTest(unittest.TestCase):
             validate_pi05_action_sequence({"type": "action_sequence", "actions": [[1.0] * 10]}, expected_dim=20)
 
     def test_validate_action_sequence_accepts_action_sequence_alias(self):
-        from teleop.utils.pi05_protocol import validate_pi05_action_sequence
+        from teleop.inference.pi05_protocol import validate_pi05_action_sequence
 
         actions = validate_pi05_action_sequence(
             {"type": "action_sequence", "action_sequence": [[1.0] * 20]},
@@ -94,7 +94,7 @@ class Pi05ProtocolTest(unittest.TestCase):
         self.assertEqual(actions.shape, (1, 20))
 
     def test_action_sequence_to_pose7_chunks_splits_dual_arm_rot6d(self):
-        from teleop.utils.pi05_protocol import pi05_action_sequence_to_pose7_chunks
+        from teleop.inference.pi05_protocol import pi05_action_sequence_to_pose7_chunks
 
         actions = np.asarray(
             [
@@ -114,7 +114,7 @@ class Pi05ProtocolTest(unittest.TestCase):
         self.assertTrue(np.allclose(right[0], [4.0, 5.0, 6.0, 0.0, 0.0, 0.0, 1.0, 0.02]))
 
     def test_remap_action_sequence_applies_observation_delta(self):
-        from teleop.utils.pi05_protocol import remap_pi05_action_sequence_observation_delta
+        from teleop.inference.pi05_protocol import remap_pi05_action_sequence_observation_delta
 
         obs_anchor = np.asarray([
             1.0, 2.0, 3.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.01, 0.0,

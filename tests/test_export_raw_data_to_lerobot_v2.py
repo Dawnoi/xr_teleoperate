@@ -29,11 +29,8 @@ logging_mp_stub = types.ModuleType("logging_mp")
 logging_mp_stub.getLogger = lambda *_args, **_kwargs: _DummyLogger()
 sys.modules.setdefault("logging_mp", logging_mp_stub)
 sys.modules.setdefault("zmq", types.ModuleType("zmq"))
-rerun_visualizer_stub = types.ModuleType("teleop.utils.rerun_visualizer")
-rerun_visualizer_stub.RerunLogger = type("RerunLogger", (), {})
-sys.modules.setdefault("teleop.utils.rerun_visualizer", rerun_visualizer_stub)
 
-from teleop.utils import lerobot_v2_writer
+from teleop.recording import lerobot_v2_writer
 from tests.test_lerobot_v2_writer_alignment_sidecar import _FakeVideoWriter, _fake_video_writer
 from tests.test_lerobot_v2_writer_rerun import _FakeArmIk, _fake_compute_fk
 

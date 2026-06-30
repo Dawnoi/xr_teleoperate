@@ -441,7 +441,7 @@ class TeleopInputProviderTest(unittest.TestCase):
             create_teleop_input_provider(args)
 
     def test_online_provider_left_arm_emits_pose_intent_and_dex1_qpos_trigger(self):
-        from teleop.utils.online_inference import CameraSample, OnlineInferenceStep
+        from teleop.inference.online_session import CameraSample, OnlineInferenceStep
         from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         current_left = _pose_matrix(1.0, 0.0, 0.0)
@@ -490,7 +490,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertEqual(camera_samples[0].name, "head")
 
     def test_online_provider_right_arm_holds_left_side(self):
-        from teleop.utils.online_inference import OnlineInferenceStep
+        from teleop.inference.online_session import OnlineInferenceStep
         from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         current_left = _pose_matrix(1.0, 0.0, 0.0)
@@ -527,7 +527,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertAlmostEqual(sample.tele_data.right_ctrl_triggerValue, 7.0)
 
     def test_online_provider_both_arms_enabled(self):
-        from teleop.utils.online_inference import OnlineInferenceStep
+        from teleop.inference.online_session import OnlineInferenceStep
         from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         session = FakeOnlineSession(
@@ -560,7 +560,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertAlmostEqual(sample.tele_data.right_ctrl_triggerValue, 7.0)
 
     def test_online_provider_dry_run_status_does_not_enable_motion(self):
-        from teleop.utils.online_inference import OnlineInferenceStep
+        from teleop.inference.online_session import OnlineInferenceStep
         from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         current_left = _pose_matrix(1.0, 0.0, 0.0)
@@ -594,7 +594,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertFalse(sample.tele_data.right_ctrl_squeeze)
 
     def test_online_provider_failed_session_returns_done(self):
-        from teleop.utils.online_inference import OnlineInferenceStep
+        from teleop.inference.online_session import OnlineInferenceStep
         from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         session = FakeOnlineSession(
@@ -625,7 +625,7 @@ class TeleopInputProviderTest(unittest.TestCase):
         self.assertEqual(sample.motion_intent.metadata["online_inference_status"], "failed")
 
     def test_online_provider_declares_non_empty_camera_sources_as_required(self):
-        from teleop.utils.online_inference import OnlineInferenceStep
+        from teleop.inference.online_session import OnlineInferenceStep
         from teleop.input.teleop_input_provider import OnlineInferenceInputProvider
 
         session = FakeOnlineSession(

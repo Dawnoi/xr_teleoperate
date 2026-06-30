@@ -39,7 +39,7 @@ def _import_episode_writer():
         ),
         "zmq": {},
         "logging_mp": dict(getLogger=lambda *_args, **_kwargs: _DummyLogger()),
-        "teleop.utils.rerun_visualizer": dict(RerunLogger=type("RerunLogger", (), {})),
+        "teleop.recording.rerun_visualizer": dict(RerunLogger=type("RerunLogger", (), {})),
     }
     original_modules = {name: sys.modules.get(name) for name in stubbed_modules}
     try:

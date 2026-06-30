@@ -10,7 +10,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teleop.utils import lerobot_v2_writer
+from teleop.recording import lerobot_v2_writer
 from tests.test_lerobot_v2_writer_rerun import _FakeArmIk, _fake_compute_fk, _sample
 
 

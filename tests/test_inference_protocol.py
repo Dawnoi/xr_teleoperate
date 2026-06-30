@@ -15,7 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 class InferenceProtocolTest(unittest.TestCase):
     def test_newline_codec_handles_split_and_coalesced_messages(self):
-        from teleop.utils.inference_protocol import NewlineJsonCodec, encode_json_line, make_reset_message
+        from teleop.inference.protocol import NewlineJsonCodec, encode_json_line, make_reset_message
 
         codec = NewlineJsonCodec()
         message_a = {"type": "action", "seq": 1, "action": [[0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 1.0, 0.5]]}
@@ -29,7 +29,7 @@ class InferenceProtocolTest(unittest.TestCase):
         self.assertEqual(wire_b, b'{"type":"reset","reason":"unit-test"}\n')
 
     def test_parse_left_accepts_action_l_or_single_action(self):
-        from teleop.utils.inference_protocol import parse_action_chunk
+        from teleop.inference.protocol import parse_action_chunk
 
         step = [0.1, -0.2, 0.3, 0.0, 0.0, 0.0, 2.0, 0.8]
         for payload in ({"type": "action", "action_l": [step]}, {"type": "action", "action": [step]}):
@@ -43,7 +43,7 @@ class InferenceProtocolTest(unittest.TestCase):
                 self.assertAlmostEqual(parsed.left[0][7], 0.8)
 
     def test_parse_both_rejects_single_action(self):
-        from teleop.utils.inference_protocol import parse_action_chunk
+        from teleop.inference.protocol import parse_action_chunk
 
         with self.assertRaises(ValueError):
             parse_action_chunk(
@@ -52,7 +52,7 @@ class InferenceProtocolTest(unittest.TestCase):
             )
 
     def test_parse_rejects_ambiguous_action_keys(self):
-        from teleop.utils.inference_protocol import parse_action_chunk
+        from teleop.inference.protocol import parse_action_chunk
 
         with self.assertRaises(ValueError):
             parse_action_chunk(
@@ -65,7 +65,7 @@ class InferenceProtocolTest(unittest.TestCase):
             )
 
     def test_parse_rejects_empty_or_wrong_dim_or_nan(self):
-        from teleop.utils.inference_protocol import parse_action_chunk
+        from teleop.inference.protocol import parse_action_chunk
 
         bad_payloads = (
             {"type": "action", "action": []},
@@ -79,7 +79,7 @@ class InferenceProtocolTest(unittest.TestCase):
                     parse_action_chunk(payload, arm_side="left")
 
     def test_parse_normalizes_quaternion(self):
-        from teleop.utils.inference_protocol import parse_action_chunk
+        from teleop.inference.protocol import parse_action_chunk
 
         parsed = parse_action_chunk(
             {"type": "action", "action_r": [[1.0, 2.0, 3.0, 1.0, 2.0, 2.0, 4.0, -0.5]]},
@@ -93,7 +93,7 @@ class InferenceProtocolTest(unittest.TestCase):
         self.assertTrue(np.allclose(quat, np.array([1.0, 2.0, 2.0, 4.0]) / 5.0))
 
     def test_encode_jpeg_base64_roundtrip_decodable(self):
-        from teleop.utils.inference_protocol import encode_jpeg_base64
+        from teleop.inference.protocol import encode_jpeg_base64
 
         image = np.zeros((24, 32, 3), dtype=np.uint8)
         image[:, :16] = [255, 32, 16]
@@ -109,13 +109,13 @@ class InferenceProtocolTest(unittest.TestCase):
         self.assertLess(mean_abs_error, 8.0)
 
     def test_make_reset_message(self):
-        from teleop.utils.inference_protocol import make_reset_message
+        from teleop.inference.protocol import make_reset_message
 
         self.assertEqual(make_reset_message(), {"type": "reset"})
         self.assertEqual(make_reset_message(reason="done"), {"type": "reset", "reason": "done"})
 
     def test_json_codec_rejects_nonstandard_nan_and_encode_disallows_nan(self):
-        from teleop.utils.inference_protocol import NewlineJsonCodec, encode_json_line
+        from teleop.inference.protocol import NewlineJsonCodec, encode_json_line
 
         with self.assertRaises(ValueError):
             encode_json_line({"type": "observation", "value": float("nan")})
@@ -125,7 +125,7 @@ class InferenceProtocolTest(unittest.TestCase):
             codec.feed(b'{"type":"action","value":NaN}\n')
 
     def test_tcp_json_transport_uses_newline_json_without_blocking_recv(self):
-        from teleop.utils.inference_protocol import TcpJsonTransport
+        from teleop.inference.protocol import TcpJsonTransport
 
         client_sock, server_sock = socket.socketpair()
         self.addCleanup(server_sock.close)
@@ -146,7 +146,7 @@ class InferenceProtocolTest(unittest.TestCase):
         self.assertIsNone(transport.recv_json_nonblocking())
 
     def test_tcp_json_transport_reset_sends_reset_message(self):
-        from teleop.utils.inference_protocol import TcpJsonTransport
+        from teleop.inference.protocol import TcpJsonTransport
 
         client_sock, server_sock = socket.socketpair()
         self.addCleanup(server_sock.close)
@@ -158,7 +158,7 @@ class InferenceProtocolTest(unittest.TestCase):
         self.assertEqual(server_sock.recv(4096), b'{"type":"reset","reason":"unit-test"}\n')
 
     def test_tcp_json_transport_can_discard_stale_pending_rx(self):
-        from teleop.utils.inference_protocol import TcpJsonTransport
+        from teleop.inference.protocol import TcpJsonTransport
 
         client_sock, server_sock = socket.socketpair()
         self.addCleanup(server_sock.close)
@@ -179,7 +179,7 @@ class InferenceProtocolTest(unittest.TestCase):
         self.assertIsNone(transport.recv_json_nonblocking())
 
     def test_http_transport_reset_sends_reference_pi05_handshake_payload(self):
-        from teleop.utils.inference_protocol import HttpJsonInferenceTransport
+        from teleop.inference.protocol import HttpJsonInferenceTransport
 
         captured = {}
         transport = HttpJsonInferenceTransport(
@@ -216,7 +216,7 @@ class InferenceProtocolTest(unittest.TestCase):
         )
 
     def test_http_transport_multipart_matches_nero_vla_client_shape(self):
-        from teleop.utils.inference_protocol import HttpJsonInferenceTransport
+        from teleop.inference.protocol import HttpJsonInferenceTransport
 
         captured = {}
         transport = HttpJsonInferenceTransport("http://127.0.0.1:8017")

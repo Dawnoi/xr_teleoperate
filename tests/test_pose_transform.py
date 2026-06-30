@@ -9,7 +9,7 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from teleop.utils.pose_transform import (
+from teleop.inference.pose_transform import (
     PoseTransformer,
     matrix_to_pose9_rot6d,
     matrix_to_rot6d,

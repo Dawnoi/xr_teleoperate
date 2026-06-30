@@ -128,7 +128,7 @@ def _image(fill: int) -> np.ndarray:
 
 class OnlineInferenceSessionTest(unittest.TestCase):
     def test_speed_limit_delta_returns_none_for_small_clip(self):
-        from teleop.utils.online_inference import online_inference_speed_limit_delta
+        from teleop.inference.online_session import online_inference_speed_limit_delta
 
         delta = online_inference_speed_limit_delta(
             target_q=np.array([0.01] * 14, dtype=float),
@@ -140,7 +140,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertIsNone(delta)
 
     def test_speed_limit_delta_reports_large_clip(self):
-        from teleop.utils.online_inference import online_inference_speed_limit_delta
+        from teleop.inference.online_session import online_inference_speed_limit_delta
 
         target = np.zeros(14, dtype=float)
         limited = np.zeros(14, dtype=float)
@@ -157,7 +157,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertAlmostEqual(delta, 0.49)
 
     def _make_state(self, host_monotonic_ns: int):
-        from teleop.utils.online_inference import RobotStateSample
+        from teleop.inference.online_session import RobotStateSample
 
         return RobotStateSample(
             host_monotonic_ns=host_monotonic_ns,
@@ -168,7 +168,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         )
 
     def _make_cameras(self, host_monotonic_ns: int):
-        from teleop.utils.online_inference import CameraSample
+        from teleop.inference.online_session import CameraSample
 
         return [
             CameraSample(name="head", frame=_image(40), host_monotonic_ns=host_monotonic_ns),
@@ -176,7 +176,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         ]
 
     def _make_pi05_cameras(self, host_monotonic_ns: int):
-        from teleop.utils.online_inference import CameraSample
+        from teleop.inference.online_session import CameraSample
 
         return [
             CameraSample(name="head", frame=_image(40), host_monotonic_ns=host_monotonic_ns),
@@ -184,7 +184,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         ]
 
     def _make_config(self, **overrides):
-        from teleop.utils.online_inference import OnlineInferenceConfig
+        from teleop.inference.online_session import OnlineInferenceConfig
 
         payload = {
             "arm_side": "left",
@@ -202,7 +202,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         return OnlineInferenceConfig(**payload)
 
     def test_tick_history_insufficient_returns_hold_without_send(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -227,7 +227,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(transport.sent_messages, [])
 
     def test_ready_observation_sends_pika_message_and_waits_nonblocking(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -275,7 +275,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(len(transformer.observation_calls), 2)
 
     def test_observation_history_uses_camera_freq_target_window(self):
-        from teleop.utils.online_inference import CameraSample, OnlineInferenceSession, RobotStateSample
+        from teleop.inference.online_session import CameraSample, OnlineInferenceSession, RobotStateSample
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -314,7 +314,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(arm_l["grippers"], [0.01, 0.03])
 
     def test_both_arm_observation_sends_arm_l_and_arm_r(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -345,7 +345,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(len(transformer.observation_calls), 4)
 
     def test_pi05_profile_sends_dual_arm_pose9_observation_with_prompt(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -392,7 +392,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(snapshot["last_observation"]["prompt"], "pick up the cube")
 
     def test_pi05_profile_maps_local_camera_names_to_nero_reference_roles(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -431,7 +431,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         )
 
     def test_pi05_profile_fails_closed_when_required_head_or_right_hand_image_missing(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -455,7 +455,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(transport.sent_messages, [])
 
     def test_reconnect_rearms_reset(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -484,7 +484,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(transport.reset_calls, 2)
 
     def test_transport_reset_is_called_without_reason(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = ResetCaptureTransport()
@@ -501,7 +501,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(transport.reset_calls, [((), {})])
 
     def test_real_motion_requires_pose_transformer(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         with self.assertRaises(ValueError):
             OnlineInferenceSession(
@@ -512,7 +512,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
             )
 
     def test_wait_action_timeout_fails_closed(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -543,7 +543,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(session.status, "failed")
 
     def test_wait_action_ignores_reset_ack_control_response(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -575,7 +575,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(session.status, "waiting_action")
 
     def test_debug_snapshot_tracks_latest_right_observation_and_action(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -605,7 +605,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertAlmostEqual(snapshot["last_action"]["right"]["delta_xyz_m"], 1.224744871, places=6)
 
     def test_post_action_delay_timeout_fails_closed(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -631,7 +631,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertIn("post_action_delay", session.error.lower())
 
     def test_valid_left_action_returns_enabled_left_only_when_motion_enabled(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -674,7 +674,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(transformer.action_calls[0][0], "left")
 
     def test_pi05_profile_loads_action_sequence20_as_dual_pose7_chunks(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -716,7 +716,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(session.get_debug_snapshot()["last_action"]["profile"], "pi05_dual_arm_20d")
 
     def test_dry_run_advances_action_but_disables_enabled_arms(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -759,7 +759,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(hold_step.enabled_arms, [])
 
     def test_post_action_delay_waits_for_new_state_and_camera_coverage_before_next_send(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -822,7 +822,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(len(transport.sent_messages), 2)
 
     def test_action_chunk_cadence_respects_action_step_sec(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -859,7 +859,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertTrue(np.allclose(second.left_pose, _pose_matrix(10.7, 10.0, 10.0)))
 
     def test_per_tick_chunk_step_mode_consumes_one_step_each_tick(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()
@@ -896,7 +896,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertTrue(np.allclose(third.left_pose, _pose_matrix(10.9, 10.0, 10.0)))
 
     def test_action_step_metadata_tracks_control_and_perf_timestamps_separately(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = DualFakeClock()
         transport = FakeTransport()
@@ -949,7 +949,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertEqual(second.metadata["online_step_output_perf_ns"], action_recv_perf_ns + 5_000_000)
 
     def test_observation_send_perf_timestamp_is_before_transport_send(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = DualFakeClock()
         transport = AdvancingSendTransport(clock=clock, send_ms=3.0)
@@ -986,7 +986,7 @@ class OnlineInferenceSessionTest(unittest.TestCase):
         self.assertAlmostEqual(step.metadata["online_obs_send_to_action_recv_ms"], 20.0)
 
     def test_control_feedback_fatal_aborts_chunk(self):
-        from teleop.utils.online_inference import OnlineInferenceSession
+        from teleop.inference.online_session import OnlineInferenceSession
 
         clock = FakeClock()
         transport = FakeTransport()

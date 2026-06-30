@@ -23,7 +23,6 @@ def _module_stub(name, **attrs):
 RECORDING_MODULES = (
     "teleop.recording.episode_writer",
     "teleop.recording.rerun_visualizer",
-    "teleop.utils.lerobot_v2_writer",
 )
 
 
@@ -72,12 +71,8 @@ class RecordingOptionalDependenciesTest(unittest.TestCase):
             sys.modules.pop(module_name, None)
         recording_pkg = sys.modules.get("teleop.recording")
         if recording_pkg is not None:
-            for attr_name in ("episode_writer", "rerun_visualizer", "lerobot_v2_writer"):
+            for attr_name in ("episode_writer", "rerun_visualizer"):
                 recording_pkg.__dict__.pop(attr_name, None)
-        utils_pkg = sys.modules.get("teleop.utils")
-        if utils_pkg is not None:
-            utils_pkg.__dict__.pop("lerobot_v2_writer", None)
-
     def test_recording_modules_import_without_optional_dependencies(self):
         with mock.patch.dict(sys.modules, {**self.base_stubs, "zmq": None, "rerun": None}, clear=False):
             episode_writer = importlib.import_module("teleop.recording.episode_writer")
