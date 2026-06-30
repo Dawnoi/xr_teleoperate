@@ -38,7 +38,7 @@ from teleop.control_utils.g1d_agv_bridge import G1DAgvBridge
 from teleop.operator.ipc import IPC_Server
 from teleop.control_utils.motion_switcher import MotionSwitcher, LocoClientWrapper
 from teleop.input.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
-from teleop.utils.online_inference import online_inference_speed_limit_delta
+from teleop.inference.online_session import online_inference_speed_limit_delta
 from teleop.control_utils.arm_target_safety import limit_arm_joint_target_velocity
 from teleop.control_utils.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,

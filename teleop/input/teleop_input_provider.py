@@ -8,14 +8,14 @@ from typing import Any, Mapping
 import logging_mp
 import numpy as np
 
-from teleop.utils.inference_protocol import HttpJsonInferenceTransport, TcpJsonTransport
-from teleop.utils.online_inference import (
+from teleop.inference.protocol import HttpJsonInferenceTransport, TcpJsonTransport
+from teleop.inference.online_session import (
     CameraSample,
     OnlineInferenceConfig,
     OnlineInferenceSession,
     RobotStateSample,
 )
-from teleop.utils.pose_transform import load_pose_transformer
+from teleop.inference.pose_transform import load_pose_transformer
 from teleop.input.xr_input_types import TeleData
 
 
