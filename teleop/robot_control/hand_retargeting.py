@@ -1,5 +1,13 @@
-from dex_retargeting import RetargetingConfig
 from pathlib import Path
+import sys
+
+_LOCAL_DEX_RETARGETING_SRC = Path(__file__).resolve().parent / "dex-retargeting" / "src"
+if _LOCAL_DEX_RETARGETING_SRC.exists():
+    _path = str(_LOCAL_DEX_RETARGETING_SRC)
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from dex_retargeting import RetargetingConfig
 import yaml
 from enum import Enum
 import logging_mp

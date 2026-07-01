@@ -13,6 +13,8 @@ fi
 
 unset PYTHONPATH || true
 
+REAL_TELEOP_ENTRY="${REAL_TELEOP_ENTRY:-teleop/real/teleop_hand_and_arm.py}"
+
 NETWORK_INTERFACE="${NETWORK_INTERFACE:-enx9c69d3212b05}"
 SENDER_IP="${SENDER_IP:-192.168.123.164}"
 
@@ -26,7 +28,10 @@ RECORD_ARM_REPR="${RECORD_ARM_REPR:-both}"
 
 cd "${REPO_DIR}"
 
-exec python teleop/real/teleop_hand_and_arm.py \
+echo "[START] real teleop entry: ${REAL_TELEOP_ENTRY}"
+echo "[START] network interface: ${NETWORK_INTERFACE}"
+
+exec python "${REAL_TELEOP_ENTRY}" \
   --input-mode controller \
   --arm G1_29 \
   --ee dex1 \

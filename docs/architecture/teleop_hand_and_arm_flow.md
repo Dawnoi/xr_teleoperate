@@ -1,8 +1,8 @@
 # `teleop/real/teleop_hand_and_arm.py` 程序流程梳理
 
 > 文件：`teleop/real/teleop_hand_and_arm.py`  
-> 当前规模：约 2010 行  
-> 定位：真机遥操主入口。它不是一个普通工具脚本，而是把 DDS 初始化、输入源、IK、夹爪、底盘、数据录制、在线推理、安全限幅和退出清理串起来的实时控制程序。
+> 当前规模：约 725 行
+> 定位：真机遥操唯一入口。它现在主要负责流程编排；DDS/硬件装配、operator 状态、EE 命令、arm/base command、recording 已按职责下沉到对应模块。
 
 ## 1. 总体职责
 
@@ -26,24 +26,23 @@
   -> finally 安全回 home、关闭线程和资源
 ```
 
-它目前还是一个“大入口”：顶层 helper 很少，主要实现都在 `if __name__ == '__main__':` 下面。
+它不再承载所有实现细节：`if __name__ == '__main__':` 仍是唯一真机入口，但主要只调各职责模块暴露的接口。
 
 ## 2. 关键依赖分层
 
 | 依赖 | 来源 | 职责 |
 |---|---|---|
+| `setup_real_teleop_components` | `teleop.real.setup` | DDS/base/arm/EE/camera/record/latency 启动装配 |
 | `G1_29_ArmController` 等 | `teleop.robot_control.robot_arm` | DDS arm 下发、状态读取、go home |
 | `G1_29_ArmIK` 等 | `teleop.robot_control.robot_arm_ik` | wrist pose -> 14 维 arm q / tauff |
 | `create_teleop_input_provider` | `core.input.teleop_input_provider` | 创建 XR / replay / online inference 输入源 |
 | `OperatorRuntime` | `teleop.runtime.*` | 键盘/手柄快捷键、home/record 命令 |
-| `EpisodeWriter`, `ZMQRawCameraReceiver` | `data_pipeline.recording.*` | 数据录制和远端相机帧接收 |
+| `OperatorStateFlow` | `teleop.control_flow.operator_state` | home/deadman/provider enabled/takeover 状态 |
+| `apply_end_effector_command` | `teleop.control_flow.end_effector_command` | dex1/dex3/inspire/brainco 命令映射 |
+| `apply_base_command` | `teleop.control_flow.base_command` | 底盘命令流水线 |
+| `build_arm_command` | `teleop.control_flow.arm_command_pipeline` | workspace clamp / IK / 限速 / 重力补偿 |
+| `TeleopRecordingFlow` | `data_pipeline.recording.teleop_recording_flow` | 录制 episode 生命周期、相机对齐、样本写入 |
 | `alignment` helpers | `data_pipeline.recording.alignment` | 录制时 state/action/camera 时间戳对齐 |
-| `LocalCameraStream` | `core.camera.local_camera` | 本地相机采集 |
-| `limit_arm_joint_target_velocity` | `core.control.arm_target_safety` | 关节速度限幅 |
-| workspace clamp | `core.control.arm_workspace_safety` | wrist pose workspace 限制 |
-| `online_inference_speed_limit_delta` | `inference.online_session` | 在线推理动作超速反馈 |
-| `G1DAgvBridge` / `LocoClientWrapper` | `core.control.*` | 底盘控制 |
-| `build_arm_command`, `apply_base_command` | `teleop.control_flow.*` | 每帧 arm/base command pipeline |
 | `SimpleLatencyTracker`, `TimingDebugger` | `teleop.debug.*` | 运行时调试和 latency trace |
 
 ## 3. 全局状态
@@ -63,36 +62,28 @@
 
 ## 4. 顶层函数定义
 
+`teleop_hand_and_arm.py` 只保留入口必须的少量 helper：
+
 | 函数 | 行为 | 主要调用方 |
 |---|---|---|
-| `publish_reset_category(category, publisher)` | 仿真模式下发布 reset category | 录制保存后、仿真 reset |
 | `on_press(key)` | 键盘命令入口：`r/q/s/v/h/c` | `sshkeyboard` |
 | `reset_arm_ik_state(arm_ik, arm_q)` | 重置 IK 初值和 smooth filter | home 后、takeover 边沿 |
 | `get_robot_wrist_poses(arm_ik, arm_q)` | 用 Pinocchio FK 从 q 算左右 wrist 4x4 pose | 输入 provider anchor、record pose |
-| `pose_matrix_to_record(pose_mat)` | 4x4 pose 转 `{position,rpy,rotation_matrix,matrix4x4}` | record 写入 pose 表示 |
+| `compute_arm_gravity_tauff()` | 用 Pinocchio RNEA 计算当前 q 的重力补偿，失败回退 0 | arm command pipeline |
+| `start_keyboard_listener()` | 启动键盘监听线程 | 入口启动阶段 |
+| `cleanup_real_teleop_resources()` | 退出时统一回 home、停线程、关闭 provider/AGV/camera/recorder | `finally` |
 
-## 5. 入口级 helper 方法
+## 5. 已下沉的职责模块
 
-这些方法不再嵌在 `main` 内部，主入口内只保留流程调度。
-
-| 函数 | 职责 |
+| 模块 | 职责 |
 |---|---|
-| `compute_arm_gravity_tauff()` | 用 Pinocchio RNEA 计算当前 q 的重力补偿，失败回退 0 |
-| `maybe_open_local_camera()` | 按 id 打开本地相机，失败返回 None |
-| `maybe_open_remote_camera()` | 按 ZMQ endpoint 打开远端相机，失败返回 None |
-| `start_keyboard_listener()` | 启动键盘监听线程 |
-| `cleanup_real_teleop_resources()` | 退出时统一回 home、停线程、关闭 provider/AGV/camera/recorder |
-
-录制对齐 helper 已移动到 `data_pipeline/recording/alignment.py`：
-
-- `append_timed_sample()`
-- `nearest_timed_sample()`
-- `interpolate_timed_sample()`
-- `camera_meta_monotonic_ns()`
-- `camera_frame_identity()`
-- `build_alignment_timestamp_entry()`
-- `timed_buffer_bounds()`
-- `interpolate_timed_sample_strict()`
+| `teleop/real/setup.py` | 真机启动装配，创建硬件控制器、相机、录制、latency tracker |
+| `teleop/control_flow/operator_state.py` | 操作员状态、home、deadman、takeover edge |
+| `teleop/control_flow/end_effector_command.py` | 夹爪/灵巧手命令下发 |
+| `teleop/control_flow/base_command.py` | 底盘命令 |
+| `teleop/control_flow/arm_command_pipeline.py` | 机械臂目标求解、安全限幅、重力补偿 |
+| `data_pipeline/recording/teleop_recording_flow.py` | recording 命令、首帧等待、pending sample、对齐写入 |
+| `data_pipeline/recording/alignment.py` | 时间戳对齐基础工具 |
 
 ## 6. CLI 参数分组
 
@@ -156,17 +147,19 @@ parse args
   -> workspace 参数准备
   -> TimingDebugger / state/action history 初始化
   -> 校验互斥参数和 offline dataset
-  -> ChannelFactoryInitialize(domain)
+  -> initialize_dds(domain)
   -> keyboard listener
   -> workspace/timing 日志
-  -> motion/debug/base 初始化
-  -> arm IK + arm controller 初始化
-  -> input provider 初始化
-  -> end-effector controller 初始化
-  -> affinity 可选设置
-  -> sim reset publisher/subscriber 可选初始化
-  -> recorder/camera 初始化
-  -> latency tracker 可选初始化
+  -> setup_real_teleop_components()
+      -> motion/debug/base 初始化
+      -> arm IK + arm controller 初始化
+      -> input provider 初始化
+      -> end-effector controller 初始化
+      -> affinity 可选设置
+      -> sim reset publisher/subscriber 可选初始化
+      -> recorder/camera 初始化
+      -> recording_flow 初始化
+      -> latency tracker 可选初始化
   -> arm go home
   -> READY=True，等待 START 或 auto-start
 ```
@@ -195,12 +188,14 @@ motion_intent = sample.motion_intent
 
 ### 9.1 record 命令处理
 
-每帧开始先处理：
+每帧开始先通过 `recording_flow.handle_commands(...)` 处理：
 
 - `RECORD_CANCEL`：取消 episode，清空 pending 队列
 - `RECORD_TOGGLE`：
   - 未录制：`recorder.create_episode()`，等待首个 post-start camera frame
   - 已录制：`recorder.save_episode()`，仿真时发布 reset
+
+样本写入通过 `recording_flow.process_frame(...)` 完成，主循环不再直接拼 recording payload。
 
 ### 9.2 head reference calibration
 

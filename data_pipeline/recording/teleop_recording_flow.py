@@ -1,4 +1,6 @@
-"""Recording flow used by the real teleop entrypoint.
+"""遥操作业录制流程：管理 episode 生命周期、时间对齐和样本写入。
+
+Recording flow used by the real teleop entrypoint.
 
 This module owns the mutable recording state and the per-frame alignment/write
 logic so ``teleop_hand_and_arm.py`` can stay as the runtime coordinator.
@@ -306,50 +308,17 @@ class TeleopRecordingFlow:
         while self.state.pending_samples:
             pending = self.state.pending_samples[0]
             sample_monotonic_ns = int(pending["sample_monotonic_ns"])
-            state_earliest, state_latest = timed_buffer_bounds(state_history, min_timestamp_ns=record_min_timestamp_ns)
-            action_earliest, action_latest = timed_buffer_bounds(action_history, min_timestamp_ns=record_min_timestamp_ns)
-            now_mono_ns = int(time.monotonic_ns())
-            sample_age_ns = now_mono_ns - sample_monotonic_ns
-
-            if state_earliest is None or action_earliest is None:
+            status, aligned_state, aligned_action = self._resolve_pending_alignment(
+                state_history=state_history,
+                action_history=action_history,
+                sample_monotonic_ns=sample_monotonic_ns,
+                record_min_timestamp_ns=record_min_timestamp_ns,
+            )
+            if status == "wait":
                 break
-            if sample_monotonic_ns < state_earliest or sample_monotonic_ns < action_earliest:
-                self.log.warning("[RECORD_ALIGN] drop pending sample: target timestamp fell out of state/action history window.")
+            if status == "drop":
                 self.state.pending_samples.popleft()
                 continue
-            if state_latest is None or action_latest is None:
-                break
-
-            waiting_for_future_coverage = sample_monotonic_ns > state_latest or sample_monotonic_ns > action_latest
-            if waiting_for_future_coverage and sample_age_ns <= self.record_future_wait_timeout_ns:
-                break
-
-            aligned_state = self._aligned_sample(
-                state_history,
-                sample_monotonic_ns,
-                strict_max_delta_ns=self.state_align_max_delta_ns,
-                fallback_max_delta_ns=self.state_nearest_fallback_max_delta_ns,
-                min_timestamp_ns=record_min_timestamp_ns,
-            )
-            aligned_action = self._aligned_sample(
-                action_history,
-                sample_monotonic_ns,
-                strict_max_delta_ns=self.action_align_max_delta_ns,
-                fallback_max_delta_ns=self.action_nearest_fallback_max_delta_ns,
-                min_timestamp_ns=record_min_timestamp_ns,
-            )
-            if aligned_state is None:
-                if sample_age_ns > self.pending_sample_timeout_ns:
-                    self.log.warning("[RECORD_ALIGN] drop pending sample: no interpolated state found at primary camera timestamp.")
-                    self.state.pending_samples.popleft()
-                    continue
-                break
-            if aligned_action is None:
-                if sample_age_ns > self.pending_sample_timeout_ns:
-                    self.log.warning("[RECORD_ALIGN] drop pending sample: no interpolated action found at primary camera timestamp.")
-                    self.state.pending_samples.popleft()
-                    continue
-                break
 
             colors, depths, camera_timestamps = self._aligned_camera_frames(
                 pending=pending,
@@ -364,43 +333,121 @@ class TeleopRecordingFlow:
                 arm_ik=arm_ik,
                 get_wrist_poses=get_wrist_poses,
             )
-            timestamps = {
-                "sample_wall_time_ns": int(time.time_ns()),
-                "sample_monotonic_ns": sample_monotonic_ns,
-                "teleop_input_perf_counter_ns": int(pending["teleop_input_perf_counter_ns"]),
-                "primary_camera_name": pending["primary_camera_name"],
-                "state": build_alignment_timestamp_entry(aligned_state, sample_monotonic_ns),
-                "action": build_alignment_timestamp_entry(aligned_action, sample_monotonic_ns),
-                "camera": camera_timestamps,
-            }
-            aligned_arm_tauff = np.asarray(aligned_action["tauff"], dtype=float).reshape(-1)
-            if aligned_arm_tauff.shape[0] != 14 or not np.all(np.isfinite(aligned_arm_tauff)):
-                self.log.warning("[RECORD_ALIGN] drop pending sample: invalid aligned arm tauff for control sidecar.")
+            if not self._add_record_item(
+                pending=pending,
+                sample_monotonic_ns=sample_monotonic_ns,
+                aligned_state=aligned_state,
+                aligned_action=aligned_action,
+                colors=colors,
+                depths=depths,
+                states=states,
+                actions=actions,
+                camera_timestamps=camera_timestamps,
+                sim_state_subscriber=sim_state_subscriber,
+            ):
                 self.state.pending_samples.popleft()
                 continue
-            control_extras = {"arm_tauff": aligned_arm_tauff.tolist()}
-
-            if self.args.sim:
-                sim_state = sim_state_subscriber.read_data() if sim_state_subscriber is not None else None
-                self.recorder.add_item(
-                    colors=colors,
-                    depths=depths,
-                    states=states,
-                    actions=actions,
-                    sim_state=sim_state,
-                    timestamps=timestamps,
-                    control_extras=control_extras,
-                )
-            else:
-                self.recorder.add_item(
-                    colors=colors,
-                    depths=depths,
-                    states=states,
-                    actions=actions,
-                    timestamps=timestamps,
-                    control_extras=control_extras,
-                )
             self.state.pending_samples.popleft()
+
+    def _resolve_pending_alignment(
+        self,
+        *,
+        state_history: deque,
+        action_history: deque,
+        sample_monotonic_ns: int,
+        record_min_timestamp_ns: int,
+    ) -> tuple[str, dict | None, dict | None]:
+        state_earliest, state_latest = timed_buffer_bounds(state_history, min_timestamp_ns=record_min_timestamp_ns)
+        action_earliest, action_latest = timed_buffer_bounds(action_history, min_timestamp_ns=record_min_timestamp_ns)
+        sample_age_ns = int(time.monotonic_ns()) - int(sample_monotonic_ns)
+
+        if state_earliest is None or action_earliest is None:
+            return "wait", None, None
+        if sample_monotonic_ns < state_earliest or sample_monotonic_ns < action_earliest:
+            self.log.warning("[RECORD_ALIGN] drop pending sample: target timestamp fell out of state/action history window.")
+            return "drop", None, None
+        if state_latest is None or action_latest is None:
+            return "wait", None, None
+        if sample_monotonic_ns > state_latest or sample_monotonic_ns > action_latest:
+            if sample_age_ns <= self.record_future_wait_timeout_ns:
+                return "wait", None, None
+
+        aligned_state = self._aligned_sample(
+            state_history,
+            sample_monotonic_ns,
+            strict_max_delta_ns=self.state_align_max_delta_ns,
+            fallback_max_delta_ns=self.state_nearest_fallback_max_delta_ns,
+            min_timestamp_ns=record_min_timestamp_ns,
+        )
+        aligned_action = self._aligned_sample(
+            action_history,
+            sample_monotonic_ns,
+            strict_max_delta_ns=self.action_align_max_delta_ns,
+            fallback_max_delta_ns=self.action_nearest_fallback_max_delta_ns,
+            min_timestamp_ns=record_min_timestamp_ns,
+        )
+        if aligned_state is None:
+            if sample_age_ns > self.pending_sample_timeout_ns:
+                self.log.warning("[RECORD_ALIGN] drop pending sample: no interpolated state found at primary camera timestamp.")
+                return "drop", None, None
+            return "wait", None, None
+        if aligned_action is None:
+            if sample_age_ns > self.pending_sample_timeout_ns:
+                self.log.warning("[RECORD_ALIGN] drop pending sample: no interpolated action found at primary camera timestamp.")
+                return "drop", None, None
+            return "wait", None, None
+        return "ready", aligned_state, aligned_action
+
+    def _add_record_item(
+        self,
+        *,
+        pending,
+        sample_monotonic_ns: int,
+        aligned_state: dict,
+        aligned_action: dict,
+        colors,
+        depths,
+        states,
+        actions,
+        camera_timestamps,
+        sim_state_subscriber=None,
+    ) -> bool:
+        timestamps = {
+            "sample_wall_time_ns": int(time.time_ns()),
+            "sample_monotonic_ns": int(sample_monotonic_ns),
+            "teleop_input_perf_counter_ns": int(pending["teleop_input_perf_counter_ns"]),
+            "primary_camera_name": pending["primary_camera_name"],
+            "state": build_alignment_timestamp_entry(aligned_state, sample_monotonic_ns),
+            "action": build_alignment_timestamp_entry(aligned_action, sample_monotonic_ns),
+            "camera": camera_timestamps,
+        }
+        aligned_arm_tauff = np.asarray(aligned_action["tauff"], dtype=float).reshape(-1)
+        if aligned_arm_tauff.shape[0] != 14 or not np.all(np.isfinite(aligned_arm_tauff)):
+            self.log.warning("[RECORD_ALIGN] drop pending sample: invalid aligned arm tauff for control sidecar.")
+            return False
+        control_extras = {"arm_tauff": aligned_arm_tauff.tolist()}
+
+        if self.args.sim:
+            sim_state = sim_state_subscriber.read_data() if sim_state_subscriber is not None else None
+            self.recorder.add_item(
+                colors=colors,
+                depths=depths,
+                states=states,
+                actions=actions,
+                sim_state=sim_state,
+                timestamps=timestamps,
+                control_extras=control_extras,
+            )
+        else:
+            self.recorder.add_item(
+                colors=colors,
+                depths=depths,
+                states=states,
+                actions=actions,
+                timestamps=timestamps,
+                control_extras=control_extras,
+            )
+        return True
 
     def _aligned_sample(self, buffer, target_ns, *, strict_max_delta_ns, fallback_max_delta_ns, min_timestamp_ns):
         aligned = interpolate_timed_sample_strict(

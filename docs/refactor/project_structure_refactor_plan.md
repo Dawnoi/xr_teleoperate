@@ -4,6 +4,8 @@
 > 当前分支：`refactor/project-structure`  
 > 当前目标：按真实业务边界收敛目录；已清理过渡 shim 和空目录。
 
+> 2026-07-01 更新：当前已经落地到 `teleop/real/teleop_hand_and_arm.py` 作为唯一真机入口；没有新增 `app.py` wrapper。启动装配下沉到 `teleop/real/setup.py`，每帧控制下沉到 `teleop/control_flow/`，录制流程下沉到 `data_pipeline/recording/teleop_recording_flow.py`。最新运行结构以 `docs/architecture/project_layout.md` 和 `docs/architecture/teleop_hand_and_arm_flow.md` 为准。
+
 ## 1. 当前项目主流程
 
 当前仓库已经不是单纯的 XR 遥操 demo，而是混合了以下几条流程：
@@ -13,7 +15,7 @@ A. XR 遥操真机
    XR/PICO/Controller/Tracker
    -> core.input
    -> TeleData
-   -> teleop_hand_and_arm.py 主循环
+   -> teleop/real/teleop_hand_and_arm.py 主循环
    -> IK / 安全限幅 / 夹爪 / 底盘
    -> DDS 真机下发
 
@@ -56,7 +58,7 @@ xr_teleoperate/
 ├── img/                    # README 图片资源
 ├── scripts/                # demo、启动、回放、诊断脚本混在一起
 ├── teleop/
-│   ├── teleop_hand_and_arm.py      # 真机主入口；当前约 2000 行，职责过重
+│   ├── real/teleop_hand_and_arm.py # 真机唯一入口；主做流程编排
 │   ├── input/              # 输入源抽象：XR、offline、online inference
 │   ├── inference/          # 在线推理协议、传输、pose transform、session
 │   ├── robot_control/      # 机械臂 IK、DDS 控制、夹爪、dex-retargeting vendor
@@ -308,9 +310,9 @@ scripts/start_real_robot_wired_3cams_zmq.sh
 
 处理方式：
 
-- 先新增 `teleop/real/app.py`，从旧 `teleop_hand_and_arm.py` 逐步抽 argparse/init 逻辑。
-- 旧 `teleop/real/teleop_hand_and_arm.py` 保留为兼容 wrapper。
-- `scripts/start_real_robot_*.sh` 后续移动到 `scripts/start/`，只调用 `python teleop/real/teleop_hand_and_arm.py`。
+- 不新增 `teleop/real/app.py` wrapper，保留 `teleop/real/teleop_hand_and_arm.py` 为唯一真机入口。
+- 启动装配下沉到 `teleop/real/setup.py`。
+- `scripts/start/*.sh` 只调用 `python teleop/real/teleop_hand_and_arm.py`，不承载业务逻辑。
 
 ### 7.2 应归到 `teleop/sim`
 
@@ -418,10 +420,10 @@ configs/inference/*
 
 ### Phase 1：先把遥操入口按 real/sim 收口
 
-- [x] 新增 `teleop/real/app.py`，承接真机 CLI 和启动拼装。
+- [x] 不新增 `app.py`；`teleop/real/teleop_hand_and_arm.py` 保持唯一入口，启动装配下沉到 `teleop/real/setup.py`。
 - [x] 新增 `teleop/sim/app.py`，承接 MuJoCo CLI 和启动拼装。
-- [ ] 新增 `teleop/runtime/`，抽出 real/sim 共享的 takeover/deadman/home/control-loop 状态机。
-- [x] `teleop/real/teleop_hand_and_arm.py` 保留为旧入口 wrapper。
+- [x] 新增/整理 `teleop/control_flow/`，抽出 base/arm/operator/end-effector 每帧控制职责。
+- [x] `teleop/real/teleop_hand_and_arm.py` 保留为唯一真机入口，不做 wrapper 套娃。
 - [x] `teleop/sim/xrobotics_mujoco.py` 保留为旧入口 wrapper。
 
 ### Phase 2：把数据采集和回放迁出 teleop
@@ -447,8 +449,8 @@ configs/inference/*
 
 ### Phase 5：脚本和文档收口
 
-- [x] `scripts/` 按 start/demo/replay/debug/data 分组。
-- [x] 旧脚本路径保留薄 wrapper 一个过渡周期。
+- [x] `scripts/` 按 start/replay/debug/data 分组。
+- [x] 启动脚本仅设置环境变量和参数，调用唯一真机入口。
 - [x] 根目录文档只保留 README/RUN；专题文档移到 docs。
 - [ ] 增加最小 smoke tests：provider factory、pose transform、pi05 protocol、operator keybinds、real/sim app `--help`。
 

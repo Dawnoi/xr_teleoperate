@@ -13,11 +13,16 @@ fi
 
 unset PYTHONPATH || true
 
+REAL_TELEOP_ENTRY="${REAL_TELEOP_ENTRY:-teleop/real/teleop_hand_and_arm.py}"
+
 NETWORK_INTERFACE="${NETWORK_INTERFACE:-wlo1}"
 
 cd "${REPO_DIR}"
 
-exec python teleop/real/teleop_hand_and_arm.py \
+echo "[START] real teleop entry: ${REAL_TELEOP_ENTRY}"
+echo "[START] network interface: ${NETWORK_INTERFACE}"
+
+exec python "${REAL_TELEOP_ENTRY}" \
   --input-mode controller \
   --arm G1_29 \
   --ee dex1 \

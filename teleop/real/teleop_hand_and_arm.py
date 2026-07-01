@@ -1,5 +1,6 @@
+"""真机遥操主入口：只编排启动、主循环和各职责模块的接口调用。"""
+
 import time
-from multiprocessing import Value, Array, Lock
 import threading
 from collections import deque
 import numpy as np
@@ -31,29 +32,23 @@ import pinocchio as pin
 
 from teleop.real.args import parse_args
 from data_pipeline.recording.alignment import append_timed_sample
-from data_pipeline.recording.teleop_recording_flow import TeleopRecordingFlow
-from unitree_sdk2py.core.channel import ChannelFactoryInitialize # dds 
-from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmController, H1_2_ArmController, H1_ArmController, H2_ArmController
-from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
-from data_pipeline.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
-from core.control.g1d_agv_bridge import G1DAgvBridge
-from core.control.motion_switcher import MotionSwitcher, LocoClientWrapper
-from core.input.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
-from core.camera.local_camera import LocalCameraStream
-from teleop.debug.latency_trace import SimpleLatencyTracker
+from core.input.teleop_input_provider import validate_lerobot_offline_episode
 from teleop.debug.timing_debugger import TimingDebugger
+from teleop.real.setup import (
+    RealTeleopComponents,
+    initialize_dds,
+    log_workspace_config,
+    setup_real_teleop_components,
+)
 from teleop.runtime.operator_runtime import OperatorRuntime
 from teleop.control_flow.base_command import apply_base_command
 from teleop.control_flow.arm_command_pipeline import build_arm_command
+from teleop.control_flow.operator_state import OperatorStateFlow
+from teleop.control_flow.end_effector_command import (
+    apply_end_effector_command,
+    read_online_gripper_widths,
+)
 from sshkeyboard import listen_keyboard, stop_listening
-
-# for simulation
-from unitree_sdk2py.core.channel import ChannelPublisher
-from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
-def publish_reset_category(category: int, publisher): # Scene Reset signal
-    msg = String_(data=str(category))
-    publisher.Write(msg)
-    logger_mp.info(f"published reset category: {category}")
 
 # state transition
 START          = False  # Enable to start robot following VR user motion
@@ -147,35 +142,6 @@ def compute_arm_gravity_tauff(arm_ik_obj, arm_q):
         return np.zeros_like(np.asarray(arm_q, dtype=float))
 
 
-def maybe_open_local_camera(name: str, camera_id: int, args):
-    if int(camera_id) < 0:
-        return None
-    try:
-        return LocalCameraStream(
-            name=name,
-            camera_id=int(camera_id),
-            width=args.camera_width,
-            height=args.camera_height,
-            fps=args.camera_fps,
-            fourcc=args.camera_fourcc,
-            buffer_size=args.camera_buffer_size,
-        )
-    except Exception as e:
-        logger_mp.warning(f"[CAM] failed to open local camera '{name}' (id={camera_id}): {e}")
-        return None
-
-
-def maybe_open_remote_camera(name: str, endpoint: str):
-    endpoint = str(endpoint or "").strip()
-    if not endpoint:
-        return None
-    try:
-        return ZMQRawCameraReceiver(endpoint=endpoint, name=name)
-    except Exception as e:
-        logger_mp.warning(f"[CAM] failed to connect remote camera '{name}' ({endpoint}): {e}")
-        return None
-
-
 def start_keyboard_listener():
     listen_keyboard_thread = threading.Thread(
         target=listen_keyboard,
@@ -261,7 +227,9 @@ def cleanup_real_teleop_resources(
 
 
 if __name__ == '__main__':
+    components = RealTeleopComponents()
     arm_ctrl = None
+    arm_ik = None
     tv_wrapper = None
     listen_keyboard_thread = None
     gripper_ctrl = None
@@ -269,22 +237,9 @@ if __name__ == '__main__':
     recorder = None
     recording_flow = None
     sim_state_subscriber = None
-    reset_pose_publisher = None
     agv_bridge = None
     exit_go_home = True
     exit_home_hold_sec = 5.0
-    head_camera = None
-    left_camera = None
-    right_camera = None
-    head_remote_camera = None
-    left_remote_camera = None
-    right_remote_camera = None
-    dual_hand_data_lock = None
-    dual_hand_state_array = None
-    dual_hand_action_array = None
-    dual_gripper_data_lock = None
-    dual_gripper_state_array = None
-    dual_gripper_action_array = None
     args = parse_args()
     logger_mp.debug(f"args: {args}")
     operator_runtime = OperatorRuntime(record_enabled=bool(args.record))
@@ -320,226 +275,29 @@ if __name__ == '__main__':
         )
 
     try:
-        # setup dds communication domains id
-        if args.sim:
-            ChannelFactoryInitialize(1, networkInterface=args.network_interface)
-        else:
-            ChannelFactoryInitialize(0, networkInterface=args.network_interface)
-
-        # keyboard communication mode
+        initialize_dds(args)
         listen_keyboard_thread = start_keyboard_listener()
+        log_workspace_config(
+            args,
+            workspace_limit_enabled=workspace_limit_enabled,
+            workspace_mode=workspace_mode,
+            workspace_min=workspace_min,
+            workspace_max=workspace_max,
+            tapered_workspace_params=tapered_workspace_params,
+            log=logger_mp,
+        )
 
-        if workspace_limit_enabled:
-            if workspace_mode == "box":
-                logger_mp.info(
-                    "[ARM_WORKSPACE] enabled: forward box, min=(%.3f, %.3f, %.3f), max=(%.3f, %.3f, %.3f)",
-                    workspace_min[0], workspace_min[1], workspace_min[2],
-                    workspace_max[0], workspace_max[1], workspace_max[2],
-                )
-            else:
-                logger_mp.info(
-                    "[ARM_WORKSPACE] enabled: tapered prism, z=[%.3f, %.3f], x_min=%.3f, "
-                    "x_max(low->high)=(%.3f -> %.3f), |y|max(low->high)=(%.3f -> %.3f)",
-                    tapered_workspace_params["z_min"],
-                    tapered_workspace_params["z_max"],
-                    tapered_workspace_params["x_min"],
-                    tapered_workspace_params["x_max_low"],
-                    tapered_workspace_params["x_max_high"],
-                    tapered_workspace_params["y_max_low"],
-                    tapered_workspace_params["y_max_high"],
-                )
-            logger_mp.info("[ARM_WORKSPACE] +z is arm-up in the IK/base frame.")
-        else:
-            logger_mp.info("[ARM_WORKSPACE] disabled.")
-        if args.timing_debug:
-            logger_mp.info(f"[TIMING] debug enabled, report interval = {args.timing_debug_interval:.1f}s")
-        
-        agv_bridge = None
-        # motion mode (G1: Regular mode R1+X, not Running mode R2+A)
-        if args.motion:
-            if args.input_mode == "controller":
-                loco_wrapper = LocoClientWrapper()
-                logger_mp.info(
-                    "[BASE_CTRL] enabled: left stick Y -> x(vx), left stick X -> y(vy), "
-                    "right stick X -> yaw(wz) "
-                    f"(max_vx={args.base_max_vx:.2f}, max_vy={args.base_max_vy:.2f}, max_wz={args.base_max_wz:.2f})"
-                )
-        else:
-            motion_switcher = MotionSwitcher()
-            status, result = motion_switcher.Enter_Debug_Mode()
-            logger_mp.info(f"Enter debug mode: {'Success' if status == 0 else 'Failed'}")
-            if args.base_controller == "g1d_agv":
-                agv_bridge = G1DAgvBridge(network_interface=args.network_interface, auto_build=True)
-                logger_mp.info(
-                    "[BASE_CTRL] enabled: official G1D AgvClient bridge (async target queue) "
-                    f"(left stick Y -> x(vx), left stick X -> yaw(wz), right stick Y -> z, "
-                    f"max_vx={args.base_max_vx:.2f}, "
-                    f"max_wz={args.base_max_wz:.2f}, max_z={args.base_max_z:.2f})"
-                )
-                logger_mp.warning(
-                    "[BASE_CTRL] G1D AgvClient limitation: official API currently ignores vy, "
-                    "so this path maps left stick X to in-place yaw instead of lateral strafing."
-                )
-
-        # arm
-        if args.arm == "G1_29":
-            arm_ik = G1_29_ArmIK()
-            arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
-        elif args.arm == "G1_23":
-            arm_ik = G1_23_ArmIK()
-            arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
-        elif args.arm == "H1_2":
-            arm_ik = H1_2_ArmIK()
-            arm_ctrl = H1_2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
-        elif args.arm == "H1":
-            arm_ik = H1_ArmIK()
-            arm_ctrl = H1_ArmController(simulation_mode=args.sim)
-        elif args.arm == "H2":
-            arm_ik = H2_ArmIK()
-            arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
-
-        tv_wrapper = create_teleop_input_provider(args, arm_ik=arm_ik)
-
-        # end-effector
-        if args.no_gripper:
-            logger_mp.info("[EE] --no-gripper enabled; end-effector controller is disabled.")
-        elif args.ee == "dex3":
-            from teleop.robot_control.robot_hand_unitree import Dex3_1_Controller
-            left_hand_pos_array = Array('d', 75, lock = True)      # [input]
-            right_hand_pos_array = Array('d', 75, lock = True)     # [input]
-            dual_hand_data_lock = Lock()
-            dual_hand_state_array = Array('d', 14, lock = False)   # [output] current left, right hand state(14) data.
-            dual_hand_action_array = Array('d', 14, lock = False)  # [output] current left, right hand action(14) data.
-            hand_ctrl = Dex3_1_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, 
-                                          dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
-        elif args.ee == "dex1":
-            from teleop.robot_control.robot_hand_unitree import Dex1_1_Gripper_Controller
-            left_gripper_value = Value('d', 0.0, lock=True)        # [input]
-            right_gripper_value = Value('d', 0.0, lock=True)       # [input]
-            dual_gripper_data_lock = Lock()
-            dual_gripper_state_array = Array('d', 2, lock=False)   # current left, right gripper state(2) data.
-            dual_gripper_action_array = Array('d', 2, lock=False)  # current left, right gripper action(2) data.
-            gripper_ctrl = Dex1_1_Gripper_Controller(left_gripper_value, right_gripper_value, dual_gripper_data_lock, 
-                                                     dual_gripper_state_array, dual_gripper_action_array, simulation_mode=args.sim)
-        elif args.ee == "inspire_dfx":
-            from teleop.robot_control.robot_hand_inspire import Inspire_Controller_DFX
-            left_hand_pos_array = Array('d', 75, lock = True)      # [input]
-            right_hand_pos_array = Array('d', 75, lock = True)     # [input]
-            dual_hand_data_lock = Lock()
-            dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
-            dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-            hand_ctrl = Inspire_Controller_DFX(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
-        elif args.ee == "inspire_ftp":
-            from teleop.robot_control.robot_hand_inspire import Inspire_Controller_FTP
-            left_hand_pos_array = Array('d', 75, lock = True)      # [input]
-            right_hand_pos_array = Array('d', 75, lock = True)     # [input]
-            dual_hand_data_lock = Lock()
-            dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
-            dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-            hand_ctrl = Inspire_Controller_FTP(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
-        elif args.ee == "brainco":
-            from teleop.robot_control.robot_hand_brainco import Brainco_Controller
-            left_hand_pos_array = Array('d', 75, lock = True)      # [input]
-            right_hand_pos_array = Array('d', 75, lock = True)     # [input]
-            dual_hand_data_lock = Lock()
-            dual_hand_state_array = Array('d', 12, lock = False)   # [output] current left, right hand state(12) data.
-            dual_hand_action_array = Array('d', 12, lock = False)  # [output] current left, right hand action(12) data.
-            hand_ctrl = Brainco_Controller(left_hand_pos_array, right_hand_pos_array, dual_hand_data_lock, 
-                                           dual_hand_state_array, dual_hand_action_array, simulation_mode=args.sim)
-        else:
-            pass
-        
-        # affinity mode (if you dont know what it is, then you probably don't need it)
-        if args.affinity:
-            import psutil
-            p = psutil.Process(os.getpid())
-            p.cpu_affinity([0,1,2,3]) # Set CPU affinity to cores 0-3
-            try:
-                p.nice(-20)           # Set highest priority
-                logger_mp.info("Set high priority successfully.")
-            except psutil.AccessDenied:
-                logger_mp.warning("Failed to set high priority. Please run as root.")
-                
-            for child in p.children(recursive=True):
-                try:
-                    logger_mp.info(f"Child process {child.pid} name: {child.name()}")
-                    child.cpu_affinity([5,6])
-                    child.nice(-20)
-                except psutil.AccessDenied:
-                    pass
-
-        # simulation mode
-        if args.sim:
-            reset_pose_publisher = ChannelPublisher("rt/reset_pose/cmd", String_)
-            reset_pose_publisher.Init()
-            from teleop.sim.sim_state_topic import start_sim_state_subscribe
-            sim_state_subscriber = start_sim_state_subscribe()
-
-        head_remote_camera = None
-        left_remote_camera = None
-        right_remote_camera = None
-        head_camera = None
-        left_camera = None
-        right_camera = None
-
-        # record / online inference camera sources are shared so each camera is opened once.
-        needs_camera = bool(args.record or args.input_provider == "online_inference")
-        if args.record:
-            recorder = EpisodeWriter(task_dir = os.path.join(args.task_dir, args.task_name),
-                                     task_goal = args.task_goal,
-                                     task_desc = args.task_desc,
-                                     task_steps = args.task_steps,
-                                     frequency = args.frequency,
-                                     image_size = [args.camera_width, args.camera_height],
-                                     rerun_log = not args.headless)
-        if needs_camera:
-            head_remote_camera = maybe_open_remote_camera("head", args.head_zmq_endpoint)
-            left_remote_camera = maybe_open_remote_camera("left_wrist", args.left_zmq_endpoint)
-            right_remote_camera = maybe_open_remote_camera("right_wrist", args.right_zmq_endpoint)
-            head_camera = maybe_open_local_camera("head", args.head_camera_id, args)
-            left_camera = maybe_open_local_camera("left_wrist", args.left_camera_id, args)
-            right_camera = maybe_open_local_camera("right_wrist", args.right_camera_id, args)
-
-        if args.record:
-            recording_flow = TeleopRecordingFlow(
-                args=args,
-                recorder=recorder,
-                log=logger_mp,
-                reset_callback=(
-                    (lambda: publish_reset_category(1, reset_pose_publisher))
-                    if args.sim
-                    else None
-                ),
-                dual_hand_data_lock=dual_hand_data_lock,
-                dual_hand_state_array=dual_hand_state_array,
-                dual_hand_action_array=dual_hand_action_array,
-                dual_gripper_data_lock=dual_gripper_data_lock,
-                dual_gripper_state_array=dual_gripper_state_array,
-                dual_gripper_action_array=dual_gripper_action_array,
-            )
-
-        latency_tracker = None
-        if args.latency_trace:
-            latency_tracker = SimpleLatencyTracker(
-                output_path=args.latency_trace_path,
-                summary_every=args.latency_summary_every,
-                log_each_trace=True,
-                timeout_s=args.latency_timeout,
-            )
-            if hasattr(arm_ctrl, 'set_latency_tracker'):
-                arm_ctrl.set_latency_tracker(latency_tracker)
-            if hasattr(arm_ctrl, 'set_latency_exec_thresholds'):
-                arm_ctrl.set_latency_exec_thresholds(
-                    args.latency_exec_q_threshold,
-                    args.latency_exec_dq_threshold,
-                )
-            logger_mp.info(
-                "[LATENCY] tracing enabled: output=%s, command_threshold=%.4f rad, exec_q_threshold=%.4f rad, exec_dq_threshold=%.4f rad/s",
-                args.latency_trace_path,
-                args.latency_command_threshold,
-                args.latency_exec_q_threshold,
-                args.latency_exec_dq_threshold,
-            )
+        setup_real_teleop_components(args, log=logger_mp, components=components)
+        arm_ik = components.arm_ik
+        arm_ctrl = components.arm_ctrl
+        tv_wrapper = components.tv_wrapper
+        gripper_ctrl = components.ee.gripper_ctrl
+        loco_wrapper = components.loco_wrapper
+        agv_bridge = components.agv_bridge
+        recorder = components.recorder
+        recording_flow = components.recording_flow
+        sim_state_subscriber = components.sim_state_subscriber
+        latency_tracker = components.latency_tracker
 
         logger_mp.info("Move arms to home pose before entering teleop wait state...")
         arm_ctrl.ctrl_dual_arm_go_home()
@@ -587,20 +345,16 @@ if __name__ == '__main__':
         if calibration_required and args.calibration_mode == "manual":
             logger_mp.info("[HEAD_REF] waiting for manual calibration request. Press [c] when you are ready.")
 
-        prev_left_arm_enabled = None
-        prev_right_arm_enabled = None
-        prev_home_button_pressed = False
         home_return_active = False
         home_target_q = np.zeros_like(current_hold_q)
-        home_wait_grip_release = False
         post_home_takeover_armed = False
-        prev_left_grip_pressed = False
-        prev_right_grip_pressed = False
-        left_takeover_settle_frames = 0
-        right_takeover_settle_frames = 0
         TAKEOVER_SETTLE_FRAMES = 0 if (
             args.controller_mapping_mode == "legacy_main" or args.input_provider in {"lerobot_offline", "online_inference"}
         ) else 2
+        operator_state_flow = OperatorStateFlow(
+            takeover_settle_frames=TAKEOVER_SETTLE_FRAMES,
+            log=logger_mp,
+        )
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
@@ -673,21 +427,12 @@ if __name__ == '__main__':
                 )
             current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, current_lr_arm_q)
 
-            online_left_gripper_q = 0.0
-            online_right_gripper_q = 0.0
-            if (not args.no_gripper) and args.ee == "dex1":
-                try:
-                    with dual_gripper_data_lock:
-                        online_left_gripper_q = float(dual_gripper_state_array[0])
-                        online_right_gripper_q = float(dual_gripper_state_array[1])
-                except Exception:
-                    online_left_gripper_q = 0.0
-                    online_right_gripper_q = 0.0
-            camera_sources = {
-                "head": head_remote_camera if head_remote_camera is not None else head_camera,
-                "left_wrist": left_remote_camera if left_remote_camera is not None else left_camera,
-                "right_wrist": right_remote_camera if right_remote_camera is not None else right_camera,
-            }
+            online_left_gripper_q, online_right_gripper_q = read_online_gripper_widths(
+                args=args,
+                dual_gripper_data_lock=components.ee.dual_gripper_data_lock,
+                dual_gripper_state_array=components.ee.dual_gripper_state_array,
+            )
+            camera_sources = components.cameras.sources()
 
             # get xr's tele data
             tele_fetch_start = time.perf_counter()
@@ -733,108 +478,48 @@ if __name__ == '__main__':
             tele_data_recv_ts_ns = time.perf_counter_ns()
             tele_fetch_ms = tele_fetch_dt * 1000.0
 
-            takeover_logic_start = time.perf_counter()
-            tele_data = operator_runtime.apply_to_tele_data(
-                tele_data,
+            operator_state = operator_state_flow.apply(
+                args=args,
+                operator_runtime=operator_runtime,
+                tele_data=tele_data,
                 started=bool(START),
                 on_press=on_press,
+                motion_intent=motion_intent,
+                home_return_active=home_return_active,
+                normalized_head_mode=normalized_head_mode,
+                tv_wrapper=tv_wrapper,
+                arm_ik=arm_ik,
+                current_hold_q=current_hold_q,
+                reset_arm_ik_state=reset_arm_ik_state,
+                timer=time.perf_counter,
+            )
+            tele_data = operator_state.tele_data
+            left_arm_enabled = operator_state.left_arm_enabled
+            right_arm_enabled = operator_state.right_arm_enabled
+            home_return_active = operator_state.home_return_active
+            post_home_takeover_armed = operator_state.post_home_takeover_armed or post_home_takeover_armed
+            left_takeover_settle_frames = operator_state.left_takeover_settle_frames
+            right_takeover_settle_frames = operator_state.right_takeover_settle_frames
+            left_takeover_rising_edge = operator_state.left_takeover_rising_edge
+            right_takeover_rising_edge = operator_state.right_takeover_rising_edge
+            left_zero_takeover_this_frame = operator_state.left_zero_takeover_this_frame
+            right_zero_takeover_this_frame = operator_state.right_zero_takeover_this_frame
+            any_zero_takeover_this_frame = operator_state.any_zero_takeover_this_frame
+            takeover_logic_ms = operator_state.takeover_logic_ms
+
+            apply_end_effector_command(
+                args=args,
+                tele_data=tele_data,
+                left_arm_enabled=left_arm_enabled,
+                right_arm_enabled=right_arm_enabled,
+                online_left_gripper_q=online_left_gripper_q,
+                online_right_gripper_q=online_right_gripper_q,
+                left_hand_pos_array=components.ee.left_hand_pos_array,
+                right_hand_pos_array=components.ee.right_hand_pos_array,
+                left_gripper_value=components.ee.left_gripper_value,
+                right_gripper_value=components.ee.right_gripper_value,
             )
 
-            home_button_pressed = bool(tele_data.left_ctrl_bButton)
-            if home_button_pressed and not prev_home_button_pressed:
-                logger_mp.info("[HOME] left Y pressed -> returning both arms to ready/calibration pose with speed limit.")
-                home_return_active = True
-                home_wait_grip_release = True
-            prev_home_button_pressed = home_button_pressed
-
-            if args.input_mode == "controller" and args.controller_deadman == "grip":
-                left_arm_enabled = bool(tele_data.left_ctrl_squeeze)
-                right_arm_enabled = bool(tele_data.right_ctrl_squeeze)
-            else:
-                left_arm_enabled = True
-                right_arm_enabled = True
-            provider_enabled_arms = None
-            if motion_intent is not None:
-                provider_enabled_arms = motion_intent.metadata.get("enabled_arms")
-            if provider_enabled_arms is not None:
-                provider_enabled_set = {str(side) for side in provider_enabled_arms}
-                left_arm_enabled = left_arm_enabled and ("left" in provider_enabled_set)
-                right_arm_enabled = right_arm_enabled and ("right" in provider_enabled_set)
-            if home_wait_grip_release:
-                if not bool(tele_data.left_ctrl_squeeze) and not bool(tele_data.right_ctrl_squeeze):
-                    home_wait_grip_release = False
-                    if normalized_head_mode in {"head_coupled", "hybrid"}:
-                        tv_wrapper.sync_reference_to_current_live_pose(require_live=False)
-                        logger_mp.info("[HOME] reference synced to current live pose after home return.")
-                    reset_arm_ik_state(arm_ik, current_hold_q)
-                    logger_mp.info("[HOME] IK state reset at current home pose.")
-                    post_home_takeover_armed = True
-                    logger_mp.info("[HOME] grip released -> teleop re-enabled.")
-                else:
-                    left_arm_enabled = False
-                    right_arm_enabled = False
-
-            if left_arm_enabled != prev_left_arm_enabled or right_arm_enabled != prev_right_arm_enabled:
-                logger_mp.info(
-                    f"[DEADMAN] left_enabled={left_arm_enabled} right_enabled={right_arm_enabled} "
-                    f"(controller_deadman={args.controller_deadman})"
-                )
-                prev_left_arm_enabled = left_arm_enabled
-                prev_right_arm_enabled = right_arm_enabled
-
-            left_grip_pressed = bool(tele_data.left_ctrl_squeeze)
-            right_grip_pressed = bool(tele_data.right_ctrl_squeeze)
-            left_takeover_rising_edge = left_grip_pressed and (not prev_left_grip_pressed)
-            right_takeover_rising_edge = right_grip_pressed and (not prev_right_grip_pressed)
-            if left_takeover_rising_edge:
-                left_takeover_settle_frames = TAKEOVER_SETTLE_FRAMES
-            if right_takeover_rising_edge:
-                right_takeover_settle_frames = TAKEOVER_SETTLE_FRAMES
-            left_zero_takeover_this_frame = left_takeover_settle_frames > 0
-            right_zero_takeover_this_frame = right_takeover_settle_frames > 0
-            any_zero_takeover_this_frame = (
-                left_zero_takeover_this_frame or right_zero_takeover_this_frame
-            )
-            prev_left_grip_pressed = left_grip_pressed
-            prev_right_grip_pressed = right_grip_pressed
-            takeover_logic_ms = (time.perf_counter() - takeover_logic_start) * 1000.0
-
-            if (not args.no_gripper) and (args.ee == "dex3" or args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
-                with left_hand_pos_array.get_lock():
-                    left_hand_pos_array[:] = tele_data.left_hand_pos.flatten()
-                with right_hand_pos_array.get_lock():
-                    right_hand_pos_array[:] = tele_data.right_hand_pos.flatten()
-            elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "controller":
-                if args.input_provider == "online_inference":
-                    left_trigger_value = (
-                        tele_data.left_ctrl_triggerValue
-                        if left_arm_enabled
-                        else float(np.clip(online_left_gripper_q / 5.4 * 2.0 + 5.0, 5.0, 7.0))
-                    )
-                    right_trigger_value = (
-                        tele_data.right_ctrl_triggerValue
-                        if right_arm_enabled
-                        else float(np.clip(online_right_gripper_q / 5.4 * 2.0 + 5.0, 5.0, 7.0))
-                    )
-                    with left_gripper_value.get_lock():
-                        left_gripper_value.value = left_trigger_value
-                    with right_gripper_value.get_lock():
-                        right_gripper_value.value = right_trigger_value
-                else:
-                    if left_arm_enabled:
-                        with left_gripper_value.get_lock():
-                            left_gripper_value.value = tele_data.left_ctrl_triggerValue
-                    if right_arm_enabled:
-                        with right_gripper_value.get_lock():
-                            right_gripper_value.value = tele_data.right_ctrl_triggerValue
-            elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "hand":
-                with left_gripper_value.get_lock():
-                    left_gripper_value.value = tele_data.left_hand_pinchValue
-                with right_gripper_value.get_lock():
-                    right_gripper_value.value = tele_data.right_hand_pinchValue
-            else:
-                pass
-            
             # high level base control
             base_result = apply_base_command(
                 args=args,
@@ -920,6 +605,10 @@ if __name__ == '__main__':
             post_home_takeover_armed = arm_command.post_home_takeover_armed
             left_takeover_settle_frames = arm_command.left_takeover_settle_frames
             right_takeover_settle_frames = arm_command.right_takeover_settle_frames
+            operator_state_flow.sync_from_arm_command(
+                left_takeover_settle_frames=left_takeover_settle_frames,
+                right_takeover_settle_frames=right_takeover_settle_frames,
+            )
             if args.input_provider == "online_inference" and provider_feedback is not None:
                 report_feedback = getattr(tv_wrapper, "report_control_feedback", None)
                 if callable(report_feedback):
@@ -1021,20 +710,13 @@ if __name__ == '__main__':
     finally:
         cleanup_real_teleop_resources(
             args=args,
-            arm_ctrl=arm_ctrl,
-            tv_wrapper=tv_wrapper,
+            arm_ctrl=arm_ctrl or components.arm_ctrl,
+            tv_wrapper=tv_wrapper or components.tv_wrapper,
             listen_keyboard_thread=listen_keyboard_thread,
-            recorder=recorder,
-            sim_state_subscriber=sim_state_subscriber,
-            agv_bridge=agv_bridge,
-            cameras=[
-                head_remote_camera,
-                left_remote_camera,
-                right_remote_camera,
-                head_camera,
-                left_camera,
-                right_camera,
-            ],
+            recorder=recorder or components.recorder,
+            sim_state_subscriber=sim_state_subscriber or components.sim_state_subscriber,
+            agv_bridge=agv_bridge or components.agv_bridge,
+            cameras=components.cameras.close_list(),
             exit_go_home=exit_go_home,
             exit_home_hold_sec=exit_home_hold_sec,
         )

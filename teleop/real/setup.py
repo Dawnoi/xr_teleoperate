@@ -1,0 +1,405 @@
+"""真机遥操启动装配：集中创建硬件控制器、相机、录制和调试组件。
+
+Setup helpers for the real teleop entrypoint.
+
+Keep hardware/process construction out of ``teleop_hand_and_arm.py`` while leaving
+that file as the single runtime entrypoint.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from multiprocessing import Array, Lock, Value
+
+from core.camera.local_camera import LocalCameraStream
+from core.control.g1d_agv_bridge import G1DAgvBridge
+from core.control.motion_switcher import LocoClientWrapper, MotionSwitcher
+from core.input.teleop_input_provider import create_teleop_input_provider
+from data_pipeline.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
+from data_pipeline.recording.teleop_recording_flow import TeleopRecordingFlow
+from teleop.debug.latency_trace import SimpleLatencyTracker
+from teleop.robot_control.robot_arm import (
+    G1_23_ArmController,
+    G1_29_ArmController,
+    H1_2_ArmController,
+    H1_ArmController,
+    H2_ArmController,
+)
+from teleop.robot_control.robot_arm_ik import G1_23_ArmIK, G1_29_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelPublisher
+from unitree_sdk2py.idl.std_msgs.msg.dds_ import String_
+
+
+@dataclass
+class EndEffectorRuntime:
+    hand_ctrl: object | None = None
+    gripper_ctrl: object | None = None
+    left_hand_pos_array: object | None = None
+    right_hand_pos_array: object | None = None
+    dual_hand_data_lock: object | None = None
+    dual_hand_state_array: object | None = None
+    dual_hand_action_array: object | None = None
+    left_gripper_value: object | None = None
+    right_gripper_value: object | None = None
+    dual_gripper_data_lock: object | None = None
+    dual_gripper_state_array: object | None = None
+    dual_gripper_action_array: object | None = None
+
+
+@dataclass
+class CameraRuntime:
+    head_remote: object | None = None
+    left_remote: object | None = None
+    right_remote: object | None = None
+    head_local: object | None = None
+    left_local: object | None = None
+    right_local: object | None = None
+
+    def sources(self) -> dict[str, object | None]:
+        return {
+            "head": self.head_remote if self.head_remote is not None else self.head_local,
+            "left_wrist": self.left_remote if self.left_remote is not None else self.left_local,
+            "right_wrist": self.right_remote if self.right_remote is not None else self.right_local,
+        }
+
+    def close_list(self) -> list[object | None]:
+        return [
+            self.head_remote,
+            self.left_remote,
+            self.right_remote,
+            self.head_local,
+            self.left_local,
+            self.right_local,
+        ]
+
+
+@dataclass
+class RealTeleopComponents:
+    arm_ik: object | None = None
+    arm_ctrl: object | None = None
+    tv_wrapper: object | None = None
+    ee: EndEffectorRuntime = field(default_factory=EndEffectorRuntime)
+    loco_wrapper: object | None = None
+    agv_bridge: object | None = None
+    reset_pose_publisher: object | None = None
+    sim_state_subscriber: object | None = None
+    recorder: object | None = None
+    recording_flow: object | None = None
+    cameras: CameraRuntime = field(default_factory=CameraRuntime)
+    latency_tracker: object | None = None
+
+
+MOBILE_HAND_EE = {"dex3", "inspire_dfx", "inspire_ftp", "brainco"}
+
+
+def publish_reset_category(category: int, publisher, log):
+    msg = String_(data=str(category))
+    publisher.Write(msg)
+    log.info(f"published reset category: {category}")
+
+
+def initialize_dds(args):
+    if args.sim:
+        ChannelFactoryInitialize(1, networkInterface=args.network_interface)
+    else:
+        ChannelFactoryInitialize(0, networkInterface=args.network_interface)
+
+
+def log_workspace_config(args, *, workspace_limit_enabled, workspace_mode, workspace_min, workspace_max, tapered_workspace_params, log):
+    if workspace_limit_enabled:
+        if workspace_mode == "box":
+            log.info(
+                "[ARM_WORKSPACE] enabled: forward box, min=(%.3f, %.3f, %.3f), max=(%.3f, %.3f, %.3f)",
+                workspace_min[0], workspace_min[1], workspace_min[2],
+                workspace_max[0], workspace_max[1], workspace_max[2],
+            )
+        else:
+            log.info(
+                "[ARM_WORKSPACE] enabled: tapered prism, z=[%.3f, %.3f], x_min=%.3f, "
+                "x_max(low->high)=(%.3f -> %.3f), |y|max(low->high)=(%.3f -> %.3f)",
+                tapered_workspace_params["z_min"],
+                tapered_workspace_params["z_max"],
+                tapered_workspace_params["x_min"],
+                tapered_workspace_params["x_max_low"],
+                tapered_workspace_params["x_max_high"],
+                tapered_workspace_params["y_max_low"],
+                tapered_workspace_params["y_max_high"],
+            )
+        log.info("[ARM_WORKSPACE] +z is arm-up in the IK/base frame.")
+    else:
+        log.info("[ARM_WORKSPACE] disabled.")
+    if args.timing_debug:
+        log.info(f"[TIMING] debug enabled, report interval = {args.timing_debug_interval:.1f}s")
+
+
+def setup_real_teleop_components(args, *, log, components: RealTeleopComponents | None = None) -> RealTeleopComponents:
+    components = components if components is not None else RealTeleopComponents()
+    setup_base(args, components, log)
+    setup_arm_and_input(args, components)
+    components.ee = setup_end_effector(args, log)
+    apply_affinity_if_requested(args, log)
+    setup_sim(args, components)
+    components.recorder = setup_recorder(args)
+    components.cameras = setup_cameras(args, log)
+    components.recording_flow = setup_recording_flow(args, components, log)
+    components.latency_tracker = setup_latency_tracker(args, components.arm_ctrl, log)
+    return components
+
+
+def setup_base(args, components: RealTeleopComponents, log):
+    if args.motion:
+        if args.input_mode == "controller":
+            components.loco_wrapper = LocoClientWrapper()
+            log.info(
+                "[BASE_CTRL] enabled: left stick Y -> x(vx), left stick X -> y(vy), "
+                "right stick X -> yaw(wz) "
+                f"(max_vx={args.base_max_vx:.2f}, max_vy={args.base_max_vy:.2f}, max_wz={args.base_max_wz:.2f})"
+            )
+        return
+
+    motion_switcher = MotionSwitcher()
+    status, _ = motion_switcher.Enter_Debug_Mode()
+    log.info(f"Enter debug mode: {'Success' if status == 0 else 'Failed'}")
+    if args.base_controller == "g1d_agv":
+        components.agv_bridge = G1DAgvBridge(network_interface=args.network_interface, auto_build=True)
+        log.info(
+            "[BASE_CTRL] enabled: official G1D AgvClient bridge (async target queue) "
+            f"(left stick Y -> x(vx), left stick X -> yaw(wz), right stick Y -> z, "
+            f"max_vx={args.base_max_vx:.2f}, max_wz={args.base_max_wz:.2f}, max_z={args.base_max_z:.2f})"
+        )
+        log.warning(
+            "[BASE_CTRL] G1D AgvClient limitation: official API currently ignores vy, "
+            "so this path maps left stick X to in-place yaw instead of lateral strafing."
+        )
+
+
+def setup_arm_and_input(args, components: RealTeleopComponents):
+    if args.arm == "G1_29":
+        components.arm_ik = G1_29_ArmIK()
+        components.arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+    elif args.arm == "G1_23":
+        components.arm_ik = G1_23_ArmIK()
+        components.arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+    elif args.arm == "H1_2":
+        components.arm_ik = H1_2_ArmIK()
+        components.arm_ctrl = H1_2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+    elif args.arm == "H1":
+        components.arm_ik = H1_ArmIK()
+        components.arm_ctrl = H1_ArmController(simulation_mode=args.sim)
+    elif args.arm == "H2":
+        components.arm_ik = H2_ArmIK()
+        components.arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+    else:
+        raise ValueError(f"Unsupported arm: {args.arm}")
+    components.tv_wrapper = create_teleop_input_provider(args, arm_ik=components.arm_ik)
+
+
+def setup_end_effector(args, log) -> EndEffectorRuntime:
+    ee = EndEffectorRuntime()
+    if args.no_gripper:
+        log.info("[EE] --no-gripper enabled; end-effector controller is disabled.")
+        return ee
+
+    if args.ee == "dex3":
+        from teleop.robot_control.robot_hand_unitree import Dex3_1_Controller
+        ee.left_hand_pos_array = Array('d', 75, lock=True)
+        ee.right_hand_pos_array = Array('d', 75, lock=True)
+        ee.dual_hand_data_lock = Lock()
+        ee.dual_hand_state_array = Array('d', 14, lock=False)
+        ee.dual_hand_action_array = Array('d', 14, lock=False)
+        ee.hand_ctrl = Dex3_1_Controller(
+            ee.left_hand_pos_array,
+            ee.right_hand_pos_array,
+            ee.dual_hand_data_lock,
+            ee.dual_hand_state_array,
+            ee.dual_hand_action_array,
+            simulation_mode=args.sim,
+        )
+    elif args.ee == "dex1":
+        from teleop.robot_control.robot_hand_unitree import Dex1_1_Gripper_Controller
+        ee.left_gripper_value = Value('d', 0.0, lock=True)
+        ee.right_gripper_value = Value('d', 0.0, lock=True)
+        ee.dual_gripper_data_lock = Lock()
+        ee.dual_gripper_state_array = Array('d', 2, lock=False)
+        ee.dual_gripper_action_array = Array('d', 2, lock=False)
+        ee.gripper_ctrl = Dex1_1_Gripper_Controller(
+            ee.left_gripper_value,
+            ee.right_gripper_value,
+            ee.dual_gripper_data_lock,
+            ee.dual_gripper_state_array,
+            ee.dual_gripper_action_array,
+            simulation_mode=args.sim,
+        )
+    elif args.ee in {"inspire_dfx", "inspire_ftp"}:
+        controller_cls = _inspire_controller_class(args.ee)
+        ee.left_hand_pos_array = Array('d', 75, lock=True)
+        ee.right_hand_pos_array = Array('d', 75, lock=True)
+        ee.dual_hand_data_lock = Lock()
+        ee.dual_hand_state_array = Array('d', 12, lock=False)
+        ee.dual_hand_action_array = Array('d', 12, lock=False)
+        ee.hand_ctrl = controller_cls(
+            ee.left_hand_pos_array,
+            ee.right_hand_pos_array,
+            ee.dual_hand_data_lock,
+            ee.dual_hand_state_array,
+            ee.dual_hand_action_array,
+            simulation_mode=args.sim,
+        )
+    elif args.ee == "brainco":
+        from teleop.robot_control.robot_hand_brainco import Brainco_Controller
+        ee.left_hand_pos_array = Array('d', 75, lock=True)
+        ee.right_hand_pos_array = Array('d', 75, lock=True)
+        ee.dual_hand_data_lock = Lock()
+        ee.dual_hand_state_array = Array('d', 12, lock=False)
+        ee.dual_hand_action_array = Array('d', 12, lock=False)
+        ee.hand_ctrl = Brainco_Controller(
+            ee.left_hand_pos_array,
+            ee.right_hand_pos_array,
+            ee.dual_hand_data_lock,
+            ee.dual_hand_state_array,
+            ee.dual_hand_action_array,
+            simulation_mode=args.sim,
+        )
+    return ee
+
+
+def _inspire_controller_class(ee_name: str):
+    if ee_name == "inspire_dfx":
+        from teleop.robot_control.robot_hand_inspire import Inspire_Controller_DFX
+        return Inspire_Controller_DFX
+    from teleop.robot_control.robot_hand_inspire import Inspire_Controller_FTP
+    return Inspire_Controller_FTP
+
+
+def apply_affinity_if_requested(args, log):
+    if not args.affinity:
+        return
+    import psutil
+    p = psutil.Process(os.getpid())
+    p.cpu_affinity([0, 1, 2, 3])
+    try:
+        p.nice(-20)
+        log.info("Set high priority successfully.")
+    except psutil.AccessDenied:
+        log.warning("Failed to set high priority. Please run as root.")
+
+    for child in p.children(recursive=True):
+        try:
+            log.info(f"Child process {child.pid} name: {child.name()}")
+            child.cpu_affinity([5, 6])
+            child.nice(-20)
+        except psutil.AccessDenied:
+            pass
+
+
+def setup_sim(args, components: RealTeleopComponents):
+    if not args.sim:
+        return
+    components.reset_pose_publisher = ChannelPublisher("rt/reset_pose/cmd", String_)
+    components.reset_pose_publisher.Init()
+    from teleop.sim.sim_state_topic import start_sim_state_subscribe
+    components.sim_state_subscriber = start_sim_state_subscribe()
+
+
+def setup_recorder(args):
+    if not args.record:
+        return None
+    return EpisodeWriter(
+        task_dir=os.path.join(args.task_dir, args.task_name),
+        task_goal=args.task_goal,
+        task_desc=args.task_desc,
+        task_steps=args.task_steps,
+        frequency=args.frequency,
+        image_size=[args.camera_width, args.camera_height],
+        rerun_log=not args.headless,
+    )
+
+
+def setup_cameras(args, log) -> CameraRuntime:
+    cameras = CameraRuntime()
+    if not bool(args.record or args.input_provider == "online_inference"):
+        return cameras
+    cameras.head_remote = maybe_open_remote_camera("head", args.head_zmq_endpoint, log)
+    cameras.left_remote = maybe_open_remote_camera("left_wrist", args.left_zmq_endpoint, log)
+    cameras.right_remote = maybe_open_remote_camera("right_wrist", args.right_zmq_endpoint, log)
+    cameras.head_local = maybe_open_local_camera("head", args.head_camera_id, args, log)
+    cameras.left_local = maybe_open_local_camera("left_wrist", args.left_camera_id, args, log)
+    cameras.right_local = maybe_open_local_camera("right_wrist", args.right_camera_id, args, log)
+    return cameras
+
+
+def maybe_open_local_camera(name: str, camera_id: int, args, log):
+    if int(camera_id) < 0:
+        return None
+    try:
+        return LocalCameraStream(
+            name=name,
+            camera_id=int(camera_id),
+            width=args.camera_width,
+            height=args.camera_height,
+            fps=args.camera_fps,
+            fourcc=args.camera_fourcc,
+            buffer_size=args.camera_buffer_size,
+        )
+    except Exception as e:
+        log.warning(f"[CAM] failed to open local camera '{name}' (id={camera_id}): {e}")
+        return None
+
+
+def maybe_open_remote_camera(name: str, endpoint: str, log):
+    endpoint = str(endpoint or "").strip()
+    if not endpoint:
+        return None
+    try:
+        return ZMQRawCameraReceiver(endpoint=endpoint, name=name)
+    except Exception as e:
+        log.warning(f"[CAM] failed to connect remote camera '{name}' ({endpoint}): {e}")
+        return None
+
+
+def setup_recording_flow(args, components: RealTeleopComponents, log):
+    if not args.record:
+        return None
+    return TeleopRecordingFlow(
+        args=args,
+        recorder=components.recorder,
+        log=log,
+        reset_callback=(
+            (lambda: publish_reset_category(1, components.reset_pose_publisher, log))
+            if args.sim
+            else None
+        ),
+        dual_hand_data_lock=components.ee.dual_hand_data_lock,
+        dual_hand_state_array=components.ee.dual_hand_state_array,
+        dual_hand_action_array=components.ee.dual_hand_action_array,
+        dual_gripper_data_lock=components.ee.dual_gripper_data_lock,
+        dual_gripper_state_array=components.ee.dual_gripper_state_array,
+        dual_gripper_action_array=components.ee.dual_gripper_action_array,
+    )
+
+
+def setup_latency_tracker(args, arm_ctrl, log):
+    if not args.latency_trace:
+        return None
+    latency_tracker = SimpleLatencyTracker(
+        output_path=args.latency_trace_path,
+        summary_every=args.latency_summary_every,
+        log_each_trace=True,
+        timeout_s=args.latency_timeout,
+    )
+    if hasattr(arm_ctrl, 'set_latency_tracker'):
+        arm_ctrl.set_latency_tracker(latency_tracker)
+    if hasattr(arm_ctrl, 'set_latency_exec_thresholds'):
+        arm_ctrl.set_latency_exec_thresholds(
+            args.latency_exec_q_threshold,
+            args.latency_exec_dq_threshold,
+        )
+    log.info(
+        "[LATENCY] tracing enabled: output=%s, command_threshold=%.4f rad, exec_q_threshold=%.4f rad, exec_dq_threshold=%.4f rad/s",
+        args.latency_trace_path,
+        args.latency_command_threshold,
+        args.latency_exec_q_threshold,
+        args.latency_exec_dq_threshold,
+    )
+    return latency_tracker
