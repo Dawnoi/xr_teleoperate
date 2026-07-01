@@ -228,6 +228,10 @@ if __name__ == '__main__':
                         help='PICO motion tracker index for the left wrist pose source when --left-motion-tracker-sn is empty.')
     parser.add_argument('--right-motion-tracker-index', type=int, default=1,
                         help='PICO motion tracker index for the right wrist pose source when --right-motion-tracker-sn is empty.')
+    parser.add_argument('--motion-tracker-max-step-linear', type=float, default=0.05,
+                        help='Motion tracker source anti-jump limit in meters per frame. <=0 disables. Applies only when --xr-pose-source motion_tracker.')
+    parser.add_argument('--motion-tracker-max-step-angular', type=float, default=0.5,
+                        help='Motion tracker source anti-jump limit in radians per frame. <=0 disables. Applies only when --xr-pose-source motion_tracker.')
     parser.add_argument('--calibration-mode', type=str, choices=['manual', 'auto'], default='manual',
                         help='Calibration trigger in head_coupled/hybrid mode. "manual" waits for key c after r; "auto" calibrates once live pose data is available. fixed_per_grip/live_head_reference do not require manual calibration.')
     parser.add_argument('--input-provider', type=str, choices=['xr', 'lerobot_offline', 'online_inference'], default='xr',

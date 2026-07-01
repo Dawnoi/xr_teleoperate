@@ -69,6 +69,8 @@ def _create_xr_provider(args) -> XRTeleopInputProvider:
         left_motion_tracker_index=getattr(args, "left_motion_tracker_index", 0),
         right_motion_tracker_index=getattr(args, "right_motion_tracker_index", 1),
         controller_grip_threshold=getattr(args, "controller_grip_threshold", 1e-3),
+        motion_tracker_max_step_linear=getattr(args, "motion_tracker_max_step_linear", 0.05),
+        motion_tracker_max_step_angular=getattr(args, "motion_tracker_max_step_angular", 0.5),
     )
     return XRTeleopInputProvider(xr_wrapper)
 

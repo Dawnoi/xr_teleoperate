@@ -172,6 +172,18 @@ def parse_args():
         help="PICO motion tracker index for the right wrist pose source when --right-motion-tracker-sn is empty.",
     )
     parser.add_argument(
+        "--motion-tracker-max-step-linear",
+        type=float,
+        default=0.05,
+        help="Motion tracker source anti-jump limit in meters per frame. <=0 disables. Applies only when --xr-pose-source motion_tracker.",
+    )
+    parser.add_argument(
+        "--motion-tracker-max-step-angular",
+        type=float,
+        default=0.5,
+        help="Motion tracker source anti-jump limit in radians per frame. <=0 disables. Applies only when --xr-pose-source motion_tracker.",
+    )
+    parser.add_argument(
         "--calibration-mode",
         type=str,
         choices=["manual", "auto"],
@@ -570,6 +582,8 @@ def main():
         left_motion_tracker_index=args.left_motion_tracker_index,
         right_motion_tracker_index=args.right_motion_tracker_index,
         controller_grip_threshold=args.controller_grip_threshold,
+        motion_tracker_max_step_linear=args.motion_tracker_max_step_linear,
+        motion_tracker_max_step_angular=args.motion_tracker_max_step_angular,
     )
 
     # G1_29_ArmIK uses relative asset paths internally. Force cwd to teleop/

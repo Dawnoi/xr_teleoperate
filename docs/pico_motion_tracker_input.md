@@ -20,7 +20,9 @@ python teleop/teleop_hand_and_arm.py \
   --head-reference-mode hybrid \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --controller-grip-threshold 0.5
+  --controller-grip-threshold 0.5 \
+  --motion-tracker-max-step-linear 0.03 \
+  --motion-tracker-max-step-angular 0.35
 ```
 
 如果暂时不知道 SN，可以先按 index 试：
@@ -49,4 +51,5 @@ python teleop/teleop_hand_and_arm.py \
 - 保持 `--input-mode controller`，因为 grip/trigger/按键仍来自手柄。
 - 建议保留 `--controller-deadman grip`，只有握住对应手柄 grip 时才让对应手臂执行。
 - 如果不按 grip 也使能，说明 SDK 的 grip 模拟量在松手时仍有非零残留；测试时加 `--controller-grip-threshold 0.5`。
+- 如果 tracker 信号冻结后恢复导致目标突跳，使用 `--motion-tracker-max-step-linear` / `--motion-tracker-max-step-angular` 对 tracker 源位姿做逐帧跳变限幅。
 - 建议用 SN 固定左右 tracker；如果左右反了，优先交换 SN 配置。

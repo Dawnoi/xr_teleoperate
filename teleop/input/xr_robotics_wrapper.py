@@ -54,6 +54,8 @@ class XRRoboticsWrapper:
         left_motion_tracker_index: int = 0,
         right_motion_tracker_index: int = 1,
         controller_grip_threshold: float = 1e-3,
+        motion_tracker_max_step_linear: float = 0.05,
+        motion_tracker_max_step_angular: float = 0.5,
         **kwargs,
     ):
         self.use_hand_tracking = use_hand_tracking
@@ -66,6 +68,8 @@ class XRRoboticsWrapper:
         self.left_motion_tracker_index = int(left_motion_tracker_index)
         self.right_motion_tracker_index = int(right_motion_tracker_index)
         self.controller_grip_threshold = float(controller_grip_threshold)
+        self.motion_tracker_max_step_linear = max(0.0, float(motion_tracker_max_step_linear))
+        self.motion_tracker_max_step_angular = max(0.0, float(motion_tracker_max_step_angular))
         xrt.init()
         self._last_head_pose = CONST_HEAD_POSE.copy()
         self._last_left_pose = CONST_LEFT_ARM_POSE.copy()
@@ -83,6 +87,9 @@ class XRRoboticsWrapper:
         self._left_robot_wrist_anchor_pose = ROBOT_HOME_LEFT_WRIST_POSE.copy()
         self._right_robot_wrist_anchor_pose = ROBOT_HOME_RIGHT_WRIST_POSE.copy()
         self._last_motion_tracker_warn_time = 0.0
+        self._last_motion_tracker_jump_warn_time = 0.0
+        self._left_motion_tracker_initialized = False
+        self._right_motion_tracker_initialized = False
         if self.use_hand_tracking:
             raise NotImplementedError(
                 "XRRoboticsWrapper currently supports controller mode first. "
@@ -122,11 +129,14 @@ class XRRoboticsWrapper:
             logger_mp.info(
                 "XR pose source = motion_tracker; using PICO Object/Motion trackers "
                 "for left/right wrist poses and keeping controller buttons/grip/trigger. "
-                "left_sn=%s left_index=%d right_sn=%s right_index=%d",
+                "left_sn=%s left_index=%d right_sn=%s right_index=%d "
+                "max_step_linear=%.3fm max_step_angular=%.3frad",
                 self.left_motion_tracker_sn or "<index>",
                 self.left_motion_tracker_index,
                 self.right_motion_tracker_sn or "<index>",
                 self.right_motion_tracker_index,
+                self.motion_tracker_max_step_linear,
+                self.motion_tracker_max_step_angular,
             )
 
     @staticmethod
@@ -209,6 +219,57 @@ class XRRoboticsWrapper:
             return None
         return values[index].copy()
 
+    @staticmethod
+    def _rotation_angle_rad(R_delta: np.ndarray) -> float:
+        trace = float(np.trace(R_delta))
+        cos_angle = np.clip((trace - 1.0) * 0.5, -1.0, 1.0)
+        return float(np.arccos(cos_angle))
+
+    def _limit_motion_tracker_step(self, side: str, pose: np.ndarray | None, last_pose: np.ndarray):
+        if pose is None:
+            return None
+
+        initialized_attr = "_left_motion_tracker_initialized" if side == "left" else "_right_motion_tracker_initialized"
+        if not bool(getattr(self, initialized_attr)):
+            setattr(self, initialized_attr, True)
+            return pose.copy()
+
+        out = pose.copy()
+        pos_delta = out[:3, 3] - last_pose[:3, 3]
+        pos_dist = float(np.linalg.norm(pos_delta))
+        linear_limited = False
+        if self.motion_tracker_max_step_linear > 0.0 and pos_dist > self.motion_tracker_max_step_linear:
+            out[:3, 3] = last_pose[:3, 3] + pos_delta * (self.motion_tracker_max_step_linear / max(pos_dist, 1e-9))
+            linear_limited = True
+
+        R_delta = out[:3, :3] @ last_pose[:3, :3].T
+        rot_angle = self._rotation_angle_rad(R_delta)
+        angular_limited = False
+        if self.motion_tracker_max_step_angular > 0.0 and rot_angle > self.motion_tracker_max_step_angular:
+            from scipy.spatial.transform import Rotation as R
+
+            rotvec = R.from_matrix(R_delta).as_rotvec()
+            limited_delta = R.from_rotvec(
+                rotvec * (self.motion_tracker_max_step_angular / max(rot_angle, 1e-9))
+            ).as_matrix()
+            out[:3, :3] = limited_delta @ last_pose[:3, :3]
+            angular_limited = True
+
+        if linear_limited or angular_limited:
+            now = time.monotonic()
+            if now - self._last_motion_tracker_jump_warn_time > 0.5:
+                logger_mp.warning(
+                    "PICO motion_tracker %s jump limited: raw_step=%.3fm/%.3frad "
+                    "limit=%.3fm/%.3frad",
+                    side,
+                    pos_dist,
+                    rot_angle,
+                    self.motion_tracker_max_step_linear,
+                    self.motion_tracker_max_step_angular,
+                )
+                self._last_motion_tracker_jump_warn_time = now
+        return out
+
     def _read_robot_basis_poses(self):
         head_raw, head_valid = self._safe_pose_matrix(xrt.get_headset_pose(), self._last_head_pose)
         if self.xr_pose_source == "motion_tracker":
@@ -238,6 +299,8 @@ class XRRoboticsWrapper:
                         self.right_motion_tracker_index,
                     )
                     self._last_motion_tracker_warn_time = now
+            left_tracker_pose = self._limit_motion_tracker_step("left", left_tracker_pose, self._last_left_pose)
+            right_tracker_pose = self._limit_motion_tracker_step("right", right_tracker_pose, self._last_right_pose)
             left_raw = left_tracker_pose.copy() if left_tracker_pose is not None else self._last_left_pose.copy()
             right_raw = right_tracker_pose.copy() if right_tracker_pose is not None else self._last_right_pose.copy()
             left_valid = left_tracker_pose is not None
