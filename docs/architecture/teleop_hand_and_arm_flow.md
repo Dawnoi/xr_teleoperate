@@ -70,18 +70,18 @@
 | `reset_arm_ik_state(arm_ik, arm_q)` | 重置 IK 初值和 smooth filter | home 后、takeover 边沿 |
 | `get_robot_wrist_poses(arm_ik, arm_q)` | 用 Pinocchio FK 从 q 算左右 wrist 4x4 pose | 输入 provider anchor、record pose |
 | `pose_matrix_to_record(pose_mat)` | 4x4 pose 转 `{position,rpy,rotation_matrix,matrix4x4}` | record 写入 pose 表示 |
-| `require_finite_vector(value, size, name)` | 检查 action 向量维度和 finite | joint action 输入 |
 
-## 5. `main` 内部 helper
+## 5. 入口级 helper 方法
 
-这些函数大部分已经下沉到对应模块；主入口内只保留和真机 runtime 强相关的 helper。
+这些方法不再嵌在 `main` 内部，主入口内只保留流程调度。
 
 | 函数 | 职责 |
 |---|---|
 | `compute_arm_gravity_tauff()` | 用 Pinocchio RNEA 计算当前 q 的重力补偿，失败回退 0 |
 | `maybe_open_local_camera()` | 按 id 打开本地相机，失败返回 None |
 | `maybe_open_remote_camera()` | 按 ZMQ endpoint 打开远端相机，失败返回 None |
-| `apply_deadzone()` | 主循环内两处局部函数，给底盘摇杆做死区 |
+| `start_keyboard_listener()` | 启动键盘监听线程 |
+| `cleanup_real_teleop_resources()` | 退出时统一回 home、停线程、关闭 provider/AGV/camera/recorder |
 
 录制对齐 helper 已移动到 `data_pipeline/recording/alignment.py`：
 

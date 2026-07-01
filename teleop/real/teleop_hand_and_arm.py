@@ -153,6 +153,132 @@ def pose_matrix_to_record(pose_mat):
     }
 
 
+def compute_arm_gravity_tauff(arm_ik_obj, arm_q):
+    try:
+        model = arm_ik_obj.reduced_robot.model
+        data = arm_ik_obj.reduced_robot.data
+        q = np.asarray(arm_q, dtype=float).copy()
+        dq = np.zeros(model.nv, dtype=float)
+        ddq = np.zeros(model.nv, dtype=float)
+        return pin.rnea(model, data, q, dq, ddq)
+    except Exception as e:
+        logger_mp.warning(f"[HOLD_TAUFF] failed to compute gravity compensation, fallback to zeros: {e}")
+        return np.zeros_like(np.asarray(arm_q, dtype=float))
+
+
+def maybe_open_local_camera(name: str, camera_id: int, args):
+    if int(camera_id) < 0:
+        return None
+    try:
+        return LocalCameraStream(
+            name=name,
+            camera_id=int(camera_id),
+            width=args.camera_width,
+            height=args.camera_height,
+            fps=args.camera_fps,
+            fourcc=args.camera_fourcc,
+            buffer_size=args.camera_buffer_size,
+        )
+    except Exception as e:
+        logger_mp.warning(f"[CAM] failed to open local camera '{name}' (id={camera_id}): {e}")
+        return None
+
+
+def maybe_open_remote_camera(name: str, endpoint: str):
+    endpoint = str(endpoint or "").strip()
+    if not endpoint:
+        return None
+    try:
+        return ZMQRawCameraReceiver(endpoint=endpoint, name=name)
+    except Exception as e:
+        logger_mp.warning(f"[CAM] failed to connect remote camera '{name}' ({endpoint}): {e}")
+        return None
+
+
+def start_keyboard_listener():
+    listen_keyboard_thread = threading.Thread(
+        target=listen_keyboard,
+        kwargs={"on_press": on_press, "until": None, "sequential": False,},
+        daemon=True,
+    )
+    listen_keyboard_thread.start()
+    return listen_keyboard_thread
+
+
+def cleanup_real_teleop_resources(
+    *,
+    args,
+    arm_ctrl,
+    tv_wrapper,
+    listen_keyboard_thread,
+    recorder,
+    sim_state_subscriber,
+    agv_bridge,
+    cameras,
+    exit_go_home: bool,
+    exit_home_hold_sec: float,
+):
+    try:
+        if arm_ctrl is not None:
+            if exit_go_home:
+                logger_mp.info("[EXIT] returning dual arms to home before shutdown...")
+                arm_ctrl.ctrl_dual_arm_go_home()
+            logger_mp.warning(
+                "[EXIT] holding dual arms at home for %.1fs before shutdown. "
+                "Keep clear and support the robot if needed.",
+                exit_home_hold_sec,
+            )
+            time.sleep(exit_home_hold_sec)
+    except Exception as e:
+        logger_mp.error(f"Failed to hold dual arms at home before shutdown: {e}")
+
+    try:
+        stop_listening()
+        if listen_keyboard_thread is not None:
+            listen_keyboard_thread.join()
+    except Exception as e:
+        logger_mp.error(f"Failed to stop keyboard listener: {e}")
+
+    try:
+        if tv_wrapper is not None:
+            tv_wrapper.close()
+    except Exception as e:
+        logger_mp.error(f"Failed to close teleop input provider: {e}")
+
+    try:
+        if agv_bridge is not None:
+            agv_bridge.close()
+    except Exception as e:
+        logger_mp.error(f"Failed to close G1D AGV bridge: {e}")
+
+    try:
+        if not args.motion:
+            pass
+            # status, result = motion_switcher.Exit_Debug_Mode()
+            # logger_mp.info(f"Exit debug mode: {'Success' if status == 3104 else 'Failed'}")
+    except Exception as e:
+        logger_mp.error(f"Failed to exit debug mode: {e}")
+
+    try:
+        if args.sim and sim_state_subscriber is not None:
+            sim_state_subscriber.stop_subscribe()
+    except Exception as e:
+        logger_mp.error(f"Failed to stop sim state subscriber: {e}")
+
+    for camera in cameras:
+        try:
+            if camera is not None:
+                camera.close()
+        except Exception as e:
+            logger_mp.error(f"Failed to close camera: {e}")
+
+    try:
+        if args.record and recorder is not None:
+            recorder.close()
+    except Exception as e:
+        logger_mp.error(f"Failed to close recorder: {e}")
+
+
 if __name__ == '__main__':
     arm_ctrl = None
     tv_wrapper = None
@@ -161,6 +287,7 @@ if __name__ == '__main__':
     loco_wrapper = None
     recorder = None
     sim_state_subscriber = None
+    agv_bridge = None
     exit_go_home = True
     exit_home_hold_sec = 5.0
     head_camera = None
@@ -212,45 +339,6 @@ if __name__ == '__main__':
             args.offline_replay_arm_source,
         )
 
-    def compute_arm_gravity_tauff(arm_ik_obj, arm_q):
-        try:
-            model = arm_ik_obj.reduced_robot.model
-            data = arm_ik_obj.reduced_robot.data
-            q = np.asarray(arm_q, dtype=float).copy()
-            dq = np.zeros(model.nv, dtype=float)
-            ddq = np.zeros(model.nv, dtype=float)
-            return pin.rnea(model, data, q, dq, ddq)
-        except Exception as e:
-            logger_mp.warning(f"[HOLD_TAUFF] failed to compute gravity compensation, fallback to zeros: {e}")
-            return np.zeros_like(np.asarray(arm_q, dtype=float))
-
-    def maybe_open_local_camera(name: str, camera_id: int):
-        if int(camera_id) < 0:
-            return None
-        try:
-            return LocalCameraStream(
-                name=name,
-                camera_id=int(camera_id),
-                width=args.camera_width,
-                height=args.camera_height,
-                fps=args.camera_fps,
-                fourcc=args.camera_fourcc,
-                buffer_size=args.camera_buffer_size,
-            )
-        except Exception as e:
-            logger_mp.warning(f"[CAM] failed to open local camera '{name}' (id={camera_id}): {e}")
-            return None
-
-    def maybe_open_remote_camera(name: str, endpoint: str):
-        endpoint = str(endpoint or "").strip()
-        if not endpoint:
-            return None
-        try:
-            return ZMQRawCameraReceiver(endpoint=endpoint, name=name)
-        except Exception as e:
-            logger_mp.warning(f"[CAM] failed to connect remote camera '{name}' ({endpoint}): {e}")
-            return None
-
     try:
         # setup dds communication domains id
         if args.sim:
@@ -259,10 +347,7 @@ if __name__ == '__main__':
             ChannelFactoryInitialize(0, networkInterface=args.network_interface)
 
         # keyboard communication mode
-        listen_keyboard_thread = threading.Thread(target=listen_keyboard,
-                                                  kwargs={"on_press": on_press, "until": None, "sequential": False,},
-                                                  daemon=True)
-        listen_keyboard_thread.start()
+        listen_keyboard_thread = start_keyboard_listener()
 
         if workspace_limit_enabled:
             if workspace_mode == "box":
@@ -431,9 +516,9 @@ if __name__ == '__main__':
             head_remote_camera = maybe_open_remote_camera("head", args.head_zmq_endpoint)
             left_remote_camera = maybe_open_remote_camera("left_wrist", args.left_zmq_endpoint)
             right_remote_camera = maybe_open_remote_camera("right_wrist", args.right_zmq_endpoint)
-            head_camera = maybe_open_local_camera("head", args.head_camera_id)
-            left_camera = maybe_open_local_camera("left_wrist", args.left_camera_id)
-            right_camera = maybe_open_local_camera("right_wrist", args.right_camera_id)
+            head_camera = maybe_open_local_camera("head", args.head_camera_id, args)
+            left_camera = maybe_open_local_camera("left_wrist", args.left_camera_id, args)
+            right_camera = maybe_open_local_camera("right_wrist", args.right_camera_id, args)
 
         latency_tracker = None
         if args.latency_trace:
@@ -1289,64 +1374,24 @@ if __name__ == '__main__':
         import traceback
         logger_mp.error(traceback.format_exc())
     finally:
-        try:
-            if arm_ctrl is not None:
-                if exit_go_home:
-                    logger_mp.info("[EXIT] returning dual arms to home before shutdown...")
-                    arm_ctrl.ctrl_dual_arm_go_home()
-                logger_mp.warning(
-                    "[EXIT] holding dual arms at home for %.1fs before shutdown. "
-                    "Keep clear and support the robot if needed.",
-                    exit_home_hold_sec,
-                )
-                time.sleep(exit_home_hold_sec)
-        except Exception as e:
-            logger_mp.error(f"Failed to hold dual arms at home before shutdown: {e}")
-        
-        try:
-            stop_listening()
-            if listen_keyboard_thread is not None:
-                listen_keyboard_thread.join()
-        except Exception as e:
-            logger_mp.error(f"Failed to stop keyboard listener: {e}")
-        
-        try:
-            if tv_wrapper is not None:
-                tv_wrapper.close()
-        except Exception as e:
-            logger_mp.error(f"Failed to close teleop input provider: {e}")
-
-        try:
-            if 'agv_bridge' in locals() and agv_bridge is not None:
-                agv_bridge.close()
-        except Exception as e:
-            logger_mp.error(f"Failed to close G1D AGV bridge: {e}")
-
-        try:
-            if not args.motion:
-                pass
-                # status, result = motion_switcher.Exit_Debug_Mode()
-                # logger_mp.info(f"Exit debug mode: {'Success' if status == 3104 else 'Failed'}")
-        except Exception as e:
-            logger_mp.error(f"Failed to exit debug mode: {e}")
-
-        try:
-            if args.sim and sim_state_subscriber is not None:
-                sim_state_subscriber.stop_subscribe()
-        except Exception as e:
-            logger_mp.error(f"Failed to stop sim state subscriber: {e}")
-
-        for camera in [head_remote_camera, left_remote_camera, right_remote_camera, head_camera, left_camera, right_camera]:
-            try:
-                if camera is not None:
-                    camera.close()
-            except Exception as e:
-                logger_mp.error(f"Failed to close local camera: {e}")
-        
-        try:
-            if args.record and recorder is not None:
-                recorder.close()
-        except Exception as e:
-            logger_mp.error(f"Failed to close recorder: {e}")
+        cleanup_real_teleop_resources(
+            args=args,
+            arm_ctrl=arm_ctrl,
+            tv_wrapper=tv_wrapper,
+            listen_keyboard_thread=listen_keyboard_thread,
+            recorder=recorder,
+            sim_state_subscriber=sim_state_subscriber,
+            agv_bridge=agv_bridge,
+            cameras=[
+                head_remote_camera,
+                left_remote_camera,
+                right_remote_camera,
+                head_camera,
+                left_camera,
+                right_camera,
+            ],
+            exit_go_home=exit_go_home,
+            exit_home_hold_sec=exit_home_hold_sec,
+        )
         logger_mp.info("✅ Finally, exiting program.")
         exit(0)
