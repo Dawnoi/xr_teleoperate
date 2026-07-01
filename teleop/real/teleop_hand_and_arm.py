@@ -30,15 +30,8 @@ for _p in reversed(preferred_python_paths):
 import pinocchio as pin
 
 from teleop.real.args import parse_args
-from data_pipeline.recording.alignment import (
-    append_timed_sample,
-    nearest_timed_sample,
-    camera_meta_monotonic_ns,
-    camera_frame_identity,
-    build_alignment_timestamp_entry,
-    timed_buffer_bounds,
-    interpolate_timed_sample_strict,
-)
+from data_pipeline.recording.alignment import append_timed_sample
+from data_pipeline.recording.teleop_recording_flow import TeleopRecordingFlow
 from unitree_sdk2py.core.channel import ChannelFactoryInitialize # dds 
 from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmController, H1_2_ArmController, H1_ArmController, H2_ArmController
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
@@ -139,18 +132,6 @@ def get_robot_wrist_poses(arm_ik, arm_q):
     right_pose[:3, :3] = right_se3.rotation
     right_pose[:3, 3] = right_se3.translation
     return left_pose, right_pose
-
-
-def pose_matrix_to_record(pose_mat):
-    pose = np.asarray(pose_mat, dtype=float)
-    from scipy.spatial.transform import Rotation as R
-    rpy = R.from_matrix(pose[:3, :3]).as_euler('xyz', degrees=False)
-    return {
-        "position": pose[:3, 3].tolist(),
-        "rpy": rpy.tolist(),
-        "rotation_matrix": pose[:3, :3].tolist(),
-        "matrix4x4": pose.tolist(),
-    }
 
 
 def compute_arm_gravity_tauff(arm_ik_obj, arm_q):
@@ -286,7 +267,9 @@ if __name__ == '__main__':
     gripper_ctrl = None
     loco_wrapper = None
     recorder = None
+    recording_flow = None
     sim_state_subscriber = None
+    reset_pose_publisher = None
     agv_bridge = None
     exit_go_home = True
     exit_home_hold_sec = 5.0
@@ -296,6 +279,12 @@ if __name__ == '__main__':
     head_remote_camera = None
     left_remote_camera = None
     right_remote_camera = None
+    dual_hand_data_lock = None
+    dual_hand_state_array = None
+    dual_hand_action_array = None
+    dual_gripper_data_lock = None
+    dual_gripper_state_array = None
+    dual_gripper_action_array = None
     args = parse_args()
     logger_mp.debug(f"args: {args}")
     operator_runtime = OperatorRuntime(record_enabled=bool(args.record))
@@ -320,15 +309,6 @@ if __name__ == '__main__':
     action_history_size = max(32, int(args.frequency * 6))
     state_history = deque(maxlen=state_history_size)
     action_history = deque(maxlen=action_history_size)
-    pending_record_samples = deque()
-    record_start_monotonic_ns = None
-    camera_align_max_delta_ns = int(max(20_000_000, (1.5 / max(args.frequency, 1e-6)) * 1e9))
-    state_align_max_delta_ns = int(max(20_000_000, (1.25 / max(args.frequency, 1e-6)) * 1e9))
-    action_align_max_delta_ns = state_align_max_delta_ns
-    state_nearest_fallback_max_delta_ns = int(max(80_000_000, (2.5 / max(args.frequency, 1e-6)) * 1e9))
-    action_nearest_fallback_max_delta_ns = state_nearest_fallback_max_delta_ns
-    record_future_wait_timeout_ns = int(max(120_000_000, (2.0 / max(args.frequency, 1e-6)) * 1e9))
-    pending_sample_timeout_ns = int(1_000_000_000)
     control_dt = 1.0 / max(args.frequency, 1e-6)
     if args.base_controller == "g1d_agv" and args.motion:
         raise ValueError("Do not combine --base-controller g1d_agv with --motion. G1D AGV base control should run with the arms kept in debug mode.")
@@ -520,6 +500,24 @@ if __name__ == '__main__':
             left_camera = maybe_open_local_camera("left_wrist", args.left_camera_id, args)
             right_camera = maybe_open_local_camera("right_wrist", args.right_camera_id, args)
 
+        if args.record:
+            recording_flow = TeleopRecordingFlow(
+                args=args,
+                recorder=recorder,
+                log=logger_mp,
+                reset_callback=(
+                    (lambda: publish_reset_category(1, reset_pose_publisher))
+                    if args.sim
+                    else None
+                ),
+                dual_hand_data_lock=dual_hand_data_lock,
+                dual_hand_state_array=dual_hand_state_array,
+                dual_hand_action_array=dual_hand_action_array,
+                dual_gripper_data_lock=dual_gripper_data_lock,
+                dual_gripper_state_array=dual_gripper_state_array,
+                dual_gripper_action_array=dual_gripper_action_array,
+            )
+
         latency_tracker = None
         if args.latency_trace:
             latency_tracker = SimpleLatencyTracker(
@@ -603,48 +601,20 @@ if __name__ == '__main__':
         TAKEOVER_SETTLE_FRAMES = 0 if (
             args.controller_mapping_mode == "legacy_main" or args.input_provider in {"lerobot_offline", "online_inference"}
         ) else 2
-        recording_waiting_for_first_frame = False
-        last_record_wait_log_ns = 0
-        last_enqueued_primary_frame_id = None
-
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
 
             # record mode
-            if args.record and RECORD_CANCEL:
-                RECORD_CANCEL = False
-                if RECORD_RUNNING or recording_waiting_for_first_frame:
-                    RECORD_RUNNING = False
-                    recording_waiting_for_first_frame = False
-                    record_start_monotonic_ns = None
-                    pending_record_samples.clear()
-                    last_enqueued_primary_frame_id = None
-                    recorder.cancel_episode()
-                    logger_mp.info("[RECORD_CANCEL] active episode canceled; next recording will reuse the episode index.")
-                else:
-                    logger_mp.info("[RECORD_CANCEL] ignored: no active recording to cancel.")
-
-            if args.record and RECORD_TOGGLE:
-                RECORD_TOGGLE = False
-                if not RECORD_RUNNING and not recording_waiting_for_first_frame:
-                    if recorder.create_episode():
-                        record_start_monotonic_ns = int(time.monotonic_ns())
-                        pending_record_samples.clear()
-                        last_enqueued_primary_frame_id = None
-                        recording_waiting_for_first_frame = True
-                        logger_mp.info("[RECORD_ALIGN] episode armed, waiting for first post-start camera frame before recording.")
-                    else:
-                        logger_mp.error("Failed to create episode. Recording not started.")
-                else:
-                    RECORD_RUNNING = False
-                    recording_waiting_for_first_frame = False
-                    record_start_monotonic_ns = None
-                    pending_record_samples.clear()
-                    last_enqueued_primary_frame_id = None
-                    recorder.save_episode()
-                    if args.sim:
-                        publish_reset_category(1, reset_pose_publisher)
+            if recording_flow is not None:
+                command_recording = recording_flow.handle_commands(
+                    record_running=RECORD_RUNNING,
+                    record_toggle=RECORD_TOGGLE,
+                    record_cancel=RECORD_CANCEL,
+                )
+                RECORD_RUNNING = command_recording.record_running
+                RECORD_TOGGLE = command_recording.record_toggle
+                RECORD_CANCEL = command_recording.record_cancel
 
             if RECENTER and calibration_required:
                 RECENTER = False
@@ -1019,346 +989,21 @@ if __name__ == '__main__':
                 logger_mp.info("[HOME] reached ready/calibration pose. Waiting for both grips to release before teleop resumes.")
 
             # record data
-            if args.record:
-                READY = recorder.is_ready() # now ready to (2) enter RECORD_RUNNING state
-                # dex hand or gripper
-                if (not args.no_gripper) and args.ee == "dex3" and args.input_mode == "hand":
-                    with dual_hand_data_lock:
-                        left_ee_state = dual_hand_state_array[:7]
-                        right_ee_state = dual_hand_state_array[-7:]
-                        left_hand_action = dual_hand_action_array[:7]
-                        right_hand_action = dual_hand_action_array[-7:]
-                elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "hand":
-                    with dual_gripper_data_lock:
-                        left_ee_state = [dual_gripper_state_array[0]]
-                        right_ee_state = [dual_gripper_state_array[1]]
-                        left_hand_action = [dual_gripper_action_array[0]]
-                        right_hand_action = [dual_gripper_action_array[1]]
-                elif (not args.no_gripper) and args.ee == "dex1" and args.input_mode == "controller":
-                    with dual_gripper_data_lock:
-                        left_ee_state = [dual_gripper_state_array[0]]
-                        right_ee_state = [dual_gripper_state_array[1]]
-                        left_hand_action = [dual_gripper_action_array[0]]
-                        right_hand_action = [dual_gripper_action_array[1]]
-                elif (not args.no_gripper) and (args.ee == "inspire_dfx" or args.ee == "inspire_ftp" or args.ee == "brainco") and args.input_mode == "hand":
-                    with dual_hand_data_lock:
-                        left_ee_state = dual_hand_state_array[:6]
-                        right_ee_state = dual_hand_state_array[-6:]
-                        left_hand_action = dual_hand_action_array[:6]
-                        right_hand_action = dual_hand_action_array[-6:]
-                else:
-                    left_ee_state = []
-                    right_ee_state = []
-                    left_hand_action = []
-                    right_hand_action = []
-
-                # arm state and action
-                if RECORD_RUNNING or recording_waiting_for_first_frame:
-                    head_source = head_remote_camera if head_remote_camera is not None else head_camera
-                    left_source = left_remote_camera if left_remote_camera is not None else left_camera
-                    right_source = right_remote_camera if right_remote_camera is not None else right_camera
-
-                    if recording_waiting_for_first_frame:
-                        wait_target_ns = int(time.monotonic_ns())
-                        source_entries = [
-                            ("head", head_source),
-                            ("left_wrist", left_source),
-                            ("right_wrist", right_source),
-                        ]
-                        required_sources = [(name, src) for name, src in source_entries if src is not None]
-                        if not required_sources:
-                            RECORD_RUNNING = True
-                            recording_waiting_for_first_frame = False
-                            logger_mp.info("[RECORD_ALIGN] no camera source configured, recording starts immediately.")
-                        else:
-                            first_frame_ready = True
-                            first_frame_times = []
-                            for camera_name, source in required_sources:
-                                _, meta = source.get_nearest(
-                                    wait_target_ns,
-                                    max_delta_ns=None,
-                                    min_monotonic_ns=record_start_monotonic_ns,
-                                    copy=False,
-                                )
-                                meta_ts = camera_meta_monotonic_ns(meta)
-                                if meta is None or meta_ts is None:
-                                    first_frame_ready = False
-                                    break
-                                first_frame_times.append(meta_ts)
-                            if not first_frame_ready:
-                                now_ns = time.monotonic_ns()
-                                if now_ns - last_record_wait_log_ns > 1_000_000_000:
-                                    logger_mp.info("[RECORD_ALIGN] waiting for first post-start camera frame...")
-                                    last_record_wait_log_ns = now_ns
-                                continue
-                            record_start_monotonic_ns = int(max(first_frame_times))
-                            RECORD_RUNNING = True
-                            recording_waiting_for_first_frame = False
-                            logger_mp.info(
-                                "[RECORD_ALIGN] first post-start camera frame received, recording begins at monotonic_ns=%d",
-                                record_start_monotonic_ns,
-                            )
-                            continue
-
-                    record_min_timestamp_ns = int(record_start_monotonic_ns or time.monotonic_ns())
-                    primary_source_entry = None
-                    for camera_name, source in (
-                        ("head", head_source),
-                        ("left_wrist", left_source),
-                        ("right_wrist", right_source),
-                    ):
-                        if source is None:
-                            continue
-                        primary_source_entry = (camera_name, source)
-                        break
-
-                    if primary_source_entry is not None:
-                        primary_camera_name, primary_source = primary_source_entry
-                        primary_frame, primary_meta = primary_source.get_latest(copy=True)
-                    else:
-                        primary_camera_name = None
-                        primary_frame = None
-                        primary_meta = None
-
-                    if primary_frame is not None and primary_meta is not None:
-                        primary_ts = int(camera_meta_monotonic_ns(primary_meta))
-                        primary_frame_seq = (primary_meta or {}).get("frame_seq")
-                        primary_frame_id = camera_frame_identity(primary_camera_name, primary_meta)
-                        already_pending = False
-                        if pending_record_samples:
-                            last_pending = pending_record_samples[-1]
-                            already_pending = (
-                                last_pending.get("primary_camera_name") == primary_camera_name
-                                and last_pending.get("frame_seq") == primary_frame_seq
-                                and last_pending.get("sample_monotonic_ns") == primary_ts
-                            )
-                        if (
-                            not already_pending
-                            and primary_ts >= record_min_timestamp_ns
-                            and primary_frame_id is not None
-                            and primary_frame_id != last_enqueued_primary_frame_id
-                        ):
-                            pending_record_samples.append(
-                                {
-                                    "enqueue_wall_time_ns": int(time.time_ns()),
-                                    "sample_monotonic_ns": primary_ts,
-                                    "primary_camera_name": primary_camera_name,
-                                    "primary_frame": primary_frame,
-                                    "primary_meta": primary_meta,
-                                    "left_ee_state": list(left_ee_state),
-                                    "right_ee_state": list(right_ee_state),
-                                    "left_hand_action": list(left_hand_action),
-                                    "right_hand_action": list(right_hand_action),
-                                    "teleop_input_perf_counter_ns": int(tele_data_recv_ts_ns),
-                                    "frame_seq": primary_frame_seq,
-                                }
-                            )
-                            last_enqueued_primary_frame_id = primary_frame_id
-
-                    while pending_record_samples:
-                        pending = pending_record_samples[0]
-                        sample_monotonic_ns = int(pending["sample_monotonic_ns"])
-                        state_earliest, state_latest = timed_buffer_bounds(
-                            state_history, min_timestamp_ns=record_min_timestamp_ns
-                        )
-                        action_earliest, action_latest = timed_buffer_bounds(
-                            action_history, min_timestamp_ns=record_min_timestamp_ns
-                        )
-                        now_mono_ns = int(time.monotonic_ns())
-                        sample_age_ns = now_mono_ns - sample_monotonic_ns
-
-                        if state_earliest is None or action_earliest is None:
-                            break
-
-                        if sample_monotonic_ns < state_earliest or sample_monotonic_ns < action_earliest:
-                            logger_mp.warning("[RECORD_ALIGN] drop pending sample: target timestamp fell out of state/action history window.")
-                            pending_record_samples.popleft()
-                            continue
-
-                        if state_latest is None or action_latest is None:
-                            break
-
-                        waiting_for_future_coverage = (
-                            sample_monotonic_ns > state_latest or sample_monotonic_ns > action_latest
-                        )
-                        if waiting_for_future_coverage and sample_age_ns <= record_future_wait_timeout_ns:
-                            break
-
-                        aligned_state = interpolate_timed_sample_strict(
-                            state_history,
-                            sample_monotonic_ns,
-                            max_delta_ns=state_align_max_delta_ns,
-                            min_timestamp_ns=record_min_timestamp_ns,
-                        )
-                        aligned_action = interpolate_timed_sample_strict(
-                            action_history,
-                            sample_monotonic_ns,
-                            max_delta_ns=action_align_max_delta_ns,
-                            min_timestamp_ns=record_min_timestamp_ns,
-                        )
-                        if aligned_state is None:
-                            aligned_state = nearest_timed_sample(
-                                state_history,
-                                sample_monotonic_ns,
-                                max_delta_ns=state_nearest_fallback_max_delta_ns,
-                                min_timestamp_ns=record_min_timestamp_ns,
-                            )
-                            if aligned_state is not None:
-                                aligned_state["interpolation_mode"] = "nearest_fallback"
-                        if aligned_action is None:
-                            aligned_action = nearest_timed_sample(
-                                action_history,
-                                sample_monotonic_ns,
-                                max_delta_ns=action_nearest_fallback_max_delta_ns,
-                                min_timestamp_ns=record_min_timestamp_ns,
-                            )
-                            if aligned_action is not None:
-                                aligned_action["interpolation_mode"] = "nearest_fallback"
-                        if aligned_state is None:
-                            if sample_age_ns > pending_sample_timeout_ns:
-                                logger_mp.warning("[RECORD_ALIGN] drop pending sample: no interpolated state found at primary camera timestamp.")
-                                pending_record_samples.popleft()
-                                continue
-                            break
-                        if aligned_action is None:
-                            if sample_age_ns > pending_sample_timeout_ns:
-                                logger_mp.warning("[RECORD_ALIGN] drop pending sample: no interpolated action found at primary camera timestamp.")
-                                pending_record_samples.popleft()
-                                continue
-                            break
-
-                        colors = {
-                            pending["primary_camera_name"]: pending["primary_frame"]
-                        }
-                        depths = {}
-                        camera_timestamps = {
-                            pending["primary_camera_name"]: pending["primary_meta"]
-                        }
-
-                        if head_source is not None and pending["primary_camera_name"] != "head":
-                            head_frame, head_meta = head_source.get_nearest(
-                                sample_monotonic_ns,
-                                max_delta_ns=camera_align_max_delta_ns,
-                                min_monotonic_ns=record_min_timestamp_ns,
-                                copy=True,
-                            )
-                            if head_frame is not None:
-                                colors["head"] = head_frame
-                                camera_timestamps["head"] = head_meta
-                        if left_source is not None and pending["primary_camera_name"] != "left_wrist":
-                            left_frame, left_meta = left_source.get_nearest(
-                                sample_monotonic_ns,
-                                max_delta_ns=camera_align_max_delta_ns,
-                                min_monotonic_ns=record_min_timestamp_ns,
-                                copy=True,
-                            )
-                            if left_frame is not None:
-                                colors["left_wrist"] = left_frame
-                                camera_timestamps["left_wrist"] = left_meta
-                        if right_source is not None and pending["primary_camera_name"] != "right_wrist":
-                            right_frame, right_meta = right_source.get_nearest(
-                                sample_monotonic_ns,
-                                max_delta_ns=camera_align_max_delta_ns,
-                                min_monotonic_ns=record_min_timestamp_ns,
-                                copy=True,
-                            )
-                            if right_frame is not None:
-                                colors["right_wrist"] = right_frame
-                                camera_timestamps["right_wrist"] = right_meta
-
-                        aligned_lr_arm_q = np.asarray(aligned_state["q"], dtype=float)
-                        aligned_sol_q = np.asarray(aligned_action["q"], dtype=float)
-                        left_arm_state  = aligned_lr_arm_q[:7]
-                        right_arm_state = aligned_lr_arm_q[-7:]
-                        left_arm_action = aligned_sol_q[:7]
-                        right_arm_action = aligned_sol_q[-7:]
-                        record_arm_repr = args.record_arm_repr
-                        need_arm_pose = record_arm_repr in {"pose", "both"}
-                        left_state_pose = right_state_pose = None
-                        left_action_pose = right_action_pose = None
-                        if need_arm_pose:
-                            left_state_pose, right_state_pose = get_robot_wrist_poses(arm_ik, aligned_lr_arm_q)
-                            left_action_pose, right_action_pose = get_robot_wrist_poses(arm_ik, aligned_sol_q)
-
-                        left_arm_state_entry = {
-                            "qpos": left_arm_state.tolist() if record_arm_repr in {"qpos", "both"} else [],
-                            "qvel": [],
-                            "torque": [],
-                        }
-                        right_arm_state_entry = {
-                            "qpos": right_arm_state.tolist() if record_arm_repr in {"qpos", "both"} else [],
-                            "qvel": [],
-                            "torque": [],
-                        }
-                        left_arm_action_entry = {
-                            "qpos": left_arm_action.tolist() if record_arm_repr in {"qpos", "both"} else [],
-                            "qvel": [],
-                            "torque": [],
-                        }
-                        right_arm_action_entry = {
-                            "qpos": right_arm_action.tolist() if record_arm_repr in {"qpos", "both"} else [],
-                            "qvel": [],
-                            "torque": [],
-                        }
-                        if need_arm_pose:
-                            left_arm_state_entry["pose"] = pose_matrix_to_record(left_state_pose)
-                            right_arm_state_entry["pose"] = pose_matrix_to_record(right_state_pose)
-                            left_arm_action_entry["pose"] = pose_matrix_to_record(left_action_pose)
-                            right_arm_action_entry["pose"] = pose_matrix_to_record(right_action_pose)
-
-                        states = {
-                            "left_arm": left_arm_state_entry,
-                            "right_arm": right_arm_state_entry,
-                            "left_ee": {
-                                "qpos": pending["left_ee_state"],
-                                "qvel": [],
-                                "torque": [],
-                            },
-                            "right_ee": {
-                                "qpos": pending["right_ee_state"],
-                                "qvel": [],
-                                "torque": [],
-                            },
-                        }
-                        actions = {
-                            "left_arm": left_arm_action_entry,
-                            "right_arm": right_arm_action_entry,
-                            "left_ee": {
-                                "qpos": pending["left_hand_action"],
-                                "qvel": [],
-                                "torque": [],
-                            },
-                            "right_ee": {
-                                "qpos": pending["right_hand_action"],
-                                "qvel": [],
-                                "torque": [],
-                            },
-                        }
-                        timestamps = {
-                            "sample_wall_time_ns": int(time.time_ns()),
-                            "sample_monotonic_ns": sample_monotonic_ns,
-                            "teleop_input_perf_counter_ns": int(pending["teleop_input_perf_counter_ns"]),
-                            "primary_camera_name": pending["primary_camera_name"],
-                            "state": build_alignment_timestamp_entry(aligned_state, sample_monotonic_ns),
-                            "action": build_alignment_timestamp_entry(aligned_action, sample_monotonic_ns),
-                            "camera": camera_timestamps,
-                        }
-                        aligned_arm_tauff = np.asarray(aligned_action["tauff"], dtype=float).reshape(-1)
-                        if aligned_arm_tauff.shape[0] != 14 or not np.all(np.isfinite(aligned_arm_tauff)):
-                            logger_mp.warning(
-                                "[RECORD_ALIGN] drop pending sample: invalid aligned arm tauff for control sidecar."
-                            )
-                            pending_record_samples.popleft()
-                            continue
-                        control_extras = {
-                            "arm_tauff": aligned_arm_tauff.tolist(),
-                        }
-                        if args.sim:
-                            sim_state = sim_state_subscriber.read_data()
-                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, sim_state=sim_state, timestamps=timestamps, control_extras=control_extras)
-                        else:
-                            recorder.add_item(colors=colors, depths=depths, states=states, actions=actions, timestamps=timestamps, control_extras=control_extras)
-                        pending_record_samples.popleft()
+            if recording_flow is not None:
+                frame_recording = recording_flow.process_frame(
+                    record_running=RECORD_RUNNING,
+                    camera_sources=camera_sources,
+                    state_history=state_history,
+                    action_history=action_history,
+                    teleop_input_perf_counter_ns=tele_data_recv_ts_ns,
+                    arm_ik=arm_ik,
+                    get_wrist_poses=get_robot_wrist_poses,
+                    sim_state_subscriber=sim_state_subscriber,
+                )
+                RECORD_RUNNING = frame_recording.record_running
+                READY = frame_recording.ready
+                if frame_recording.should_continue_frame:
+                    continue
 
             current_time = time.time()
             time_elapsed = current_time - start_time
