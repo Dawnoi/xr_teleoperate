@@ -118,7 +118,7 @@
 5. Combined targeted suite:
    `python -m unittest tests.test_inference_protocol tests.test_pose_transform tests.test_online_inference tests.test_teleop_input_provider`
 6. Compile check:
-   `python -m py_compile inference/clients/protocol.py inference/transforms/pose_transform.py inference/sessions/online_session.py core/input/teleop_input_provider.py teleop/real/teleop_hand_and_arm.py`
+   `python -m py_compile inference/transport.py inference/pose_transform.py inference/online_session.py core/input/teleop_input_provider.py teleop/real/teleop_hand_and_arm.py`
 
 当前开发环境使用：
 

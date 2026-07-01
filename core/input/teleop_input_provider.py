@@ -4,9 +4,9 @@ from typing import Any
 
 import logging_mp
 
-from inference.sessions.online_session import OnlineInferenceConfig, OnlineInferenceSession
-from inference.transforms.pose_transform import load_pose_transformer
-from inference.clients.protocol import HttpJsonInferenceTransport, TcpJsonTransport
+from inference.online_session import OnlineInferenceConfig, OnlineInferenceSession
+from inference.pose_transform import load_pose_transformer
+from inference.transport import HttpJsonInferenceTransport, TcpJsonTransport
 from core.input.base import (
     ACTION_SIZE,
     ARM_SIZE,

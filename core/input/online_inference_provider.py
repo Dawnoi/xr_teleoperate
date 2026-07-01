@@ -5,7 +5,7 @@ import time
 
 import numpy as np
 
-from inference.sessions.online_session import CameraSample, OnlineInferenceSession, RobotStateSample
+from inference.online_session import CameraSample, OnlineInferenceSession, RobotStateSample
 from core.input.base import (
     BaseTeleopInputProvider,
     MotionIntent,

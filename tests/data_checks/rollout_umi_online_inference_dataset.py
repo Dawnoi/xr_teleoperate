@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from data_pipeline.audit.probe_umi_online_inference_dataset import (  # noqa: E402
+from tests.data_checks.probe_umi_online_inference_dataset import (  # noqa: E402
     build_observation,
     item_gripper,
     item_pose7,

@@ -36,19 +36,19 @@ from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmControl
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
 from data_pipeline.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
 from core.control.g1d_agv_bridge import G1DAgvBridge
-from teleop.operator.ipc import IPC_Server
+from teleop.runtime.operator_ipc import IPC_Server
 from core.control.motion_switcher import MotionSwitcher, LocoClientWrapper
 from core.input.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
-from inference.sessions.online_session import online_inference_speed_limit_delta
+from inference.online_session import online_inference_speed_limit_delta
 from core.control.arm_target_safety import limit_arm_joint_target_velocity
 from core.control.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,
     clamp_dual_wrist_poses_to_tapered_workspace,
 )
 from core.camera.local_camera import LocalCameraStream
-from core.diagnostics.simple_latency_trace import SimpleLatencyTracker
-from core.diagnostics.timing_debugger import TimingDebugger
-from teleop.operator.runtime import OperatorRuntime
+from teleop.runtime.latency_trace import SimpleLatencyTracker
+from teleop.runtime.timing_debugger import TimingDebugger
+from teleop.runtime.operator_runtime import OperatorRuntime
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -743,7 +743,7 @@ if __name__ == '__main__':
         else:
             ChannelFactoryInitialize(0, networkInterface=args.network_interface)
 
-        # ipc communication mode. client usage: see operator/ipc.py
+        # ipc communication mode. client usage: see runtime/ipc.py
         if args.ipc:
             ipc_server = IPC_Server(on_press=on_press,get_state=get_state)
             ipc_server.start()

@@ -17,6 +17,6 @@ NETWORK_INTERFACE="${NETWORK_INTERFACE:-wlo1}"
 
 cd "${REPO_DIR}"
 
-exec python core/diagnostics/debug_dds_topics.py \
+exec python tests/diagnostics/debug_dds_topics.py \
   --network-interface "${NETWORK_INTERFACE}" \
   "$@"

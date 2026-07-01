@@ -6,7 +6,7 @@ Python 实现直接位于对应业务域：
 
 - 真机/仿真遥操：`teleop/real`, `teleop/sim`
 - 回放/数据工具：`data_pipeline/`
-- 诊断：`core/diagnostics`
+- 诊断：`tests/diagnostics`
 
 当前 shell 分组：
 

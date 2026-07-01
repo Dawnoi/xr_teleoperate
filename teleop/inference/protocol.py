@@ -1,1 +1,1 @@
-from inference.clients.protocol import *  # noqa: F401,F403
+from inference.transport import *  # noqa: F401,F403

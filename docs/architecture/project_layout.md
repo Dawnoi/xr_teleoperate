@@ -6,11 +6,12 @@
 teleop/          实时遥操域
   real/          真机遥操入口：teleop/real/teleop_hand_and_arm.py
   sim/           仿真遥操入口：teleop/sim/xrobotics_mujoco.py
-  runtime/       real/sim 共享状态机预留目录
+  runtime/       real/sim 共享运行逻辑：状态、限频、可选 trace/timing
 
-core/            公共能力：input/control/robot/camera/transforms/diagnostics
-data_pipeline/   数据域：recording/replay/export/audit/schemas
-inference/       在线推理/VLA：clients/protocols/sessions/transforms
+core/            可复用实现逻辑：input/control/camera
+data_pipeline/   数据域：recording/replay/export
+inference/       在线推理/VLA 核心逻辑：transport/protocol/session/pose_transform
+tests/           调试、数据检查、探针、诊断脚本
 scripts/         少量 shell 一键脚本，不放 Python wrapper
 docs/            文档
 assets/          模型和静态资源

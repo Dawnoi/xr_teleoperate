@@ -62,7 +62,7 @@ xr_teleoperate/
 │   ├── control_utils/      # 安全限幅、滤波、底盘桥、motion switcher、timing
 │   ├── recording/          # episode/LeRobot/rerun 写入
 │   ├── camera/             # 本地相机采集
-│   ├── operator/           # 键盘/IPC/操作员运行时
+│   ├── runtime/           # 键盘/IPC/操作员运行时
 │   ├── sim/                # MuJoCo/G1D 仿真辅助
 │   ├── diagnostics/        # latency trace 等诊断
 │   ├── cpp/                # C++ 底盘桥源码
@@ -80,7 +80,7 @@ xr_teleoperate/
 - DDS 初始化
 - XR/input provider 初始化
 - arm/hand/base/controller 初始化
-- operator/IPC/键盘逻辑
+- runtime/IPC/键盘逻辑
 - camera/recording 逻辑
 - online inference/VLA runtime 接入
 - 主循环状态机
@@ -219,33 +219,25 @@ xr_teleoperate/
 │   │   └── operator_runtime.py     # 键盘/IPC/手柄快捷键
 │   └── README.md                   # 遥操运行说明
 │
-├── core/                           # 跨业务域公共逻辑
+├── core/                           # 被业务入口实际复用的实现逻辑
 │   ├── input/                      # XR/controller/tracker/offline/online provider contract
 │   ├── control/                    # 安全限幅、workspace、filter、底盘控制策略
-│   ├── robot/                      # arm/hand/IK 硬件适配和模型封装
-│   ├── camera/                     # local/zmq camera 抽象
-│   ├── transforms/                 # pose/quaternion/rot6d/matrix 转换
-│   └── diagnostics/                # tracing/timing/latency 公共诊断
+│   └── camera/                     # local/zmq camera 抽象
 │
 ├── inference/                      # 在线推理/VLA，不直接属于 teleop
-│   ├── protocols/                  # pika/pi05/JSONL/HTTP schema
-│   ├── clients/                    # tcp/http transport
-│   ├── sessions/                   # OnlineInferenceSession / action chunk buffer
-│   └── transforms/                 # inference 专用 ob/action transform 配置加载
+│   ├── transport.py                # tcp/http transport + action chunk 解析
+│   ├── pi05_protocol.py            # PI0.5/pose payload 编解码
+│   ├── online_session.py           # observation 组包和 chunk 运行节奏
+│   └── pose_transform.py           # pose/quaternion/rot6d/matrix 转换
 │
 ├── data_pipeline/                  # 数据采集、回放、导出
 │   ├── recording/                  # episode writer / lerobot writer / rerun writer
 │   ├── replay/                     # raw/LeRobot 回放到 sim/real 的逻辑
-│   ├── export/                     # raw -> LeRobot, LeRobot -> UMI/DP 等转换
-│   ├── audit/                      # 数据集检查、对齐报告、探针
-│   └── schemas/                    # 数据格式文档或 schema helper
+│   └── export/                     # raw -> LeRobot, LeRobot -> UMI/DP 等转换
 │
-├── apps/                           # 可选：统一模块入口，里面只 import 对应业务域
-│   ├── teleop_real.py
-│   ├── teleop_sim.py
-│   ├── replay_real.py
-│   ├── replay_sim.py
-│   └── infer_online.py
+├── tests/                          # 非生产链路：诊断、探针、数据检查
+│   ├── diagnostics/
+│   └── data_checks/
 │
 ├── scripts/                        # shell wrapper / 一键启动，不放复杂 Python 逻辑
 │   ├── start/
@@ -288,7 +280,7 @@ xr_teleoperate/
 │   ├── control_utils/             # 暂时保留；后续迁到 core/control
 │   ├── recording/                 # 暂时保留；后续迁到 data_pipeline/recording
 │   ├── camera/                    # 暂时保留；后续迁到 core/camera
-│   ├── diagnostics/               # 暂时保留；后续迁到 core/diagnostics
+│   ├── diagnostics/               # 暂时保留；后续迁到 tests/diagnostics
 │   └── teleop_hand_and_arm.py     # 兼容旧入口，最终变成 wrapper
 ├── data_pipeline/                 # 先新增空域或迁入新代码，不强行移动旧代码
 ├── scripts/                       # 暂时保留旧路径，新增分组 wrapper
@@ -365,13 +357,13 @@ data_pipeline/replay/*.py                  # 回放调度、速度控制、目�
 ```text
 data_pipeline/export/raw_to_lerobot_v2.py
 data_pipeline/export/lerobot_to_umi_dp.py
-data_pipeline/audit/probe_umi_online_inference_dataset.py
-data_pipeline/audit/rollout_umi_online_inference_dataset.py
-data_pipeline/audit/visualize_umi_mujoco_probe.py
-data_pipeline/audit/multi_cam_record.py
-data_pipeline/audit/alignment_report.py
+tests/data_checks/probe_umi_online_inference_dataset.py
+tests/data_checks/rollout_umi_online_inference_dataset.py
+tests/data_checks/visualize_umi_mujoco_probe.py
+tests/data_checks/multi_cam_record.py
+tests/data_checks/alignment_report.py
 data_pipeline/recording/rebuild_rerun_rrd.py
-data_pipeline/audit/offline_dds_replay_probe.py
+tests/data_checks/offline_dds_replay_probe.py
 ```
 
 这些都是数据检查、转换、探针或可视化，不应归在 teleop。
@@ -435,7 +427,7 @@ configs/inference/*
 
 - [x] 新增 `data_pipeline/recording/`，迁移 episode/LeRobot/rerun writer。
 - [x] 新增 `data_pipeline/replay/`，迁移 replay raw/LeRobot 的调度逻辑。
-- [x] 新增 `data_pipeline/export/` 和 `data_pipeline/audit/`，迁移 tools 和数据检查脚本。
+- [x] 新增 `data_pipeline/export/` 和 `tests/data_checks/`，迁移 tools 和数据检查脚本。
 - [x] teleop 侧只依赖 `data_pipeline.recording` 的 API，不直接拥有 writer 实现。
 
 ### Phase 3：沉淀公共 core
@@ -443,7 +435,7 @@ configs/inference/*
 - [x] 新增 `core/input/`，迁移 provider contract、XR wrapper、TeleData 类型。
 - [x] 新增 `core/control/`，迁移 safety/workspace/filter/base bridge。
 - [ ] 新增 `core/robot/`，迁移 arm/IK/hand adapter。
-- [x] 新增 `core/camera/` 和 `core/diagnostics/`。
+- [x] 新增 `core/camera/` 和 `tests/diagnostics/`。
 - [x] 旧 `teleop/input`、`teleop/control_utils` 等保留兼容 import 一段时间。
 
 ### Phase 4：迁移 inference/VLA 独立域
@@ -469,12 +461,13 @@ teleop/real/teleop_hand_and_arm.py          # 真机遥操实现
 teleop/sim/xrobotics_mujoco.py              # MuJoCo 遥操实现
 data_pipeline/recording/*.py                # recording/writer/rerun 实现
 data_pipeline/replay/*.py                   # replay 实现
-data_pipeline/audit/*.py                    # 数据检查/探针实现
+tests/data_checks/*.py                    # 数据检查/探针实现
 core/input/*.py                             # 输入 provider 和 TeleData 类型
 core/control/*.py                           # safety/workspace/filter/base bridge
 core/camera/*.py                            # camera 抽象
-core/diagnostics/*.py                       # latency/timing/debug 诊断
-inference/{clients,protocols,sessions,transforms}/
+teleop/runtime/{latency_trace,timing_debugger}.py  # 遥操运行时可选观测
+tests/diagnostics/*.py                       # debug/plot 诊断脚本
+inference/{transport,pi05_protocol,online_session,pose_transform}.py
 ```
 
 旧路径均保留 wrapper/shim，因此旧命令和旧 import 在过渡期仍可用。

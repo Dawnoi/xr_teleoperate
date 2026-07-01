@@ -6,14 +6,14 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 import logging
 import numpy as np
 
-from inference.clients.protocol import encode_jpeg_base64, parse_action_chunk
-from inference.protocols.pi05_protocol import (
+from inference.transport import encode_jpeg_base64, parse_action_chunk
+from inference.pi05_protocol import (
     PI05_IMAGE_ROLES,
     build_pi05_observation_payload,
     pi05_action_sequence_to_pose7_chunks,
     validate_pi05_action_sequence,
 )
-from inference.transforms.pose_transform import matrix_to_pose7_xyzw, matrix_to_pose9_rot6d, pose7_xyzw_to_matrix
+from inference.pose_transform import matrix_to_pose7_xyzw, matrix_to_pose9_rot6d, pose7_xyzw_to_matrix
 
 logger = logging.getLogger(__name__)
 

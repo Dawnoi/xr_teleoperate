@@ -14,7 +14,7 @@ from typing import Any
 
 import numpy as np
 
-from inference.transforms.pose_transform import matrix_to_pose7_xyzw, matrix_to_pose9_rot6d, pose9_rot6d_to_matrix
+from inference.pose_transform import matrix_to_pose7_xyzw, matrix_to_pose9_rot6d, pose9_rot6d_to_matrix
 
 PI05_IMAGE_ROLES = ("third_front", "head_fpv", "left_hand", "right_hand")
 

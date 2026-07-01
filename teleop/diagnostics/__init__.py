@@ -1,1 +1,1 @@
-"""Compatibility package for moved diagnostics modules. New code should use core.diagnostics."""
+"""Compatibility package for old diagnostics imports. New code should use tests/diagnostics or teleop.runtime."""

@@ -1,1 +1,1 @@
-"""Online policy/VLA inference protocols, clients, and sessions."""
+"""Online policy/VLA inference implementation."""
