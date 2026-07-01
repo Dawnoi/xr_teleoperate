@@ -466,7 +466,7 @@ tests/data_checks/*.py                    # 数据检查/探针实现
 core/input/*.py                             # 输入 provider 和 TeleData 类型
 core/control/*.py                           # safety/workspace/filter/base bridge
 core/camera/*.py                            # camera 抽象
-teleop/runtime/{latency_trace,timing_debugger}.py  # 遥操运行时可选观测
+teleop/debug/{latency_trace,timing_debugger,gripper_state_ui}.py  # 遥操调试辅助
 tests/diagnostics/*.py                       # debug/plot 诊断脚本
 inference/{transport,pi05_protocol,online_session,pose_transform}.py
 ```

@@ -20,7 +20,7 @@ from core.input.raw_offline import load_raw_dry_run_summary
 from core.input.raw_offline import load_raw_episode_items
 from core.input.raw_offline import raw_gripper_source_key
 from core.input.teleop_input_provider import dex1_q_to_trigger_value
-from teleop.runtime.gripper_state_ui import OpenCVGripperStateUI
+from teleop.debug.gripper_state_ui import OpenCVGripperStateUI
 
 
 DEX1_LEFT_CMD_TOPIC = "rt/dex1/left/cmd"

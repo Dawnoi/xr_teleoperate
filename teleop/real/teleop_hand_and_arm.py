@@ -53,8 +53,8 @@ from core.control.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_tapered_workspace,
 )
 from core.camera.local_camera import LocalCameraStream
-from teleop.runtime.latency_trace import SimpleLatencyTracker
-from teleop.runtime.timing_debugger import TimingDebugger
+from teleop.debug.latency_trace import SimpleLatencyTracker
+from teleop.debug.timing_debugger import TimingDebugger
 from teleop.runtime.operator_runtime import OperatorRuntime
 from sshkeyboard import listen_keyboard, stop_listening
 

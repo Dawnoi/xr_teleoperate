@@ -6,7 +6,8 @@
 teleop/          实时遥操域
   real/          真机遥操入口：teleop/real/teleop_hand_and_arm.py
   sim/           仿真遥操入口：teleop/sim/xrobotics_mujoco.py
-  runtime/       real/sim 共享运行逻辑：状态、限频、可选 trace/timing
+  runtime/       real/sim 共享运行逻辑：状态、限频、命令处理
+  debug/         遥操调试辅助：trace/timing/UI
 
 core/            可复用实现逻辑：input/control/camera
 data_pipeline/   数据域：recording/replay/export
