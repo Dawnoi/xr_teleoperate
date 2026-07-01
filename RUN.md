@@ -19,7 +19,7 @@
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/teleop_hand_and_arm.py \
+python teleop/real/teleop_hand_and_arm.py \
   --input-mode controller \
   --arm G1_29 \
   --ee dex1 \
@@ -49,7 +49,7 @@ Wi‑Fi:
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/teleop_hand_and_arm.py \
+python teleop/real/teleop_hand_and_arm.py \
   --input-mode controller \
   --arm G1_29 \
   --ee dex1 \
@@ -74,7 +74,7 @@ python teleop/teleop_hand_and_arm.py \
   --base-stick-deadzone 0.10
 ```
 ```
-python teleop/teleop_hand_and_arm.py \
+python teleop/real/teleop_hand_and_arm.py \
   --input-mode controller \
   --arm G1_29 \
   --ee dex1 \
@@ -133,7 +133,7 @@ python teleop/teleop_hand_and_arm.py \
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/teleop_hand_and_arm.py \
+python teleop/real/teleop_hand_and_arm.py \
     --input-mode controller \
     --arm G1_29 \
     --ee dex1 \
@@ -220,7 +220,7 @@ make
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-bash scripts/start_real_robot_wired.sh \
+bash scripts/start/start_real_robot_wired.sh \
   --record \
   --headless \
   --task-dir ./utils/data \
@@ -233,7 +233,7 @@ bash scripts/start_real_robot_wired.sh \
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-bash scripts/start_real_robot_wired.sh \
+bash scripts/start/start_real_robot_wired.sh \
   --record \
   --task-dir ./utils/data \
   --task-name single_zed_record \
@@ -370,24 +370,24 @@ rerun ./utils/data/<task_name>/episode_0001/rerun.rrd
 cd ~/unitree_ws/src/xr_teleoperate
 
 # 有线
-bash scripts/start_real_robot_wired.sh
+bash scripts/start/start_real_robot_wired.sh
 
 # Wi‑Fi
-bash scripts/start_real_robot_wifi.sh
+bash scripts/start/start_real_robot_wifi.sh
 ```
 
 如果网卡名字不同，可以直接覆盖：
 
 ```bash
-NETWORK_INTERFACE=enp3s0 bash scripts/start_real_robot_wired.sh
-NETWORK_INTERFACE=wlan0  bash scripts/start_real_robot_wifi.sh
+NETWORK_INTERFACE=enp3s0 bash scripts/start/start_real_robot_wired.sh
+NETWORK_INTERFACE=wlan0  bash scripts/start/start_real_robot_wifi.sh
 ```
 
 如果要临时追加额外参数，也可以直接接在后面：
 
 ```bash
-bash scripts/start_real_robot_wifi.sh --timing-debug --timing-debug-interval 2.0
-bash scripts/start_real_robot_wired.sh --record --headless --task-dir ./utils/data --task-name test_record --head-camera-id 0 --left-camera-id 2 --right-camera-id 4
+bash scripts/start/start_real_robot_wifi.sh --timing-debug --timing-debug-interval 2.0
+bash scripts/start/start_real_robot_wired.sh --record --headless --task-dir ./utils/data --task-name test_record --head-camera-id 0 --left-camera-id 2 --right-camera-id 4
 ```
 
 底盘语义：
@@ -399,7 +399,7 @@ bash scripts/start_real_robot_wired.sh --record --headless --task-dir ./utils/da
 ### 1.1 开启时延追踪（收到输入 -> DDS下发 -> 执行响应）
 
 ```bash
-python teleop/teleop_hand_and_arm.py \
+python teleop/real/teleop_hand_and_arm.py \
   --input-mode controller \
   --arm G1_29 \
   --ee dex1 \
@@ -459,7 +459,7 @@ python teleop/utils/plot_latency_trace.py \
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/teleop_hand_and_arm.py \
+python teleop/real/teleop_hand_and_arm.py \
   --input-mode controller \
   --arm G1_29 \
   --ee dex1 \
@@ -486,7 +486,7 @@ python teleop/teleop_hand_and_arm.py \
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/teleop_hand_and_arm.py \
+python teleop/real/teleop_hand_and_arm.py \
   --input-mode controller \
   --arm G1_29 \
   --network-interface eno1 \
@@ -512,7 +512,7 @@ python teleop/teleop_hand_and_arm.py \
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/teleop_hand_and_arm.py \
+python teleop/real/teleop_hand_and_arm.py \
   --input-mode controller \
   --arm G1_29 \
   --ee dex1 \
@@ -611,7 +611,7 @@ python teleop/teleop_hand_and_arm.py \
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/demo_xrobotics_mujoco.py \
+python teleop/sim/xrobotics_mujoco.py \
   --frequency 30 \
   --viewer-robot g1_d_mobile \
   --controller-deadman grip \
@@ -641,7 +641,7 @@ python teleop/demo_xrobotics_mujoco.py \
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/demo_xrobotics_mujoco.py \
+python teleop/sim/xrobotics_mujoco.py \
   --frequency 30 \
   --viewer-robot g1_d_mobile \
   --controller-deadman none \
@@ -671,7 +671,7 @@ python teleop/demo_xrobotics_mujoco.py \
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/demo_xrobotics_mujoco.py \
+python teleop/sim/xrobotics_mujoco.py \
   --frequency 30 \
   --viewer-robot g1_d_mobile \
   --controller-deadman grip \
@@ -708,7 +708,7 @@ python teleop/demo_xrobotics_mujoco.py \
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate
 
-python teleop/demo_xrobotics_mujoco.py \
+python teleop/sim/xrobotics_mujoco.py \
   --frequency 30 \
   --viewer-robot g1_d_mobile \
   --controller-deadman grip \
@@ -778,7 +778,7 @@ python teleop/demo_xrobotics_mujoco.py \
 ### 8.4 固定 box 对比模式
 
 ```bash
-python teleop/demo_xrobotics_mujoco.py \
+python teleop/sim/xrobotics_mujoco.py \
   --frequency 30 \
   --viewer-robot g1_d_mobile \
   --controller-deadman grip \
@@ -992,7 +992,7 @@ G1D 当前链路不要使用：
 
   cd ~/unitree_ws/src/xr_teleoperate
 
-  python teleop/teleop_hand_and_arm.py \
+  python teleop/real/teleop_hand_and_arm.py \
     --input-mode controller \
     --arm G1_29 \
     --ee dex1 \
@@ -1008,7 +1008,7 @@ G1D 当前链路不要使用：
     --latency-trace-path ./utils/data/latency_trace.jsonl \
     --timing-debug \
 
-    python teleop/teleop_hand_and_arm.py \
+    python teleop/real/teleop_hand_and_arm.py \
     --input-mode controller \
     --arm G1_29 \
     --ee dex1 \

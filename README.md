@@ -26,14 +26,14 @@ XR-Robotics SDK
 ## Main Entry Points
 
 ### Real robot
-- `teleop/teleop_hand_and_arm.py`
+- `teleop/real/teleop_hand_and_arm.py`
 
 ### MuJoCo
-- `teleop/demo_xrobotics_mujoco.py`
+- `teleop/sim/xrobotics_mujoco.py`
 
 ### XR input adapter
-- `teleop/utils/xr_robotics_wrapper.py`
-- `teleop/utils/xr_input_types.py`
+- `teleop/input/xr_robotics_wrapper.py`
+- `teleop/input/xr_input_types.py`
 
 ---
 
@@ -62,7 +62,7 @@ cd ~/unitree_ws/src/xr_teleoperate
 conda activate tv
 unset PYTHONPATH
 
-python teleop/teleop_hand_and_arm.py \
+python teleop/real/teleop_hand_and_arm.py \
   --input-mode controller \
   --controller-deadman grip \
   --head-reference-mode calibrated \
@@ -97,7 +97,7 @@ startup -> go_home -> wait for r -> calibrate head reference once -> hold -> gri
 cd ~/unitree_ws/src/xr_teleoperate
 conda activate tv
 
-python teleop/demo_xrobotics_mujoco.py \
+python teleop/sim/xrobotics_mujoco.py \
   --frequency 30 \
   --controller-deadman grip \
   --head-reference-mode calibrated \
@@ -123,10 +123,10 @@ Recommended next improvements if needed:
 
 ## Important Files
 
-- `teleop/teleop_hand_and_arm.py`
-- `teleop/demo_xrobotics_mujoco.py`
-- `teleop/utils/xr_robotics_wrapper.py`
-- `teleop/utils/xr_input_types.py`
+- `teleop/real/teleop_hand_and_arm.py`
+- `teleop/sim/xrobotics_mujoco.py`
+- `teleop/input/xr_robotics_wrapper.py`
+- `teleop/input/xr_input_types.py`
 - `teleop/utils/arm_target_safety.py`
 - `teleop/robot_control/robot_arm.py`
 - `teleop/robot_control/robot_arm_ik.py`

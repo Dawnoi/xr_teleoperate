@@ -1,1 +1,4 @@
-"""Online inference protocol and runtime helpers."""
+"""Compatibility package for moved inference modules.
+
+New code should import from the top-level ``inference`` package.
+"""

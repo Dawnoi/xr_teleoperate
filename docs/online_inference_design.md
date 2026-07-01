@@ -27,7 +27,7 @@ observation -> inference request -> action chunk -> execute chunk -> post-action
 
 ## Why Not Copy The C++ dataStreamer
 
-当前仓库主入口是 `teleop/teleop_hand_and_arm.py`，主链路已经掌握 deadman、hold、go_home、IK、限速、录制时间对齐和相机历史。直接照搬 ROS2/C++ dataStreamer 会引入第二套控制链，使真机安全逻辑分散。
+当前仓库主入口是 `teleop/real/teleop_hand_and_arm.py`，主链路已经掌握 deadman、hold、go_home、IK、限速、录制时间对齐和相机历史。直接照搬 ROS2/C++ dataStreamer 会引入第二套控制链，使真机安全逻辑分散。
 
 迁移后只沿用 Pika wire protocol 和 action chunk 语义，不迁移 ROS2 节点结构。这样可以让 online inference 与 XR、offline replay 一样成为 `TeleopInputProvider`，同时让主循环保持现有控制边界。
 
@@ -124,7 +124,7 @@ Dex1 gripper v1：
 
 ## Main Loop Hooks
 
-`teleop/teleop_hand_and_arm.py` 只做小范围 hook：
+`teleop/real/teleop_hand_and_arm.py` 只做小范围 hook：
 
 - 新增 `--input-provider online_inference` 和 online inference CLI 参数。
 - 相机初始化使用 `needs_camera = args.record or args.input_provider == "online_inference"`，录制和推理共用同一批 camera objects。

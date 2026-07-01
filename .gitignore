@@ -23,3 +23,11 @@ teleop/data/
 episode_0*
 .vscode/
 *.pkl
+# Runtime artifacts
+runs/
+logs/
+cache/
+*.log
+*.jsonl
+teleop/MUJOCO_LOG.TXT
+MUJOCO_LOG.TXT

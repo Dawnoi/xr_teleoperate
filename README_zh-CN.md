@@ -29,10 +29,10 @@ XR-Robotics SDK
 ## 主要入口
 
 ### 真机入口
-- `teleop/teleop_hand_and_arm.py`
+- `teleop/real/teleop_hand_and_arm.py`
 
 ### MuJoCo 入口
-- `scripts/demo_xrobotics_mujoco.py`
+- `teleop/sim/xrobotics_mujoco.py`
 
 ### XR 输入适配
 - `teleop/input/xr_robotics_wrapper.py`
@@ -65,7 +65,7 @@ cd ~/unitree_ws/src/xr_teleoperate
 conda activate tv
 unset PYTHONPATH
 
-python teleop/teleop_hand_and_arm.py \
+python teleop/real/teleop_hand_and_arm.py \
   --input-mode controller \
   --controller-deadman grip \
   --head-reference-mode calibrated \
@@ -100,7 +100,7 @@ python teleop/teleop_hand_and_arm.py \
 cd ~/unitree_ws/src/xr_teleoperate
 conda activate tv
 
-python scripts/demo_xrobotics_mujoco.py \
+python teleop/sim/xrobotics_mujoco.py \
   --frequency 30 \
   --controller-deadman grip \
   --head-reference-mode calibrated \
@@ -128,8 +128,8 @@ python scripts/demo_xrobotics_mujoco.py \
 
 ## 关键文件
 
-- `teleop/teleop_hand_and_arm.py`
-- `scripts/demo_xrobotics_mujoco.py`
+- `teleop/real/teleop_hand_and_arm.py`
+- `teleop/sim/xrobotics_mujoco.py`
 - `teleop/input/xr_robotics_wrapper.py`
 - `teleop/input/xr_input_types.py`
 - `teleop/control_utils/arm_target_safety.py`

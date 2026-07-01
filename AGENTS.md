@@ -50,7 +50,7 @@ XR-Robotics SDK
 
 ### 真机入口
 
-- `teleop/teleop_hand_and_arm.py`
+- `teleop/real/teleop_hand_and_arm.py`
 
 ### MuJoCo 入口
 
@@ -110,7 +110,7 @@ XR-Robotics SDK
 
 录制逻辑主要在：
 
-- `teleop/teleop_hand_and_arm.py`
+- `teleop/real/teleop_hand_and_arm.py`
 - `EpisodeWriter`
 
 ### 相机来源
@@ -171,7 +171,7 @@ XR-Robotics SDK
 
 ### 关键实现位置
 
-- `teleop/teleop_hand_and_arm.py`
+- `teleop/real/teleop_hand_and_arm.py`
 - `teleop/utils/local_camera.py`
 - `teleop/utils/episode_writer.py`
 
@@ -298,7 +298,7 @@ task_dir/
 
 至少同时检查：
 
-- `teleop/teleop_hand_and_arm.py`
+- `teleop/real/teleop_hand_and_arm.py`
 - `teleop/utils/episode_writer.py`
 - `teleop/utils/rerun_visualizer.py`
 - `RUN.md`
@@ -307,7 +307,7 @@ task_dir/
 
 至少同时检查：
 
-- `teleop/teleop_hand_and_arm.py`
+- `teleop/real/teleop_hand_and_arm.py`
 - `teleop/utils/local_camera.py`
 - `teleop/utils/episode_writer.py`
 
@@ -348,7 +348,7 @@ task_dir/
 如果新接手的是“真机 + 录制 + 远端相机”问题，建议按顺序读：
 
 1. `RUN.md`
-2. `teleop/teleop_hand_and_arm.py`
+2. `teleop/real/teleop_hand_and_arm.py`
 3. `teleop/utils/episode_writer.py`
 4. `teleop/utils/local_camera.py`
 5. `teleop/utils/rerun_visualizer.py`

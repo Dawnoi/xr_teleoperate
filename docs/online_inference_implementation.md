@@ -79,7 +79,7 @@
 - `tests/test_teleop_input_provider.py`
 - 覆盖 left/right/both、inactive pose hold、dry-run 不输出 motion、unsupported gripper 拒绝、failed session done、required camera names。
 
-## `teleop/teleop_hand_and_arm.py`
+## `teleop/real/teleop_hand_and_arm.py`
 
 最小 hook：
 
@@ -118,7 +118,7 @@
 5. Combined targeted suite:
    `python -m unittest tests.test_inference_protocol tests.test_pose_transform tests.test_online_inference tests.test_teleop_input_provider`
 6. Compile check:
-   `python -m py_compile teleop/utils/inference_protocol.py teleop/utils/pose_transform.py teleop/utils/online_inference.py teleop/utils/teleop_input_provider.py teleop/teleop_hand_and_arm.py`
+   `python -m py_compile inference/clients/protocol.py inference/transforms/pose_transform.py inference/sessions/online_session.py core/input/teleop_input_provider.py teleop/real/teleop_hand_and_arm.py`
 
 当前开发环境使用：
 
