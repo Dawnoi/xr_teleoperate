@@ -102,6 +102,12 @@ def parse_args():
         help='Match real-robot teleop logic. "grip" means each arm/ee only moves while the same-side grip is held.',
     )
     parser.add_argument(
+        "--controller-grip-threshold",
+        type=float,
+        default=1e-3,
+        help="Analog grip threshold for controller deadman. Raise this, e.g. 0.5, if the SDK reports small non-zero grip values at rest.",
+    )
+    parser.add_argument(
         "--max-arm-joint-speed",
         type=float,
         default=1.5,
@@ -133,6 +139,37 @@ def parse_args():
         choices=["legacy_main", "anchored_safe"],
         default="anchored_safe",
         help='"legacy_main" reproduces the original main-branch controller mapping semantics as closely as possible. "anchored_safe" uses the newer grip-anchor based takeover-safe mapping.',
+    )
+    parser.add_argument(
+        "--xr-pose-source",
+        type=str,
+        choices=["controller", "motion_tracker"],
+        default="controller",
+        help='XR wrist pose source. "controller" keeps the original controller pose path. "motion_tracker" uses PICO Object/Motion trackers for wrist poses while keeping controller buttons/grip/trigger.',
+    )
+    parser.add_argument(
+        "--left-motion-tracker-sn",
+        type=str,
+        default="",
+        help="PICO motion tracker serial number used as the left wrist pose source. Empty means select by --left-motion-tracker-index.",
+    )
+    parser.add_argument(
+        "--right-motion-tracker-sn",
+        type=str,
+        default="",
+        help="PICO motion tracker serial number used as the right wrist pose source. Empty means select by --right-motion-tracker-index.",
+    )
+    parser.add_argument(
+        "--left-motion-tracker-index",
+        type=int,
+        default=0,
+        help="PICO motion tracker index for the left wrist pose source when --left-motion-tracker-sn is empty.",
+    )
+    parser.add_argument(
+        "--right-motion-tracker-index",
+        type=int,
+        default=1,
+        help="PICO motion tracker index for the right wrist pose source when --right-motion-tracker-sn is empty.",
     )
     parser.add_argument(
         "--calibration-mode",
@@ -527,6 +564,12 @@ def main():
         head_reference_mode=args.head_reference_mode,
         controller_orientation_mode=args.controller_orientation_mode,
         controller_mapping_mode=args.controller_mapping_mode,
+        xr_pose_source=args.xr_pose_source,
+        left_motion_tracker_sn=args.left_motion_tracker_sn,
+        right_motion_tracker_sn=args.right_motion_tracker_sn,
+        left_motion_tracker_index=args.left_motion_tracker_index,
+        right_motion_tracker_index=args.right_motion_tracker_index,
+        controller_grip_threshold=args.controller_grip_threshold,
     )
 
     # G1_29_ArmIK uses relative asset paths internally. Force cwd to teleop/
@@ -624,6 +667,8 @@ def main():
     print(
         f"XR-Robotics MuJoCo demo started: ee={args.ee}, viewer_robot={args.viewer_robot}, xml={xml_path}, "
         f"controller_deadman={args.controller_deadman}, "
+        f"controller_grip_threshold={args.controller_grip_threshold}, "
+        f"xr_pose_source={args.xr_pose_source}, "
         f"head_reference_mode={normalized_head_mode}, "
         f"controller_mapping_mode={args.controller_mapping_mode}, "
         f"controller_orientation_mode={args.controller_orientation_mode}, "
@@ -845,6 +890,9 @@ def main():
                         print(
                             f"[DEADMAN] left_enabled={left_arm_enabled} "
                             f"right_enabled={right_arm_enabled} "
+                            f"left_grip={tele_data.left_ctrl_squeezeValue:.3f} "
+                            f"right_grip={tele_data.right_ctrl_squeezeValue:.3f} "
+                            f"threshold={args.controller_grip_threshold:.3f} "
                             f"(controller_deadman={args.controller_deadman})"
                         )
                         prev_left_arm_enabled = left_arm_enabled

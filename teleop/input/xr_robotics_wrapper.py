@@ -1,6 +1,8 @@
 import os
 import sys
+import time
 import numpy as np
+import logging_mp
 
 
 def _bootstrap_xrobotoolkit():
@@ -32,6 +34,9 @@ from teleop.input.xr_input_types import (
 )
 
 
+logger_mp = logging_mp.getLogger(__name__)
+
+
 class XRRoboticsWrapper:
     """
     XR-Robotics raw poses -> local TeleData used by this project.
@@ -43,12 +48,24 @@ class XRRoboticsWrapper:
         head_reference_mode: str = "calibrated",
         controller_orientation_mode: str = "neutral",
         controller_mapping_mode: str = "anchored_safe",
+        xr_pose_source: str = "controller",
+        left_motion_tracker_sn: str = "",
+        right_motion_tracker_sn: str = "",
+        left_motion_tracker_index: int = 0,
+        right_motion_tracker_index: int = 1,
+        controller_grip_threshold: float = 1e-3,
         **kwargs,
     ):
         self.use_hand_tracking = use_hand_tracking
         self.head_reference_mode = head_reference_mode
         self.controller_orientation_mode = controller_orientation_mode
         self.controller_mapping_mode = controller_mapping_mode
+        self.xr_pose_source = str(xr_pose_source or "controller").strip().lower()
+        self.left_motion_tracker_sn = str(left_motion_tracker_sn or "").strip()
+        self.right_motion_tracker_sn = str(right_motion_tracker_sn or "").strip()
+        self.left_motion_tracker_index = int(left_motion_tracker_index)
+        self.right_motion_tracker_index = int(right_motion_tracker_index)
+        self.controller_grip_threshold = float(controller_grip_threshold)
         xrt.init()
         self._last_head_pose = CONST_HEAD_POSE.copy()
         self._last_left_pose = CONST_LEFT_ARM_POSE.copy()
@@ -65,6 +82,7 @@ class XRRoboticsWrapper:
         self._right_operation_controller_anchor_pose = None
         self._left_robot_wrist_anchor_pose = ROBOT_HOME_LEFT_WRIST_POSE.copy()
         self._right_robot_wrist_anchor_pose = ROBOT_HOME_RIGHT_WRIST_POSE.copy()
+        self._last_motion_tracker_warn_time = 0.0
         if self.use_hand_tracking:
             raise NotImplementedError(
                 "XRRoboticsWrapper currently supports controller mode first. "
@@ -95,6 +113,21 @@ class XRRoboticsWrapper:
                 f"Unsupported controller_mapping_mode: {self.controller_mapping_mode}. "
                 "Use 'legacy_main' or 'anchored_safe'."
             )
+        if self.xr_pose_source not in {"controller", "motion_tracker"}:
+            raise ValueError(
+                f"Unsupported xr_pose_source: {self.xr_pose_source}. "
+                "Use 'controller' or 'motion_tracker'."
+            )
+        if self.xr_pose_source == "motion_tracker":
+            logger_mp.info(
+                "XR pose source = motion_tracker; using PICO Object/Motion trackers "
+                "for left/right wrist poses and keeping controller buttons/grip/trigger. "
+                "left_sn=%s left_index=%d right_sn=%s right_index=%d",
+                self.left_motion_tracker_sn or "<index>",
+                self.left_motion_tracker_index,
+                self.right_motion_tracker_sn or "<index>",
+                self.right_motion_tracker_index,
+            )
 
     @staticmethod
     def _pose7_to_matrix(pose7):
@@ -123,10 +156,95 @@ class XRRoboticsWrapper:
             return last_pose.copy(), False
         return mat, True
 
+    @staticmethod
+    def _has_sdk_method(method_name: str) -> bool:
+        return getattr(xrt, method_name, None) is not None
+
+    def _read_motion_tracker_snapshot(self) -> dict[str, np.ndarray]:
+        """
+        Read PICO Object/Motion Tracking tracker poses from XRoboToolkit.
+
+        Return format matches nero-dual-arm pico_reader:
+            {serial_number_or_index: 4x4 OpenXR pose matrix}
+        """
+        if not (
+            self._has_sdk_method("num_motion_data_available")
+            and self._has_sdk_method("get_motion_tracker_pose")
+            and self._has_sdk_method("get_motion_tracker_serial_numbers")
+        ):
+            return {}
+        try:
+            count = int(xrt.num_motion_data_available())
+            poses = list(xrt.get_motion_tracker_pose())
+            serials = list(xrt.get_motion_tracker_serial_numbers())
+        except Exception:
+            return {}
+
+        out: dict[str, np.ndarray] = {}
+        for idx in range(min(count, len(poses))):
+            pose7 = poses[idx]
+            mat = self._pose7_to_matrix(pose7)
+            if mat is None:
+                continue
+            sn = ""
+            if idx < len(serials):
+                sn = str(serials[idx] or "").strip()
+            out[sn or str(idx)] = mat
+        return out
+
+    @staticmethod
+    def _select_motion_tracker_pose(
+        motion_snapshot: dict[str, np.ndarray],
+        serial_number: str,
+        index: int,
+    ):
+        serial_number = str(serial_number or "").strip()
+        if serial_number:
+            pose = motion_snapshot.get(serial_number)
+            return None if pose is None else pose.copy()
+        if index < 0:
+            return None
+        values = list(motion_snapshot.values())
+        if index >= len(values):
+            return None
+        return values[index].copy()
+
     def _read_robot_basis_poses(self):
         head_raw, head_valid = self._safe_pose_matrix(xrt.get_headset_pose(), self._last_head_pose)
-        left_raw, left_valid = self._safe_pose_matrix(xrt.get_left_controller_pose(), self._last_left_pose)
-        right_raw, right_valid = self._safe_pose_matrix(xrt.get_right_controller_pose(), self._last_right_pose)
+        if self.xr_pose_source == "motion_tracker":
+            motion_snapshot = self._read_motion_tracker_snapshot()
+            left_tracker_pose = self._select_motion_tracker_pose(
+                motion_snapshot,
+                self.left_motion_tracker_sn,
+                self.left_motion_tracker_index,
+            )
+            right_tracker_pose = self._select_motion_tracker_pose(
+                motion_snapshot,
+                self.right_motion_tracker_sn,
+                self.right_motion_tracker_index,
+            )
+            if left_tracker_pose is None or right_tracker_pose is None:
+                now = time.monotonic()
+                if now - self._last_motion_tracker_warn_time > 2.0:
+                    logger_mp.warning(
+                        "PICO motion_tracker pose missing: left_ok=%s right_ok=%s available=%s "
+                        "left_sn=%s left_index=%d right_sn=%s right_index=%d",
+                        left_tracker_pose is not None,
+                        right_tracker_pose is not None,
+                        sorted(motion_snapshot.keys()),
+                        self.left_motion_tracker_sn or "<index>",
+                        self.left_motion_tracker_index,
+                        self.right_motion_tracker_sn or "<index>",
+                        self.right_motion_tracker_index,
+                    )
+                    self._last_motion_tracker_warn_time = now
+            left_raw = left_tracker_pose.copy() if left_tracker_pose is not None else self._last_left_pose.copy()
+            right_raw = right_tracker_pose.copy() if right_tracker_pose is not None else self._last_right_pose.copy()
+            left_valid = left_tracker_pose is not None
+            right_valid = right_tracker_pose is not None
+        else:
+            left_raw, left_valid = self._safe_pose_matrix(xrt.get_left_controller_pose(), self._last_left_pose)
+            right_raw, right_valid = self._safe_pose_matrix(xrt.get_right_controller_pose(), self._last_right_pose)
         self._last_head_valid = bool(head_valid)
         self._last_left_valid = bool(left_valid)
         self._last_right_valid = bool(right_valid)
@@ -236,8 +354,8 @@ class XRRoboticsWrapper:
         # 2) keep controller initial pose convention as arm convention
         # 3) subtract head translation only
         # 4) shift from head origin to Unitree IK waist origin (+x 0.15, +z 0.45)
-        left_grip_pressed = bool(left_grip > 1e-3)
-        right_grip_pressed = bool(right_grip > 1e-3)
+        left_grip_pressed = bool(left_grip >= self.controller_grip_threshold)
+        right_grip_pressed = bool(right_grip >= self.controller_grip_threshold)
 
         normalized_mode = self._normalized_head_reference_mode()
 

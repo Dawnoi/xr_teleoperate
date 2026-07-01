@@ -194,6 +194,8 @@ if __name__ == '__main__':
     parser.add_argument('--network-interface', type=str, default=None, help='Network interface for dds communication, e.g., eth0, wlan0. If None, use default interface.')
     parser.add_argument('--controller-deadman', type=str, choices=['grip', 'none'], default='grip',
                         help='Controller safety enable logic. "grip" means each arm/ee only moves while the same-side grip is held.')
+    parser.add_argument('--controller-grip-threshold', type=float, default=1e-3,
+                        help='Analog grip threshold for controller deadman. Raise this, e.g. 0.5, if the SDK reports small non-zero grip values at rest.')
     parser.add_argument('--max-arm-joint-speed', type=float, default=1.5,
                         help='Outer-loop arm target speed limit in rad/s. Lower values reduce sudden jumps from teleop/IK.')
     parser.add_argument('--home-return-speed', type=float, default=0.6,
@@ -216,6 +218,16 @@ if __name__ == '__main__':
                         help='Wrist orientation control. "absolute" matches the original main-branch controller feel most closely (controller orientation directly drives wrist orientation). "relative" uses controller rotation delta from the current grip anchor. "neutral" fixes wrist orientation.')
     parser.add_argument('--controller-mapping-mode', type=str, choices=['legacy_main', 'anchored_safe'], default='anchored_safe',
                         help='"legacy_main" reproduces the original main-branch controller mapping semantics as closely as possible. "anchored_safe" uses the newer grip-anchor based takeover-safe mapping.')
+    parser.add_argument('--xr-pose-source', type=str, choices=['controller', 'motion_tracker'], default='controller',
+                        help='XR wrist pose source. "controller" keeps the original controller pose path. "motion_tracker" uses PICO Object/Motion trackers for wrist poses while keeping controller buttons/grip/trigger.')
+    parser.add_argument('--left-motion-tracker-sn', type=str, default='',
+                        help='PICO motion tracker serial number used as the left wrist pose source. Empty means select by --left-motion-tracker-index.')
+    parser.add_argument('--right-motion-tracker-sn', type=str, default='',
+                        help='PICO motion tracker serial number used as the right wrist pose source. Empty means select by --right-motion-tracker-index.')
+    parser.add_argument('--left-motion-tracker-index', type=int, default=0,
+                        help='PICO motion tracker index for the left wrist pose source when --left-motion-tracker-sn is empty.')
+    parser.add_argument('--right-motion-tracker-index', type=int, default=1,
+                        help='PICO motion tracker index for the right wrist pose source when --right-motion-tracker-sn is empty.')
     parser.add_argument('--calibration-mode', type=str, choices=['manual', 'auto'], default='manual',
                         help='Calibration trigger in head_coupled/hybrid mode. "manual" waits for key c after r; "auto" calibrates once live pose data is available. fixed_per_grip/live_head_reference do not require manual calibration.')
     parser.add_argument('--input-provider', type=str, choices=['xr', 'lerobot_offline', 'online_inference'], default='xr',
@@ -1181,7 +1193,7 @@ if __name__ == '__main__':
                 home_wait_grip_release = True
             prev_home_button_pressed = home_button_pressed
 
-            if args.input_mode == "controller" and args.controller_deadman == "grip":
+            if (args.input_mode == "controller" or args.xr_pose_source == "motion_tracker") and args.controller_deadman == "grip":
                 left_arm_enabled = bool(tele_data.left_ctrl_squeeze)
                 right_arm_enabled = bool(tele_data.right_ctrl_squeeze)
             else:
@@ -1211,6 +1223,9 @@ if __name__ == '__main__':
             if left_arm_enabled != prev_left_arm_enabled or right_arm_enabled != prev_right_arm_enabled:
                 logger_mp.info(
                     f"[DEADMAN] left_enabled={left_arm_enabled} right_enabled={right_arm_enabled} "
+                    f"left_grip={tele_data.left_ctrl_squeezeValue:.3f} "
+                    f"right_grip={tele_data.right_ctrl_squeezeValue:.3f} "
+                    f"threshold={args.controller_grip_threshold:.3f} "
                     f"(controller_deadman={args.controller_deadman})"
                 )
                 prev_left_arm_enabled = left_arm_enabled

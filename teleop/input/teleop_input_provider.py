@@ -57,11 +57,18 @@ def _load_xr_robotics_wrapper():
 def _create_xr_provider(args) -> XRTeleopInputProvider:
     logger_mp.info("Using XR-Robotics as the teleop input provider.")
     xr_wrapper_cls = _load_xr_robotics_wrapper()
+    xr_pose_source = getattr(args, "xr_pose_source", "controller")
     xr_wrapper = xr_wrapper_cls(
-        use_hand_tracking=getattr(args, "input_mode", "controller") == "hand",
+        use_hand_tracking=(getattr(args, "input_mode", "controller") == "hand" and xr_pose_source == "controller"),
         head_reference_mode=getattr(args, "head_reference_mode", "calibrated"),
         controller_orientation_mode=getattr(args, "controller_orientation_mode", "neutral"),
         controller_mapping_mode=getattr(args, "controller_mapping_mode", "anchored_safe"),
+        xr_pose_source=xr_pose_source,
+        left_motion_tracker_sn=getattr(args, "left_motion_tracker_sn", ""),
+        right_motion_tracker_sn=getattr(args, "right_motion_tracker_sn", ""),
+        left_motion_tracker_index=getattr(args, "left_motion_tracker_index", 0),
+        right_motion_tracker_index=getattr(args, "right_motion_tracker_index", 1),
+        controller_grip_threshold=getattr(args, "controller_grip_threshold", 1e-3),
     )
     return XRTeleopInputProvider(xr_wrapper)
 
