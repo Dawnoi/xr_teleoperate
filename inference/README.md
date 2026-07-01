@@ -8,5 +8,3 @@
 - `pi05_protocol.py`：PI0.5 / pose payload 编解码
 - `online_session.py`：observation 组包、调用策略、chunk 运行节奏
 - `pose_transform.py`：pose7 / rot6d / matrix 转换和配置加载
-
-`teleop/inference/*` 只是旧 import 兼容层。

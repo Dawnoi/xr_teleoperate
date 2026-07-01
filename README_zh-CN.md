@@ -35,8 +35,8 @@ XR-Robotics SDK
 - `teleop/sim/xrobotics_mujoco.py`
 
 ### XR 输入适配
-- `teleop/input/xr_robotics_wrapper.py`
-- `teleop/input/xr_input_types.py`
+- `core/input/xr_robotics_wrapper.py`
+- `core/input/xr_input_types.py`
 
 ---
 
@@ -130,9 +130,9 @@ python teleop/sim/xrobotics_mujoco.py \
 
 - `teleop/real/teleop_hand_and_arm.py`
 - `teleop/sim/xrobotics_mujoco.py`
-- `teleop/input/xr_robotics_wrapper.py`
-- `teleop/input/xr_input_types.py`
-- `teleop/control_utils/arm_target_safety.py`
+- `core/input/xr_robotics_wrapper.py`
+- `core/input/xr_input_types.py`
+- `core/control/arm_target_safety.py`
 - `teleop/robot_control/robot_arm.py`
 - `teleop/robot_control/robot_arm_ik.py`
 - `teleop/robot_control/robot_hand_unitree.py`

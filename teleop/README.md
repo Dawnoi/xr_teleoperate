@@ -8,4 +8,6 @@
 - `sim/`：MuJoCo/仿真遥操
 - `runtime/`：real/sim 共享状态机和控制循环
 
-数据采集、回放、导出不放在这里；它们属于顶层 `data_pipeline/`。公共输入、控制、机器人、相机、诊断逻辑后续沉淀到顶层 `core/`。
+数据采集、回放、导出不放在这里；它们属于顶层 `data_pipeline/`。
+
+动作输入源在 `core/input/`，通用控制/相机在 `core/control/`、`core/camera/`，诊断和数据检查在 `tests/`。`teleop/` 只保留实时遥操入口、运行时和真机/仿真控制相关代码。

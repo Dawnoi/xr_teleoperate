@@ -2,7 +2,7 @@
 
 > 生成日期：2026-07-01  
 > 当前分支：`refactor/project-structure`  
-> 当前目标：先梳理流程和结构，不直接搬代码；后续按低风险步骤融合目录、拆主流程、清理生成物。
+> 当前目标：按真实业务边界收敛目录；已清理过渡 shim 和空目录。
 
 ## 1. 当前项目主流程
 
@@ -11,7 +11,7 @@
 ```text
 A. XR 遥操真机
    XR/PICO/Controller/Tracker
-   -> teleop.input
+   -> core.input
    -> TeleData
    -> teleop_hand_and_arm.py 主循环
    -> IK / 安全限幅 / 夹爪 / 底盘
@@ -19,27 +19,28 @@ A. XR 遥操真机
 
 B. XR 遥操 MuJoCo
    XR/PICO/Controller/Tracker
-   -> teleop.input
+   -> core.input
    -> teleop/sim/xrobotics_mujoco.py
    -> IK / 安全限幅
    -> MuJoCo qpos/ctrl
 
 C. 离线回放 / 数据集回放
    LeRobot/raw episode
-   -> teleop.input offline provider
+   -> core.input offline provider
    -> replay scripts
    -> MuJoCo 或真机
 
 D. 在线推理/VLA
    Robot state + cameras
-   -> teleop.inference
+   -> inference
    -> online inference transport/protocol
-   -> teleop.input OnlineInferenceInputProvider
+   -> core.input OnlineInferenceInputProvider
    -> 主控制链路
 
-E. 数据采集/导出/诊断
+E. 数据采集/导出/检查
    recording writers / rerun visualizer
-   -> tools 和 scripts 中的数据转换、重放、诊断脚本
+   -> data_pipeline 中的数据转换/回放
+   -> tests 中的数据检查/诊断脚本
 ```
 
 所以更适合按 **运行流程和边界职责** 组织，而不是按零散工具文件持续堆叠。
@@ -291,7 +292,7 @@ xr_teleoperate/
 
 - 新增遥操功能：优先放 `teleop/real`、`teleop/sim`、`teleop/runtime`。
 - 新增采集/回放/导出功能：优先放 `data_pipeline/`。
-- 新增纯公共逻辑：先放现有 `teleop/input`、`teleop/control_utils` 等位置；等迁移窗口统一搬到 `core/`。
+- 新增纯公共逻辑：直接放 `core/input`、`core/control`、`core/camera`，不再新增 `teleop/*` 兼容目录。
 - 旧入口和旧脚本保留 wrapper，确保已有命令还能跑。
 
 ## 7. 按新原则重新归类现有文件
@@ -328,9 +329,9 @@ teleop/sim/sim_state_topic.py
 ### 7.3 应归到 `data_pipeline/recording`
 
 ```text
-teleop/recording/episode_writer.py
-teleop/recording/lerobot_v2_writer.py
-teleop/recording/rerun_visualizer.py
+data_pipeline/recording/episode_writer.py
+data_pipeline/recording/lerobot_v2_writer.py
+data_pipeline/recording/rerun_visualizer.py
 ```
 
 注意：数据采集虽然由真机/仿真遥操触发，但 writer 本身不属于 teleop。teleop 只调用 recording API。
@@ -341,8 +342,8 @@ teleop/recording/rerun_visualizer.py
 data_pipeline/replay/raw_episode_real.py
 data_pipeline/replay/raw_episode_mujoco.py
 data_pipeline/replay/lerobot_real.py
-teleop/input/raw_offline.py
-teleop/input/lerobot_offline.py
+core/input/raw_offline.py
+core/input/lerobot_offline.py
 ```
 
 注意：offline provider 可以拆成两层：
@@ -371,22 +372,22 @@ tests/data_checks/offline_dds_replay_probe.py
 ### 7.6 应归到 `core/`
 
 ```text
-teleop/input/base.py
-teleop/input/xr_input_types.py
-teleop/input/xr_robotics_wrapper.py
-teleop/input/xr_provider.py
-teleop/control_utils/arm_target_safety.py
-teleop/control_utils/arm_workspace_safety.py
-teleop/control_utils/weighted_moving_filter.py
-teleop/control_utils/g1d_agv_bridge.py
-teleop/control_utils/motion_switcher.py
+core/input/base.py
+core/input/xr_input_types.py
+core/input/xr_robotics_wrapper.py
+core/input/xr_provider.py
+core/control/arm_target_safety.py
+core/control/arm_workspace_safety.py
+core/control/weighted_moving_filter.py
+core/control/g1d_agv_bridge.py
+core/control/motion_switcher.py
 teleop/robot_control/robot_arm.py
 teleop/robot_control/robot_arm_ik.py
 teleop/robot_control/robot_hand_unitree.py
 teleop/robot_control/robot_hand_inspire.py
 teleop/robot_control/robot_hand_brainco.py
-teleop/camera/local_camera.py
-teleop/diagnostics/*.py
+core/camera/local_camera.py
+tests/diagnostics/*.py
 ```
 
 这些模块可以被 teleop、replay、recording、inference 多方使用，最终不应该只属于 teleop。
@@ -394,11 +395,11 @@ teleop/diagnostics/*.py
 ### 7.7 应归到 `inference/`
 
 ```text
-teleop/inference/online_session.py
-teleop/inference/protocol.py
-teleop/inference/pi05_protocol.py
-teleop/inference/pose_transform.py
-teleop/input/online_inference_provider.py
+inference/online_session.py
+inference/transport.py
+inference/pi05_protocol.py
+inference/pose_transform.py
+core/input/online_inference_provider.py
 configs/inference/*
 ```
 
@@ -436,7 +437,7 @@ configs/inference/*
 - [x] 新增 `core/control/`，迁移 safety/workspace/filter/base bridge。
 - [ ] 新增 `core/robot/`，迁移 arm/IK/hand adapter。
 - [x] 新增 `core/camera/` 和 `tests/diagnostics/`。
-- [x] 旧 `teleop/input`、`teleop/control_utils` 等保留兼容 import 一段时间。
+- [x] 清理旧 `teleop/input`、`teleop/control_utils` 等兼容 import 目录。
 
 ### Phase 4：迁移 inference/VLA 独立域
 
