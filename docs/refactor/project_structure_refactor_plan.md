@@ -63,7 +63,7 @@ xr_teleoperate/
 │   ├── control_utils/      # 安全限幅、滤波、底盘桥、motion switcher、timing
 │   ├── recording/          # episode/LeRobot/rerun 写入
 │   ├── camera/             # 本地相机采集
-│   ├── runtime/           # 键盘/IPC/操作员运行时
+│   ├── runtime/           # 键盘/操作员运行时
 │   ├── sim/                # MuJoCo/G1D 仿真辅助
 │   ├── diagnostics/        # latency trace 等诊断
 │   ├── cpp/                # C++ 底盘桥源码
@@ -81,7 +81,7 @@ xr_teleoperate/
 - DDS 初始化
 - XR/input provider 初始化
 - arm/hand/base/controller 初始化
-- runtime/IPC/键盘逻辑
+- runtime/键盘逻辑
 - camera/recording 逻辑
 - online inference/VLA runtime 接入
 - 主循环状态机
@@ -217,7 +217,7 @@ xr_teleoperate/
 │   ├── runtime/                    # real/sim 共享遥操状态机
 │   │   ├── control_loop.py         # 单帧控制流程
 │   │   ├── takeover_state.py       # grip/deadman/takeover/home 状态
-│   │   └── operator_runtime.py     # 键盘/IPC/手柄快捷键
+│   │   └── operator_runtime.py     # 键盘/手柄快捷键
 │   └── README.md                   # 遥操运行说明
 │
 ├── core/                           # 被业务入口实际复用的实现逻辑

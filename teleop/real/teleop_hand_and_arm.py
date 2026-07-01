@@ -44,7 +44,6 @@ from teleop.robot_control.robot_arm import G1_29_ArmController, G1_23_ArmControl
 from teleop.robot_control.robot_arm_ik import G1_29_ArmIK, G1_23_ArmIK, H1_2_ArmIK, H1_ArmIK, H2_ArmIK
 from data_pipeline.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
 from core.control.g1d_agv_bridge import G1DAgvBridge
-from teleop.runtime.operator_ipc import IPC_Server
 from core.control.motion_switcher import MotionSwitcher, LocoClientWrapper
 from core.input.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
 from inference.online_session import online_inference_speed_limit_delta
@@ -111,21 +110,9 @@ def on_press(key):
         if operator_runtime is None:
             logger_mp.warning("[HOME] ignored keyboard shortcut [h]: operator runtime is not initialized.")
         else:
-            operator_runtime.request_home("keyboard/IPC")
+            operator_runtime.request_home("keyboard")
     else:
         logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
-
-def get_state() -> dict:
-    """Return current heartbeat state"""
-    global START, STOP, RECORD_RUNNING, RECORD_CANCEL, READY
-    return {
-        "START": START,
-        "STOP": STOP,
-        "READY": READY,
-        "RECORD_RUNNING": RECORD_RUNNING,
-        "RECORD_CANCEL": RECORD_CANCEL,
-    }
-
 
 def reset_arm_ik_state(arm_ik, arm_q):
     arm_q = np.asarray(arm_q, dtype=float).copy()
@@ -184,7 +171,6 @@ if __name__ == '__main__':
     listen_keyboard_thread = None
     gripper_ctrl = None
     recorder = None
-    ipc_server = None
     sim_state_subscriber = None
     exit_go_home = True
     exit_home_hold_sec = 5.0
@@ -283,16 +269,11 @@ if __name__ == '__main__':
         else:
             ChannelFactoryInitialize(0, networkInterface=args.network_interface)
 
-        # ipc communication mode. client usage: see runtime/ipc.py
-        if args.ipc:
-            ipc_server = IPC_Server(on_press=on_press,get_state=get_state)
-            ipc_server.start()
-        # sshkeyboard communication mode
-        else:
-            listen_keyboard_thread = threading.Thread(target=listen_keyboard, 
-                                                      kwargs={"on_press": on_press, "until": None, "sequential": False,}, 
-                                                      daemon=True)
-            listen_keyboard_thread.start()
+        # keyboard communication mode
+        listen_keyboard_thread = threading.Thread(target=listen_keyboard,
+                                                  kwargs={"on_press": on_press, "until": None, "sequential": False,},
+                                                  daemon=True)
+        listen_keyboard_thread.start()
 
         if workspace_limit_enabled:
             if workspace_mode == "box":
@@ -1499,14 +1480,11 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to hold dual arms at home before shutdown: {e}")
         
         try:
-            if args.ipc and ipc_server is not None:
-                ipc_server.stop()
-            else:
-                stop_listening()
-                if listen_keyboard_thread is not None:
-                    listen_keyboard_thread.join()
+            stop_listening()
+            if listen_keyboard_thread is not None:
+                listen_keyboard_thread.join()
         except Exception as e:
-            logger_mp.error(f"Failed to stop keyboard listener or ipc server: {e}")
+            logger_mp.error(f"Failed to stop keyboard listener: {e}")
         
         try:
             if tv_wrapper is not None:

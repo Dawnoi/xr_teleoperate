@@ -9,7 +9,7 @@
 这个文件承担一条实时控制链：
 
 ```text
-键盘/IPC 启停
+键盘启停
   -> 初始化 DDS / arm / IK / hand / camera / recorder / input provider
   -> 等待 START
   -> 高频主循环
@@ -35,7 +35,7 @@
 | `G1_29_ArmController` 等 | `teleop.robot_control.robot_arm` | DDS arm 下发、状态读取、go home |
 | `G1_29_ArmIK` 等 | `teleop.robot_control.robot_arm_ik` | wrist pose -> 14 维 arm q / tauff |
 | `create_teleop_input_provider` | `core.input.teleop_input_provider` | 创建 XR / replay / online inference 输入源 |
-| `OperatorRuntime`, `IPC_Server` | `teleop.runtime.*` | 键盘/IPC/手柄快捷键、home/record 命令 |
+| `OperatorRuntime` | `teleop.runtime.*` | 键盘/手柄快捷键、home/record 命令 |
 | `EpisodeWriter`, `ZMQRawCameraReceiver` | `data_pipeline.recording.*` | 数据录制和远端相机帧接收 |
 | `alignment` helpers | `data_pipeline.recording.alignment` | 录制时 state/action/camera 时间戳对齐 |
 | `LocalCameraStream` | `core.camera.local_camera` | 本地相机采集 |
@@ -47,7 +47,7 @@
 
 ## 3. 全局状态
 
-文件顶部维护几个全局状态，主要被键盘/IPC 回调和主循环共享：
+文件顶部维护几个全局状态，主要被键盘回调和主循环共享：
 
 | 变量 | 含义 |
 |---|---|
@@ -65,8 +65,7 @@
 | 函数 | 行为 | 主要调用方 |
 |---|---|---|
 | `publish_reset_category(category, publisher)` | 仿真模式下发布 reset category | 录制保存后、仿真 reset |
-| `on_press(key)` | 键盘/IPC 命令入口：`r/q/s/v/h/c` | `sshkeyboard` 或 `IPC_Server` |
-| `get_state()` | 返回 heartbeat 状态 | `IPC_Server` heartbeat |
+| `on_press(key)` | 键盘命令入口：`r/q/s/v/h/c` | `sshkeyboard` |
 | `reset_arm_ik_state(arm_ik, arm_q)` | 重置 IK 初值和 smooth filter | home 后、takeover 边沿 |
 | `get_robot_wrist_poses(arm_ik, arm_q)` | 用 Pinocchio FK 从 q 算左右 wrist 4x4 pose | 输入 provider anchor、record pose |
 | `pose_matrix_to_record(pose_mat)` | 4x4 pose 转 `{position,rpy,rotation_matrix,matrix4x4}` | record 写入 pose 表示 |
@@ -139,7 +138,6 @@
 ### 6.6 运行模式和录制
 
 - `--sim`
-- `--ipc`
 - `--headless`
 - `--affinity`
 - `--no-gripper`
@@ -158,7 +156,7 @@ parse args
   -> TimingDebugger / state/action history 初始化
   -> 校验互斥参数和 offline dataset
   -> ChannelFactoryInitialize(domain)
-  -> IPC_Server 或 keyboard listener
+  -> keyboard listener
   -> workspace/timing 日志
   -> motion/debug/base 初始化
   -> arm IK + arm controller 初始化
@@ -248,7 +246,7 @@ get_robot_wrist_poses()
 ```text
 operator_runtime.apply_to_tele_data()
   -> 手柄快捷键映射 record/home
-  -> keyboard/IPC home request 注入 left Y
+  -> keyboard home request 注入 left Y
 ```
 
 随后处理：
@@ -340,7 +338,7 @@ primary camera latest frame
 ```text
 arm_ctrl.ctrl_dual_arm_go_home()
   -> hold home 若干秒
-  -> stop IPC 或 keyboard listener
+  -> stop keyboard listener
   -> close input provider
   -> close G1D AGV bridge
   -> stop sim subscriber
@@ -365,7 +363,7 @@ arm_ctrl.ctrl_dual_arm_go_home()
 - `main` 太大：CLI、初始化、控制循环、recording 对齐、底盘、夹爪都在一个文件里。
 - 内部 helper 只服务本文件，但被嵌在 main 中，不利于单测。
 - record 对齐逻辑和实时控制逻辑耦合在同一个循环尾部。
-- `START/STOP/RECORD_*` 是全局变量，键盘/IPC/主循环共享，后续并发调试成本高。
+- `START/STOP/RECORD_*` 是全局变量，键盘/主循环共享，后续并发调试成本高。
 - `arm_ctrl`、`gripper_ctrl`、`recorder`、`camera` 等资源生命周期分散在大 try/finally 中。
 
 ## 12. 如果后续继续拆，建议顺序

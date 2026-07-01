@@ -137,7 +137,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
-    parser.add_argument('--ipc', action = 'store_true', help = 'Enable IPC server to handle input; otherwise enable sshkeyboard')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     parser.add_argument('--no-gripper', action='store_true',
                         help='Disable end-effector controller initialization and commands. Useful for arm-only offline replay.')
