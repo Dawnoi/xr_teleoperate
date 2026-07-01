@@ -37,6 +37,7 @@
 | `create_teleop_input_provider` | `core.input.teleop_input_provider` | 创建 XR / replay / online inference 输入源 |
 | `OperatorRuntime`, `IPC_Server` | `teleop.runtime.*` | 键盘/IPC/手柄快捷键、home/record 命令 |
 | `EpisodeWriter`, `ZMQRawCameraReceiver` | `data_pipeline.recording.*` | 数据录制和远端相机帧接收 |
+| `alignment` helpers | `data_pipeline.recording.alignment` | 录制时 state/action/camera 时间戳对齐 |
 | `LocalCameraStream` | `core.camera.local_camera` | 本地相机采集 |
 | `limit_arm_joint_target_velocity` | `core.control.arm_target_safety` | 关节速度限幅 |
 | workspace clamp | `core.control.arm_workspace_safety` | wrist pose workspace 限制 |
@@ -73,22 +74,25 @@
 
 ## 5. `main` 内部 helper
 
-这些函数定义在 `if __name__ == '__main__':` 里面，只服务本入口：
+这些函数大部分已经下沉到对应模块；主入口内只保留和真机 runtime 强相关的 helper。
 
 | 函数 | 职责 |
 |---|---|
 | `compute_arm_gravity_tauff()` | 用 Pinocchio RNEA 计算当前 q 的重力补偿，失败回退 0 |
-| `append_timed_sample()` | 给状态/action history 写入带 `t_ns` 的样本 |
-| `nearest_timed_sample()` | 从 history 中找最接近目标时间戳的样本 |
-| `interpolate_timed_sample()` | 宽松插值，允许 fallback 最近邻 |
-| `interpolate_timed_sample_strict()` | 严格插值，用于 record 对齐，缺上下界就返回 None |
-| `camera_meta_monotonic_ns()` | 从相机 meta 中取 monotonic 时间戳 |
-| `camera_frame_identity()` | 用 camera name + seq/ts 去重 |
-| `build_alignment_timestamp_entry()` | 生成 record 里的对齐时间戳元数据 |
-| `timed_buffer_bounds()` | 获取 history 有效时间范围 |
 | `maybe_open_local_camera()` | 按 id 打开本地相机，失败返回 None |
 | `maybe_open_remote_camera()` | 按 ZMQ endpoint 打开远端相机，失败返回 None |
 | `apply_deadzone()` | 主循环内两处局部函数，给底盘摇杆做死区 |
+
+录制对齐 helper 已移动到 `data_pipeline/recording/alignment.py`：
+
+- `append_timed_sample()`
+- `nearest_timed_sample()`
+- `interpolate_timed_sample()`
+- `camera_meta_monotonic_ns()`
+- `camera_frame_identity()`
+- `build_alignment_timestamp_entry()`
+- `timed_buffer_bounds()`
+- `interpolate_timed_sample_strict()`
 
 ## 6. CLI 参数分组
 
@@ -368,10 +372,10 @@ arm_ctrl.ctrl_dual_arm_go_home()
 
 不要一次拆完，按低风险切：
 
-1. 把 CLI 参数定义抽到 `teleop/real/args.py`。
-2. 把 record 对齐逻辑抽成 `data_pipeline/recording/aligned_recorder.py`。
-3. 把 arm 目标生成抽成 `teleop/runtime/arm_command_pipeline.py`。
-4. 把 base control 抽成 `teleop/runtime/base_command.py`。
+1. CLI 参数定义已抽到 `teleop/real/args.py`。
+2. record 时间戳对齐 helper 已抽到 `data_pipeline/recording/alignment.py`。
+3. 下一步把 arm 目标生成抽成 `teleop/runtime/arm_command_pipeline.py`。
+4. 再把 base control 抽成 `teleop/runtime/base_command.py`。
 5. 最后再把资源初始化拆成 `teleop/real/session.py`。
 
 每一步都保持 `teleop/real/teleop_hand_and_arm.py` 仍是唯一真机入口。
