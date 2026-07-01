@@ -7,6 +7,7 @@
 - `real/`：真机遥操
 - `sim/`：MuJoCo/仿真遥操
 - `runtime/`：real/sim 共享状态机和控制循环
+- `control_flow/`：每帧控制流程，包含 arm/base command pipeline
 - `debug/`：遥操调试辅助，包含 latency、timing、gripper UI
 
 数据采集、回放、导出不放在这里；它们属于顶层 `data_pipeline/`。

@@ -1,0 +1,301 @@
+"""Arm command target pipeline extracted from the real teleop loop.
+
+The caller still owns side effects outside arm target generation: publishing arm
+commands, mutating START/STOP, and reporting provider feedback to the input
+provider. This module only computes the command target, safety limiting, gravity
+feed-forward, and the state values that the main loop needs to write back.
+"""
+
+from dataclasses import dataclass
+from typing import Any, Callable, Mapping, Optional
+import logging
+import time
+
+import numpy as np
+
+from core.control.arm_target_safety import limit_arm_joint_target_velocity
+from core.control.arm_workspace_safety import (
+    clamp_dual_wrist_poses_to_box,
+    clamp_dual_wrist_poses_to_tapered_workspace,
+)
+from inference.online_session import online_inference_speed_limit_delta
+
+logger = logging.getLogger(__name__)
+
+
+class UnsupportedMotionIntentError(ValueError):
+    pass
+
+
+class _NonFiniteVectorError(ValueError):
+    pass
+
+
+@dataclass
+class ArmCommandResult:
+    """Result of one arm-command pipeline step."""
+
+    sol_q: np.ndarray
+    sol_tauff: np.ndarray
+    current_hold_q: np.ndarray
+    current_hold_tauff: np.ndarray
+    provider_feedback: Optional[dict]
+    ik_ms: float
+    safety_ms: float
+    gravity_ms: float
+    sol_q_before_speed_limit: np.ndarray
+    left_arm_enabled: bool
+    right_arm_enabled: bool
+    post_home_takeover_armed: bool
+    left_takeover_settle_frames: int
+    right_takeover_settle_frames: int
+
+
+def _reset_arm_ik_state(arm_ik: Any, arm_q: Any) -> None:
+    arm_q = np.asarray(arm_q, dtype=float).copy()
+    if hasattr(arm_ik, "init_data"):
+        arm_ik.init_data = arm_q.copy()
+    smooth_filter = getattr(arm_ik, "smooth_filter", None)
+    if smooth_filter is not None:
+        try:
+            smooth_filter._data_queue = [arm_q.copy() for _ in range(smooth_filter._window_size)]
+            smooth_filter._filtered_data = arm_q.copy()
+        except Exception:
+            pass
+
+
+def _require_finite_vector(value: Any, size: int, name: str) -> np.ndarray:
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    if arr.shape[0] != int(size):
+        raise _NonFiniteVectorError(f"{name} must have shape ({size},), got {arr.shape}")
+    if not np.all(np.isfinite(arr)):
+        raise _NonFiniteVectorError(f"{name} contains non-finite values")
+    return arr
+
+
+def _fatal_feedback(reason: str, **extra: Any) -> dict:
+    feedback = {"fatal": True, "reason": reason}
+    feedback.update(extra)
+    return feedback
+
+
+def build_arm_command(
+    *,
+    arm_ik: Any,
+    motion_intent: Any,
+    current_lr_arm_q: Any,
+    current_lr_arm_dq: Any,
+    current_hold_q: Any,
+    current_hold_tauff: Any,
+    left_arm_enabled: bool,
+    right_arm_enabled: bool,
+    home_return_active: bool,
+    home_target_q: Any,
+    control_dt: float,
+    input_provider: str,
+    frequency: float,
+    max_arm_joint_speed: float,
+    home_return_speed: float,
+    workspace_limit_enabled: bool,
+    workspace_mode: str,
+    workspace_min: Any,
+    workspace_max: Any,
+    tapered_workspace_params: Mapping[str, float],
+    compute_arm_gravity_tauff: Callable[[Any, np.ndarray], np.ndarray],
+    timing_debugger: Any = None,
+    any_zero_takeover_this_frame: bool = False,
+    left_zero_takeover_this_frame: bool = False,
+    right_zero_takeover_this_frame: bool = False,
+    left_takeover_rising_edge: bool = False,
+    right_takeover_rising_edge: bool = False,
+    left_takeover_settle_frames: int = 0,
+    right_takeover_settle_frames: int = 0,
+    takeover_settle_frames: int = 0,
+    post_home_takeover_armed: bool = False,
+    normalized_head_mode: str = "",
+    sync_reference_to_current_live_pose: Optional[Callable[..., Any]] = None,
+    log: Optional[Any] = None,
+) -> ArmCommandResult:
+    """Build one arm command using the real teleop loop's current semantics.
+
+    ``provider_feedback`` is returned to the caller. This function deliberately
+    does not call ``tv_wrapper.report_control_feedback``.
+    """
+
+    log = logger if log is None else log
+    input_provider = str(input_provider)
+    is_online_inference = input_provider == "online_inference"
+
+    current_lr_arm_q = np.asarray(current_lr_arm_q, dtype=float)
+    current_lr_arm_dq = np.asarray(current_lr_arm_dq, dtype=float)
+    current_hold_q = np.asarray(current_hold_q, dtype=float)
+    current_hold_tauff = np.asarray(current_hold_tauff, dtype=float)
+    workspace_min = np.asarray(workspace_min, dtype=float)
+    workspace_max = np.asarray(workspace_max, dtype=float)
+
+    ik_ms = 0.0
+    provider_feedback = None
+
+    if any_zero_takeover_this_frame:
+        if post_home_takeover_armed and normalized_head_mode in {"head_coupled", "hybrid"}:
+            if callable(sync_reference_to_current_live_pose):
+                sync_reference_to_current_live_pose(require_live=False)
+        _reset_arm_ik_state(arm_ik, current_lr_arm_q)
+        post_home_takeover_armed = False
+
+    if home_return_active:
+        sol_q = np.asarray(home_target_q, dtype=float).copy()
+        sol_tauff = current_hold_tauff.copy()
+    elif left_arm_enabled or right_arm_enabled:
+        motion_kind = str(getattr(motion_intent, "kind", "pose"))
+        try:
+            if motion_kind == "pose":
+                left_target_pose = motion_intent.left_wrist_pose
+                right_target_pose = motion_intent.right_wrist_pose
+                workspace_was_clamped = False
+                if workspace_limit_enabled:
+                    original_left_pose = np.asarray(left_target_pose, dtype=float).copy()
+                    original_right_pose = np.asarray(right_target_pose, dtype=float).copy()
+                    if workspace_mode == "box":
+                        left_target_pose, right_target_pose, workspace_was_clamped = clamp_dual_wrist_poses_to_box(
+                            left_target_pose,
+                            right_target_pose,
+                            workspace_min,
+                            workspace_max,
+                        )
+                    else:
+                        left_target_pose, right_target_pose, workspace_was_clamped = clamp_dual_wrist_poses_to_tapered_workspace(
+                            left_target_pose,
+                            right_target_pose,
+                            float(tapered_workspace_params["z_min"]),
+                            float(tapered_workspace_params["z_max"]),
+                            float(tapered_workspace_params["x_min"]),
+                            float(tapered_workspace_params["x_max_low"]),
+                            float(tapered_workspace_params["x_max_high"]),
+                            float(tapered_workspace_params["y_max_low"]),
+                            float(tapered_workspace_params["y_max_high"]),
+                        )
+                    if workspace_was_clamped and is_online_inference:
+                        left_clamp_delta = float(np.linalg.norm(np.asarray(left_target_pose)[:3, 3] - original_left_pose[:3, 3]))
+                        right_clamp_delta = float(np.linalg.norm(np.asarray(right_target_pose)[:3, 3] - original_right_pose[:3, 3]))
+                        provider_feedback = _fatal_feedback(
+                            "online inference action exceeded workspace",
+                            left_clamp_delta=left_clamp_delta,
+                            right_clamp_delta=right_clamp_delta,
+                        )
+                time_ik_start = time.perf_counter()
+                sol_q, sol_tauff = arm_ik.solve_ik(
+                    left_target_pose,
+                    right_target_pose,
+                    current_lr_arm_q,
+                    current_lr_arm_dq,
+                )
+                ik_dt = time.perf_counter() - time_ik_start
+                ik_ms = ik_dt * 1000.0
+                add_ik = getattr(timing_debugger, "add_ik", None)
+                if callable(add_ik):
+                    add_ik(ik_dt)
+                log.debug(f"ik:\t{round(ik_dt, 6)}")
+            elif motion_kind == "joint_position":
+                sol_q = _require_finite_vector(motion_intent.arm_q, 14, "motion_intent.arm_q")
+                sol_tauff = current_hold_tauff.copy()
+            elif motion_kind == "joint_velocity":
+                arm_dq = _require_finite_vector(motion_intent.arm_dq, 14, "motion_intent.arm_dq")
+                sol_q = current_lr_arm_q + arm_dq * float(control_dt)
+                sol_tauff = current_hold_tauff.copy()
+            else:
+                log.error("Unsupported motion intent kind: %s", motion_kind)
+                raise UnsupportedMotionIntentError(f"Unsupported motion intent kind: {motion_kind}")
+        except _NonFiniteVectorError as exc:
+            if not is_online_inference:
+                raise
+            provider_feedback = _fatal_feedback(
+                "online inference produced non-finite IK/control target",
+                error=str(exc),
+            )
+            sol_q = current_hold_q.copy()
+            sol_tauff = current_hold_tauff.copy()
+
+        sol_q = np.asarray(sol_q, dtype=float)
+        sol_tauff = np.asarray(sol_tauff, dtype=float)
+        if is_online_inference and (not np.all(np.isfinite(sol_q)) or not np.all(np.isfinite(sol_tauff))):
+            provider_feedback = _fatal_feedback("online inference produced non-finite IK/control target")
+    else:
+        sol_q = current_hold_q.copy()
+        sol_tauff = current_hold_tauff.copy()
+
+    if is_online_inference and provider_feedback is not None:
+        sol_q = current_hold_q.copy()
+        sol_tauff = current_hold_tauff.copy()
+        left_arm_enabled = False
+        right_arm_enabled = False
+
+    if ((not left_arm_enabled) or left_zero_takeover_this_frame) and (not home_return_active):
+        sol_q[:7] = current_hold_q[:7]
+        sol_tauff[:7] = current_hold_tauff[:7]
+    if ((not right_arm_enabled) or right_zero_takeover_this_frame) and (not home_return_active):
+        sol_q[-7:] = current_hold_q[-7:]
+        sol_tauff[-7:] = current_hold_tauff[-7:]
+
+    if left_zero_takeover_this_frame:
+        if left_takeover_rising_edge:
+            log.info(
+                f"[TAKEOVER][LEFT] grip rising edge -> zero-delta hold for "
+                f"{takeover_settle_frames} frames."
+            )
+        left_takeover_settle_frames -= 1
+    if right_zero_takeover_this_frame:
+        if right_takeover_rising_edge:
+            log.info(
+                f"[TAKEOVER][RIGHT] grip rising edge -> zero-delta hold for "
+                f"{takeover_settle_frames} frames."
+            )
+        right_takeover_settle_frames -= 1
+
+    safety_start = time.perf_counter()
+    sol_q_before_speed_limit = sol_q.copy()
+    sol_q = limit_arm_joint_target_velocity(
+        sol_q,
+        current_lr_arm_q,
+        max_joint_speed=(float(home_return_speed) if home_return_active else float(max_arm_joint_speed)),
+        control_frequency=float(frequency),
+    )
+    safety_ms = (time.perf_counter() - safety_start) * 1000.0
+
+    if is_online_inference and provider_feedback is None:
+        speed_limit_delta = online_inference_speed_limit_delta(
+            target_q=sol_q_before_speed_limit,
+            limited_q=sol_q,
+            max_arm_joint_speed=float(max_arm_joint_speed),
+            frequency=float(frequency),
+        )
+        if speed_limit_delta is not None:
+            provider_feedback = _fatal_feedback(
+                "online inference action exceeded joint speed limit",
+                speed_limit_delta=speed_limit_delta,
+            )
+            sol_q = current_hold_q.copy()
+
+    gravity_start = time.perf_counter()
+    sol_tauff = compute_arm_gravity_tauff(arm_ik, sol_q)
+    gravity_ms = (time.perf_counter() - gravity_start) * 1000.0
+
+    current_hold_q = np.asarray(sol_q, dtype=float).copy()
+    current_hold_tauff = np.asarray(sol_tauff, dtype=float).copy()
+
+    return ArmCommandResult(
+        sol_q=current_hold_q.copy(),
+        sol_tauff=current_hold_tauff.copy(),
+        current_hold_q=current_hold_q,
+        current_hold_tauff=current_hold_tauff,
+        provider_feedback=provider_feedback,
+        ik_ms=ik_ms,
+        safety_ms=safety_ms,
+        gravity_ms=gravity_ms,
+        sol_q_before_speed_limit=sol_q_before_speed_limit,
+        left_arm_enabled=bool(left_arm_enabled),
+        right_arm_enabled=bool(right_arm_enabled),
+        post_home_takeover_armed=bool(post_home_takeover_armed),
+        left_takeover_settle_frames=int(left_takeover_settle_frames),
+        right_takeover_settle_frames=int(right_takeover_settle_frames),
+    )

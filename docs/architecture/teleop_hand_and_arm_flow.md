@@ -43,6 +43,7 @@
 | workspace clamp | `core.control.arm_workspace_safety` | wrist pose workspace 限制 |
 | `online_inference_speed_limit_delta` | `inference.online_session` | 在线推理动作超速反馈 |
 | `G1DAgvBridge` / `LocoClientWrapper` | `core.control.*` | 底盘控制 |
+| `build_arm_command`, `apply_base_command` | `teleop.control_flow.*` | 每帧 arm/base command pipeline |
 | `SimpleLatencyTracker`, `TimingDebugger` | `teleop.debug.*` | 运行时调试和 latency trace |
 
 ## 3. 全局状态
@@ -372,8 +373,8 @@ arm_ctrl.ctrl_dual_arm_go_home()
 
 1. CLI 参数定义已抽到 `teleop/real/args.py`。
 2. record 时间戳对齐 helper 已抽到 `data_pipeline/recording/alignment.py`。
-3. 下一步把 arm 目标生成抽成 `teleop/control_flow/arm_command_pipeline.py`。
-4. 再把 base control 抽成 `teleop/control_flow/base_command.py`。
-5. 最后再把资源初始化拆成 `teleop/real/session.py`。
+3. arm 目标生成已抽成 `teleop/control_flow/arm_command_pipeline.py`。
+4. base control 已抽成 `teleop/control_flow/base_command.py`。
+5. 下一步可以把资源初始化拆成 `teleop/real/session.py`，或继续拆 recording 写入段。
 
 每一步都保持 `teleop/real/teleop_hand_and_arm.py` 仍是唯一真机入口。

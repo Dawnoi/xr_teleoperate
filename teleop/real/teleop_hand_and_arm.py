@@ -46,16 +46,12 @@ from data_pipeline.recording.episode_writer import EpisodeWriter, ZMQRawCameraRe
 from core.control.g1d_agv_bridge import G1DAgvBridge
 from core.control.motion_switcher import MotionSwitcher, LocoClientWrapper
 from core.input.teleop_input_provider import create_teleop_input_provider, validate_lerobot_offline_episode
-from inference.online_session import online_inference_speed_limit_delta
-from core.control.arm_target_safety import limit_arm_joint_target_velocity
-from core.control.arm_workspace_safety import (
-    clamp_dual_wrist_poses_to_box,
-    clamp_dual_wrist_poses_to_tapered_workspace,
-)
 from core.camera.local_camera import LocalCameraStream
 from teleop.debug.latency_trace import SimpleLatencyTracker
 from teleop.debug.timing_debugger import TimingDebugger
 from teleop.runtime.operator_runtime import OperatorRuntime
+from teleop.control_flow.base_command import apply_base_command
+from teleop.control_flow.arm_command_pipeline import build_arm_command
 from sshkeyboard import listen_keyboard, stop_listening
 
 # for simulation
@@ -157,19 +153,12 @@ def pose_matrix_to_record(pose_mat):
     }
 
 
-def require_finite_vector(value, size: int, name: str):
-    arr = np.asarray(value, dtype=float).reshape(-1)
-    if arr.shape[0] != int(size):
-        raise ValueError(f"{name} must have shape ({size},), got {arr.shape}")
-    if not np.all(np.isfinite(arr)):
-        raise ValueError(f"{name} contains non-finite values")
-    return arr
-
 if __name__ == '__main__':
     arm_ctrl = None
     tv_wrapper = None
     listen_keyboard_thread = None
     gripper_ctrl = None
+    loco_wrapper = None
     recorder = None
     sim_state_subscriber = None
     exit_go_home = True
@@ -791,260 +780,95 @@ if __name__ == '__main__':
             else:
                 pass
             
-            # high level control
-            base_control_start = time.perf_counter()
-            base_control_mode = "none"
-            base_move_ms = 0.0
-            base_height_ms = 0.0
-            base_misc_ms = 0.0
-            base_async_cycle_avg_ms = None
-            base_async_move_avg_ms = None
-            base_async_height_avg_ms = None
-            base_async_queue_avg_ms = None
-            base_async_publish_hz = None
-            base_vx = 0.0
-            base_vy = 0.0
-            base_wz = 0.0
-            base_z = 0.0
-            if args.input_mode == "controller" and args.motion:
-                base_control_mode = "loco"
-                # quit teleoperate
-                if tele_data.right_ctrl_aButton:
-                    START = False
-                    STOP = True
-                # command robot to enter damping mode. soft emergency stop function
-                if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
-                    loco_wrapper.Damp()
-                    time.sleep(0.05)
-                    continue
-
-                left_stick_x = float(tele_data.left_ctrl_thumbstickValue[0])
-                left_stick_y = float(tele_data.left_ctrl_thumbstickValue[1])
-                right_stick_x = float(tele_data.right_ctrl_thumbstickValue[0])
-
-                def apply_deadzone(value: float, deadzone: float) -> float:
-                    return 0.0 if abs(value) < deadzone else value
-
-                if home_return_active:
-                    base_vx = 0.0
-                    base_vy = 0.0
-                    base_wz = 0.0
-                else:
-                    left_stick_x = apply_deadzone(left_stick_x, args.base_stick_deadzone)
-                    left_stick_y = apply_deadzone(left_stick_y, args.base_stick_deadzone)
-                    right_stick_x = apply_deadzone(right_stick_x, args.base_stick_deadzone)
-
-                    # Match Unitree loco semantics:
-                    #   left stick  -> body-frame x/y velocity
-                    #   right stick -> body-frame angular z velocity
-                    base_vx = -left_stick_y * args.base_max_vx
-                    base_vy = -left_stick_x * args.base_max_vy
-                    base_wz = -right_stick_x * args.base_max_wz
-
-                base_move_start = time.perf_counter()
-                loco_wrapper.Move(base_vx, base_vy, base_wz)
-                base_move_ms = (time.perf_counter() - base_move_start) * 1000.0
-            elif args.input_mode == "controller" and args.base_controller == "g1d_agv":
-                base_control_mode = "g1d_agv_async"
-                if tele_data.right_ctrl_aButton:
-                    START = False
-                    STOP = True
-
-                left_stick_x = float(tele_data.left_ctrl_thumbstickValue[0])
-                left_stick_y = float(tele_data.left_ctrl_thumbstickValue[1])
-                right_stick_x = float(tele_data.right_ctrl_thumbstickValue[0])
-                right_stick_y = float(tele_data.right_ctrl_thumbstickValue[1])
-
-                def apply_deadzone(value: float, deadzone: float) -> float:
-                    return 0.0 if abs(value) < deadzone else value
-
-                left_stick_x = apply_deadzone(left_stick_x, args.base_stick_deadzone)
-                left_stick_y = apply_deadzone(left_stick_y, args.base_stick_deadzone)
-                right_stick_x = apply_deadzone(right_stick_x, args.base_stick_deadzone)
-                right_stick_y = apply_deadzone(right_stick_y, args.base_stick_deadzone)
-
-                if home_return_active:
-                    base_vx = 0.0
-                    base_vy = 0.0
-                    base_wz = 0.0
-                    base_z = 0.0
-                else:
-                    # Backported from the official unitree_sdk2 G1D example path:
-                    #   AgvClient.Move(vx, vy, vyaw)
-                    #   AgvClient.HeightAdjust(vz)
-                    # Note: the official G1D AGV header comments that vy is currently
-                    # ignored by the AGV side. For practical teleop on G1D, we therefore
-                    # map left stick X to yaw so it behaves like the official remote:
-                    #   left stick up/down -> forward/backward
-                    #   left stick left/right -> in-place turn
-                    #   right stick up/down -> column height adjust
-                    base_vx = left_stick_y * args.base_max_vx
-                    base_vy = 0.0
-                    base_wz = -left_stick_x * args.base_max_wz
-                    base_z = right_stick_y * args.base_max_z
-
-                if agv_bridge is not None:
-                    agv_send_start = time.perf_counter()
-                    base_move_start = time.perf_counter()
-                    agv_bridge.set_target(base_vx, base_vy, base_wz, base_z)
-                    base_move_ms = (time.perf_counter() - base_move_start) * 1000.0
-                    timing_debugger.add_agv(time.perf_counter() - agv_send_start)
-                    try:
-                        agv_timing_snapshot = agv_bridge.get_timing_snapshot()
-                    except Exception:
-                        agv_timing_snapshot = None
-                    if agv_timing_snapshot is not None:
-                        base_async_publish_hz = float(agv_timing_snapshot.get("publish_hz", 0.0))
-                        move_stats = agv_timing_snapshot.get("move_stats") or {}
-                        height_stats = agv_timing_snapshot.get("height_stats") or {}
-                        cycle_stats = agv_timing_snapshot.get("cycle_stats") or {}
-                        queue_stats = agv_timing_snapshot.get("queue_delay_stats") or {}
-                        base_async_move_avg_ms = move_stats.get("avg_ms")
-                        base_async_height_avg_ms = height_stats.get("avg_ms")
-                        base_async_cycle_avg_ms = cycle_stats.get("avg_ms")
-                        base_async_queue_avg_ms = queue_stats.get("avg_ms")
-            base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
-            base_misc_ms = max(0.0, base_control_ms - base_move_ms - base_height_ms)
-
-            # solve ik using motor data and wrist pose, then use ik results to control arms.
-            ik_ms = 0.0
-            provider_feedback = None
-            if any_zero_takeover_this_frame:
-                if post_home_takeover_armed and normalized_head_mode in {"head_coupled", "hybrid"}:
-                    tv_wrapper.sync_reference_to_current_live_pose(require_live=False)
-                reset_arm_ik_state(arm_ik, current_lr_arm_q)
-                post_home_takeover_armed = False
-            if home_return_active:
-                sol_q = home_target_q.copy()
-                sol_tauff = current_hold_tauff.copy()
-            elif left_arm_enabled or right_arm_enabled:
-                motion_kind = str(getattr(motion_intent, "kind", "pose"))
-                if motion_kind == "pose":
-                    left_target_pose = motion_intent.left_wrist_pose
-                    right_target_pose = motion_intent.right_wrist_pose
-                    workspace_was_clamped = False
-                    if workspace_limit_enabled:
-                        if workspace_mode == "box":
-                            original_left_pose = np.asarray(left_target_pose, dtype=float).copy()
-                            original_right_pose = np.asarray(right_target_pose, dtype=float).copy()
-                            left_target_pose, right_target_pose, workspace_was_clamped = clamp_dual_wrist_poses_to_box(
-                                left_target_pose,
-                                right_target_pose,
-                                workspace_min,
-                                workspace_max,
-                            )
-                        else:
-                            original_left_pose = np.asarray(left_target_pose, dtype=float).copy()
-                            original_right_pose = np.asarray(right_target_pose, dtype=float).copy()
-                            left_target_pose, right_target_pose, workspace_was_clamped = clamp_dual_wrist_poses_to_tapered_workspace(
-                                left_target_pose,
-                                right_target_pose,
-                                tapered_workspace_params["z_min"],
-                                tapered_workspace_params["z_max"],
-                                tapered_workspace_params["x_min"],
-                                tapered_workspace_params["x_max_low"],
-                                tapered_workspace_params["x_max_high"],
-                                tapered_workspace_params["y_max_low"],
-                                tapered_workspace_params["y_max_high"],
-                            )
-                        if workspace_was_clamped and args.input_provider == "online_inference":
-                            left_clamp_delta = float(np.linalg.norm(np.asarray(left_target_pose)[:3, 3] - original_left_pose[:3, 3]))
-                            right_clamp_delta = float(np.linalg.norm(np.asarray(right_target_pose)[:3, 3] - original_right_pose[:3, 3]))
-                            provider_feedback = {
-                                "fatal": True,
-                                "reason": "online inference action exceeded workspace",
-                                "left_clamp_delta": left_clamp_delta,
-                                "right_clamp_delta": right_clamp_delta,
-                            }
-                    time_ik_start = time.perf_counter()
-                    sol_q, sol_tauff = arm_ik.solve_ik(left_target_pose, right_target_pose, current_lr_arm_q, current_lr_arm_dq)
-                    ik_dt = time.perf_counter() - time_ik_start
-                    ik_ms = ik_dt * 1000.0
-                    timing_debugger.add_ik(ik_dt)
-                    logger_mp.debug(f"ik:\t{round(ik_dt, 6)}")
-                elif motion_kind == "joint_position":
-                    sol_q = require_finite_vector(motion_intent.arm_q, 14, "motion_intent.arm_q")
-                    sol_tauff = current_hold_tauff.copy()
-                elif motion_kind == "joint_velocity":
-                    arm_dq = require_finite_vector(motion_intent.arm_dq, 14, "motion_intent.arm_dq")
-                    sol_q = current_lr_arm_q + arm_dq * control_dt
-                    sol_tauff = current_hold_tauff.copy()
-                else:
-                    logger_mp.error("Unsupported motion intent kind: %s", motion_kind)
-                    START = False
-                    STOP = True
-                    continue
-                if args.input_provider == "online_inference" and (
-                    not np.all(np.isfinite(sol_q)) or not np.all(np.isfinite(sol_tauff))
-                ):
-                    provider_feedback = {
-                        "fatal": True,
-                        "reason": "online inference produced non-finite IK/control target",
-                    }
-            else:
-                sol_q = current_hold_q.copy()
-                sol_tauff = current_hold_tauff.copy()
-
-            if args.input_provider == "online_inference" and provider_feedback is not None:
-                sol_q = current_hold_q.copy()
-                sol_tauff = current_hold_tauff.copy()
-                left_arm_enabled = False
-                right_arm_enabled = False
-
-            if ((not left_arm_enabled) or left_zero_takeover_this_frame) and (not home_return_active):
-                sol_q[:7] = current_hold_q[:7]
-                sol_tauff[:7] = current_hold_tauff[:7]
-            if ((not right_arm_enabled) or right_zero_takeover_this_frame) and (not home_return_active):
-                sol_q[-7:] = current_hold_q[-7:]
-                sol_tauff[-7:] = current_hold_tauff[-7:]
-
-            if left_zero_takeover_this_frame:
-                if left_takeover_rising_edge:
-                    logger_mp.info(
-                        f"[TAKEOVER][LEFT] grip rising edge -> zero-delta hold for "
-                        f"{TAKEOVER_SETTLE_FRAMES} frames."
-                    )
-                left_takeover_settle_frames -= 1
-            if right_zero_takeover_this_frame:
-                if right_takeover_rising_edge:
-                    logger_mp.info(
-                        f"[TAKEOVER][RIGHT] grip rising edge -> zero-delta hold for "
-                        f"{TAKEOVER_SETTLE_FRAMES} frames."
-                    )
-                right_takeover_settle_frames -= 1
-
-            safety_start = time.perf_counter()
-            sol_q_before_speed_limit = sol_q.copy()
-            sol_q = limit_arm_joint_target_velocity(
-                sol_q,
-                current_lr_arm_q,
-                max_joint_speed=(args.home_return_speed if home_return_active else args.max_arm_joint_speed),
-                control_frequency=args.frequency,
+            # high level base control
+            base_result = apply_base_command(
+                args=args,
+                tele_data=tele_data,
+                home_return_active=home_return_active,
+                loco_wrapper=loco_wrapper,
+                agv_bridge=agv_bridge,
+                timing_debugger=timing_debugger,
             )
-            safety_ms = (time.perf_counter() - safety_start) * 1000.0
-            if args.input_provider == "online_inference" and provider_feedback is None:
-                speed_limit_delta = online_inference_speed_limit_delta(
-                    target_q=sol_q_before_speed_limit,
-                    limited_q=sol_q,
-                    max_arm_joint_speed=args.max_arm_joint_speed,
+            base_control_mode = base_result.base_control_mode
+            base_control_ms = base_result.base_control_ms
+            base_move_ms = base_result.base_move_ms
+            base_height_ms = base_result.base_height_ms
+            base_misc_ms = base_result.base_misc_ms
+            base_async_cycle_avg_ms = base_result.base_async_cycle_avg_ms
+            base_async_move_avg_ms = base_result.base_async_move_avg_ms
+            base_async_height_avg_ms = base_result.base_async_height_avg_ms
+            base_async_queue_avg_ms = base_result.base_async_queue_avg_ms
+            base_async_publish_hz = base_result.base_async_publish_hz
+            base_vx = base_result.base_vx
+            base_vy = base_result.base_vy
+            base_wz = base_result.base_wz
+            base_z = base_result.base_z
+            if base_result.stop_requested:
+                START = False
+                STOP = True
+            if base_result.should_continue_frame:
+                continue
+
+            # solve arm command target, safety-limit it, and compute gravity compensation.
+            try:
+                arm_command = build_arm_command(
+                    arm_ik=arm_ik,
+                    motion_intent=motion_intent,
+                    current_lr_arm_q=current_lr_arm_q,
+                    current_lr_arm_dq=current_lr_arm_dq,
+                    current_hold_q=current_hold_q,
+                    current_hold_tauff=current_hold_tauff,
+                    left_arm_enabled=left_arm_enabled,
+                    right_arm_enabled=right_arm_enabled,
+                    home_return_active=home_return_active,
+                    home_target_q=home_target_q,
+                    control_dt=control_dt,
+                    input_provider=args.input_provider,
                     frequency=args.frequency,
+                    max_arm_joint_speed=args.max_arm_joint_speed,
+                    home_return_speed=args.home_return_speed,
+                    workspace_limit_enabled=workspace_limit_enabled,
+                    workspace_mode=workspace_mode,
+                    workspace_min=workspace_min,
+                    workspace_max=workspace_max,
+                    tapered_workspace_params=tapered_workspace_params,
+                    compute_arm_gravity_tauff=compute_arm_gravity_tauff,
+                    timing_debugger=timing_debugger,
+                    any_zero_takeover_this_frame=any_zero_takeover_this_frame,
+                    left_zero_takeover_this_frame=left_zero_takeover_this_frame,
+                    right_zero_takeover_this_frame=right_zero_takeover_this_frame,
+                    left_takeover_rising_edge=left_takeover_rising_edge,
+                    right_takeover_rising_edge=right_takeover_rising_edge,
+                    left_takeover_settle_frames=left_takeover_settle_frames,
+                    right_takeover_settle_frames=right_takeover_settle_frames,
+                    takeover_settle_frames=TAKEOVER_SETTLE_FRAMES,
+                    post_home_takeover_armed=post_home_takeover_armed,
+                    normalized_head_mode=normalized_head_mode,
+                    sync_reference_to_current_live_pose=tv_wrapper.sync_reference_to_current_live_pose,
+                    log=logger_mp,
                 )
-                if speed_limit_delta is not None:
-                    provider_feedback = {
-                        "fatal": True,
-                        "reason": "online inference action exceeded joint speed limit",
-                        "speed_limit_delta": speed_limit_delta,
-                    }
-                    sol_q = current_hold_q.copy()
-            gravity_start = time.perf_counter()
-            sol_tauff = compute_arm_gravity_tauff(arm_ik, sol_q)
-            gravity_ms = (time.perf_counter() - gravity_start) * 1000.0
+            except ValueError:
+                START = False
+                STOP = True
+                continue
+
+            sol_q = arm_command.sol_q
+            sol_tauff = arm_command.sol_tauff
+            current_hold_q = arm_command.current_hold_q
+            current_hold_tauff = arm_command.current_hold_tauff
+            provider_feedback = arm_command.provider_feedback
+            ik_ms = arm_command.ik_ms
+            safety_ms = arm_command.safety_ms
+            gravity_ms = arm_command.gravity_ms
+            left_arm_enabled = arm_command.left_arm_enabled
+            right_arm_enabled = arm_command.right_arm_enabled
+            post_home_takeover_armed = arm_command.post_home_takeover_armed
+            left_takeover_settle_frames = arm_command.left_takeover_settle_frames
+            right_takeover_settle_frames = arm_command.right_takeover_settle_frames
             if args.input_provider == "online_inference" and provider_feedback is not None:
                 report_feedback = getattr(tv_wrapper, "report_control_feedback", None)
                 if callable(report_feedback):
                     report_feedback(provider_feedback)
-            current_hold_q = sol_q.copy()
-            current_hold_tauff = sol_tauff.copy()
 
             trace_seq = None
             if latency_tracker is not None and latency_tracker.can_start_new_trace():
