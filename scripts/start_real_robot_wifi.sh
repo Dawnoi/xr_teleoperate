@@ -14,11 +14,30 @@ fi
 unset PYTHONPATH || true
 
 NETWORK_INTERFACE="${NETWORK_INTERFACE:-wlo1}"
+XR_POSE_SOURCE="${XR_POSE_SOURCE:-controller}"
+LEFT_MOTION_TRACKER_SN="${LEFT_MOTION_TRACKER_SN:-PC2310MLL2250062G}"
+RIGHT_MOTION_TRACKER_SN="${RIGHT_MOTION_TRACKER_SN:-PC2310MLL2250124G}"
+LEFT_MOTION_TRACKER_INDEX="${LEFT_MOTION_TRACKER_INDEX:-0}"
+RIGHT_MOTION_TRACKER_INDEX="${RIGHT_MOTION_TRACKER_INDEX:-1}"
+CONTROLLER_GRIP_THRESHOLD="${CONTROLLER_GRIP_THRESHOLD:-0.5}"
+MOTION_TRACKER_MAX_STEP_LINEAR="${MOTION_TRACKER_MAX_STEP_LINEAR:-0.03}"
+MOTION_TRACKER_MAX_STEP_ANGULAR="${MOTION_TRACKER_MAX_STEP_ANGULAR:-0.35}"
+MAX_ARM_JOINT_SPEED="${MAX_ARM_JOINT_SPEED:-5.0}"
+HOME_RETURN_SPEED="${HOME_RETURN_SPEED:-0.6}"
 
 cd "${REPO_DIR}"
 
 exec python teleop/teleop_hand_and_arm.py \
+  --input-provider xr \
   --input-mode controller \
+  --xr-pose-source "${XR_POSE_SOURCE}" \
+  --left-motion-tracker-sn "${LEFT_MOTION_TRACKER_SN}" \
+  --right-motion-tracker-sn "${RIGHT_MOTION_TRACKER_SN}" \
+  --left-motion-tracker-index "${LEFT_MOTION_TRACKER_INDEX}" \
+  --right-motion-tracker-index "${RIGHT_MOTION_TRACKER_INDEX}" \
+  --controller-grip-threshold "${CONTROLLER_GRIP_THRESHOLD}" \
+  --motion-tracker-max-step-linear "${MOTION_TRACKER_MAX_STEP_LINEAR}" \
+  --motion-tracker-max-step-angular "${MOTION_TRACKER_MAX_STEP_ANGULAR}" \
   --arm G1_29 \
   --ee dex1 \
   --network-interface "${NETWORK_INTERFACE}" \
@@ -27,7 +46,8 @@ exec python teleop/teleop_hand_and_arm.py \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
-  --max-arm-joint-speed 5.0 \
+  --max-arm-joint-speed "${MAX_ARM_JOINT_SPEED}" \
+  --home-return-speed "${HOME_RETURN_SPEED}" \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
   --arm-workspace-z-max 0.45 \
