@@ -105,9 +105,16 @@ def prepare_g1d_mobile_scene(force_rebuild: bool = False, use_dex1: bool = True)
         Path(__file__).stat().st_mtime,
         SRC_G1_DEX1_COMPILED_XML.stat().st_mtime if use_dex1 else 0.0,
     )
+    generated_path_is_current = False
+    if GENERATED_G1D_MOBILE_XML.exists():
+        try:
+            generated_path_is_current = str(SRC_G1D_DIR) in GENERATED_G1D_MOBILE_XML.read_text(encoding="utf-8")
+        except OSError:
+            generated_path_is_current = False
     if (
         GENERATED_G1D_MOBILE_XML.exists()
         and not force_rebuild
+        and generated_path_is_current
         and GENERATED_G1D_MOBILE_XML.stat().st_mtime >= latest_src_mtime
     ):
         return GENERATED_G1D_MOBILE_XML

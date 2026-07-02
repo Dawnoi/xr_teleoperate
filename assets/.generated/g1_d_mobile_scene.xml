@@ -1,5 +1,5 @@
 <mujoco model="g1_d_mobile_scene">
-  <compiler angle="radian" meshdir="/home/dx/unitree_ws/src/xr_teleoperate/assets/g1_d" />
+  <compiler angle="radian" meshdir="/data/codeBase/src/unitree_ws/src/xr_teleoperate/assets/g1_d" />
   <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" iterations="100" noslip_iterations="8" />
   <statistic center="0 0 0.9" extent="1.4" />
   <visual>

@@ -81,6 +81,13 @@ DEX1_JOINT_NAMES = {
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--frequency", type=float, default=30.0)
+    parser.add_argument(
+        "--input-mode",
+        type=str,
+        choices=["controller", "hand"],
+        default="controller",
+        help="XR input source. hand uses XR hand wrist as arm locator and pinch as grip/deadman.",
+    )
     parser.add_argument("--ee", type=str, choices=["none", "dex1"], default="dex1")
     parser.add_argument("--xml", type=str, default=None)
     parser.add_argument(
@@ -522,12 +529,7 @@ def main():
         "live_head_reference" if args.head_reference_mode in {"live", "head_decoupled_live"} else args.head_reference_mode
     )
     xml_path = resolve_xml_path(args)
-    xr_wrapper = XRRoboticsWrapper(
-        use_hand_tracking=False,
-        head_reference_mode=args.head_reference_mode,
-        controller_orientation_mode=args.controller_orientation_mode,
-        controller_mapping_mode=args.controller_mapping_mode,
-    )
+    xr_wrapper = None
 
     # G1_29_ArmIK uses relative asset paths internally. Force cwd to teleop/
     # so its ../assets/... references resolve like teleop_hand_and_arm.py.
@@ -676,6 +678,7 @@ def main():
     calibrated = not calibration_required
     calibration_requested = calibration_required and args.calibration_mode == "auto"
     printed_wait_live = False
+    last_input_status_log_time = 0.0
     dt = 1.0 / args.frequency
 
     def key_callback(keycode):
@@ -690,6 +693,13 @@ def main():
         elif keycode == glfw.KEY_Q:
             stop_requested = True
             print("[EXIT] keyboard Q pressed, closing MuJoCo teleop.")
+
+    xr_wrapper = XRRoboticsWrapper(
+        use_hand_tracking=args.input_mode == "hand",
+        head_reference_mode=args.head_reference_mode,
+        controller_orientation_mode=args.controller_orientation_mode,
+        controller_mapping_mode=args.controller_mapping_mode,
+    )
 
     try:
         with mjv.launch_passive(
@@ -806,6 +816,11 @@ def main():
                     current_left_robot_wrist_pose=current_left_wrist_pose,
                     current_right_robot_wrist_pose=current_right_wrist_pose,
                 )
+                if tele_data is None and args.input_mode == "hand":
+                    now = time.time()
+                    if now - last_input_status_log_time > 1.0:
+                        print(f"[XR_HAND] waiting for live hand/head data: {xr_wrapper.get_input_status()}")
+                        last_input_status_log_time = now
                 if tele_data is not None:
                     raw_left_target_pose = np.asarray(tele_data.left_wrist_pose, dtype=float).copy()
                     raw_right_target_pose = np.asarray(tele_data.right_wrist_pose, dtype=float).copy()
@@ -1065,7 +1080,8 @@ def main():
                 viewer.sync()
                 time.sleep(dt)
     finally:
-        xr_wrapper.close()
+        if xr_wrapper is not None:
+            xr_wrapper.close()
 
 
 if __name__ == "__main__":

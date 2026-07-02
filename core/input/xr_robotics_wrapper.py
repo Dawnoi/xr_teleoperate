@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import numpy as np
 
 
@@ -9,6 +10,8 @@ def _bootstrap_xrobotoolkit():
         return
     except ModuleNotFoundError:
         candidates = [
+            "/data/codeBase/src/pico_ws/src/XRoboToolkit-PC-Service-Pybind/build/lib.linux-x86_64-cpython-310",
+            "/data/codeBase/src/pika_ros/build/MyPybind11Project",
             "/home/dx/pico_ws/src/XRoboToolkit-PC-Service-Pybind/build/lib.linux-x86_64-cpython-310",
             "/home/dx/Desktop/pika_ros/build/MyPybind11Project",
         ]
@@ -37,9 +40,12 @@ HAND_RETARGET_START_INDEX = 1
 HAND_RETARGET_COUNT = 25
 HAND_THUMB_TIP_INDEX = 5
 HAND_INDEX_TIP_INDEX = 10
+HAND_LITTLE_TIP_INDEX = 25
 HAND_PINCH_CLOSE_M = 0.015
 HAND_PINCH_OPEN_M = 0.085
 HAND_PINCH_DEADMAN_M = 0.040
+HAND_ENABLE_CLOSE_M = 0.055
+HAND_ENABLE_TOGGLE_COOLDOWN_SEC = 0.45
 
 
 class XRRoboticsWrapper:
@@ -81,6 +87,12 @@ class XRRoboticsWrapper:
         self._last_right_hand_pinch_value = 10.0
         self._last_left_hand_pinch = False
         self._last_right_hand_pinch = False
+        self._last_left_hand_enable_gesture = False
+        self._last_right_hand_enable_gesture = False
+        self._last_left_hand_enable = False
+        self._last_right_hand_enable = False
+        self._last_left_hand_enable_toggle_time = 0.0
+        self._last_right_hand_enable_toggle_time = 0.0
         self._last_left_hand_active = False
         self._last_right_hand_active = False
         if self.head_reference_mode not in {
@@ -139,6 +151,8 @@ class XRRoboticsWrapper:
     @staticmethod
     def _hand_state_array(raw_state):
         state = np.asarray(raw_state, dtype=float)
+        if state.ndim != 2:
+            return None
         if state.shape[0] < HAND_RETARGET_START_INDEX + HAND_RETARGET_COUNT or state.shape[1] < 7:
             return None
         state = state[:HAND_RETARGET_START_INDEX + HAND_RETARGET_COUNT, :7]
@@ -177,20 +191,58 @@ class XRRoboticsWrapper:
         )
         return distance_m <= HAND_PINCH_DEADMAN_M, float(np.clip(pinch_value, 5.0, 7.0))
 
+    @staticmethod
+    def _hand_enable_gesture(state) -> bool:
+        thumb_tip = state[HAND_THUMB_TIP_INDEX, :3]
+        little_tip = state[HAND_LITTLE_TIP_INDEX, :3]
+        return float(np.linalg.norm(thumb_tip - little_tip)) <= HAND_ENABLE_CLOSE_M
+
     def _read_hand_source(self, side: str, last_pose, last_hand_pos, last_pinch_value):
-        getter = getattr(xrt, f"get_{side}_hand_tracking_state")
-        state = self._hand_state_array(getter())
+        getter = getattr(xrt, f"get_{side}_hand_tracking_state", None)
+        if not callable(getter):
+            return last_pose.copy(), False, last_hand_pos.copy(), False, float(last_pinch_value), False, False
+        try:
+            state = self._hand_state_array(getter())
+        except Exception:
+            state = None
         active = self._hand_active(side, state)
         if not active or state is None:
-            return last_pose.copy(), False, last_hand_pos.copy(), False, float(last_pinch_value), False
+            return last_pose.copy(), False, last_hand_pos.copy(), False, float(last_pinch_value), False, False
 
         hand_pose, pose_valid = self._safe_pose_matrix(state[HAND_WRIST_INDEX], last_pose)
         if not pose_valid:
-            return last_pose.copy(), False, last_hand_pos.copy(), False, float(last_pinch_value), bool(active)
+            return last_pose.copy(), False, last_hand_pos.copy(), False, float(last_pinch_value), False, bool(active)
 
         hand_pos = self._hand_points_to_robot_basis(state)
         pinch_pressed, pinch_value = self._hand_pinch_value(state)
-        return hand_pose, True, hand_pos, pinch_pressed, pinch_value, bool(active)
+        enable_pressed = self._hand_enable_gesture(state)
+        return hand_pose, True, hand_pos, pinch_pressed, pinch_value, enable_pressed, bool(active)
+
+    def _update_hand_enable_latch(self, side: str, enable_gesture: bool) -> bool:
+        now = time.monotonic()
+        if side == "left":
+            previous_gesture = self._last_left_hand_enable_gesture
+            enabled = self._last_left_hand_enable
+            last_toggle_time = self._last_left_hand_enable_toggle_time
+        else:
+            previous_gesture = self._last_right_hand_enable_gesture
+            enabled = self._last_right_hand_enable
+            last_toggle_time = self._last_right_hand_enable_toggle_time
+
+        if enable_gesture and not previous_gesture and (now - last_toggle_time) >= HAND_ENABLE_TOGGLE_COOLDOWN_SEC:
+            enabled = not enabled
+            last_toggle_time = now
+
+        if side == "left":
+            self._last_left_hand_enable_gesture = bool(enable_gesture)
+            self._last_left_hand_enable = bool(enabled)
+            self._last_left_hand_enable_toggle_time = float(last_toggle_time)
+            return self._last_left_hand_enable
+
+        self._last_right_hand_enable_gesture = bool(enable_gesture)
+        self._last_right_hand_enable = bool(enabled)
+        self._last_right_hand_enable_toggle_time = float(last_toggle_time)
+        return self._last_right_hand_enable
 
     def _read_robot_basis_poses(self):
         head_raw, head_valid = self._safe_pose_matrix(xrt.get_headset_pose(), self._last_head_pose)
@@ -201,6 +253,7 @@ class XRRoboticsWrapper:
                 self._last_left_hand_pos,
                 self._last_left_hand_pinch,
                 self._last_left_hand_pinch_value,
+                left_enable_gesture,
                 self._last_left_hand_active,
             ) = self._read_hand_source(
                 "left",
@@ -214,6 +267,7 @@ class XRRoboticsWrapper:
                 self._last_right_hand_pos,
                 self._last_right_hand_pinch,
                 self._last_right_hand_pinch_value,
+                right_enable_gesture,
                 self._last_right_hand_active,
             ) = self._read_hand_source(
                 "right",
@@ -221,6 +275,8 @@ class XRRoboticsWrapper:
                 self._last_right_hand_pos,
                 self._last_right_hand_pinch_value,
             )
+            self._update_hand_enable_latch("left", left_enable_gesture)
+            self._update_hand_enable_latch("right", right_enable_gesture)
         else:
             left_raw, left_valid = self._safe_pose_matrix(xrt.get_left_controller_pose(), self._last_left_pose)
             right_raw, right_valid = self._safe_pose_matrix(xrt.get_right_controller_pose(), self._last_right_pose)
@@ -244,6 +300,24 @@ class XRRoboticsWrapper:
         self._read_robot_basis_poses()
         return self._last_head_valid and self._last_left_valid and self._last_right_valid
 
+    def get_input_status(self):
+        return {
+            "use_hand_tracking": bool(self.use_hand_tracking),
+            "head_valid": bool(self._last_head_valid),
+            "left_valid": bool(self._last_left_valid),
+            "right_valid": bool(self._last_right_valid),
+            "left_hand_active": bool(self._last_left_hand_active),
+            "right_hand_active": bool(self._last_right_hand_active),
+            "left_hand_enable_gesture": bool(self._last_left_hand_enable_gesture),
+            "right_hand_enable_gesture": bool(self._last_right_hand_enable_gesture),
+            "left_hand_enable": bool(self._last_left_hand_enable),
+            "right_hand_enable": bool(self._last_right_hand_enable),
+            "left_hand_pinch": bool(self._last_left_hand_pinch),
+            "right_hand_pinch": bool(self._last_right_hand_pinch),
+            "left_hand_pinch_value": float(self._last_left_hand_pinch_value),
+            "right_hand_pinch_value": float(self._last_right_hand_pinch_value),
+        }
+
     def _normalized_head_reference_mode(self):
         if self.head_reference_mode == "calibrated":
             return "head_coupled"
@@ -255,7 +329,13 @@ class XRRoboticsWrapper:
 
     def calibrate_head_reference(self, require_live: bool = False):
         robot_head_pose, _, _ = self._read_robot_basis_poses()
-        if require_live and not (self._last_head_valid and self._last_left_valid and self._last_right_valid):
+        if require_live and self.use_hand_tracking and not self._last_head_valid:
+            return None
+        if (
+            require_live
+            and not self.use_hand_tracking
+            and not (self._last_head_valid and self._last_left_valid and self._last_right_valid)
+        ):
             return None
         self._head_reference_pose = robot_head_pose.copy()
         self._hybrid_reference_frozen = False
@@ -280,7 +360,13 @@ class XRRoboticsWrapper:
         older frozen operation anchor.
         """
         Brobot_world_head, left_Brobot_world_arm, right_Brobot_world_arm = self._read_robot_basis_poses()
-        if require_live and not (self._last_head_valid and self._last_left_valid and self._last_right_valid):
+        if require_live and self.use_hand_tracking and not self._last_head_valid:
+            return None
+        if (
+            require_live
+            and not self.use_hand_tracking
+            and not (self._last_head_valid and self._last_left_valid and self._last_right_valid)
+        ):
             return None
         self._set_reference_from_current(
             Brobot_world_head,
@@ -315,18 +401,35 @@ class XRRoboticsWrapper:
         current_right_robot_wrist_pose=None,
     ):
         Brobot_world_head, left_Brobot_world_arm, right_Brobot_world_arm = self._read_robot_basis_poses()
-        left_trigger = float(xrt.get_left_trigger())
-        right_trigger = float(xrt.get_right_trigger())
-        left_grip = float(xrt.get_left_grip())
-        right_grip = float(xrt.get_right_grip())
-        left_axis = np.array(xrt.get_left_axis(), dtype=float)
-        right_axis = np.array(xrt.get_right_axis(), dtype=float)
-        left_axis_click = bool(xrt.get_left_axis_click())
-        right_axis_click = bool(xrt.get_right_axis_click())
-        left_primary = bool(xrt.get_X_button())
-        left_secondary = bool(xrt.get_Y_button())
-        right_primary = bool(xrt.get_A_button())
-        right_secondary = bool(xrt.get_B_button())
+        if self.use_hand_tracking:
+            # Hand tracking has no physical grip.  Thumb+little-finger contact
+            # toggles a latched enable state, which is exposed as the existing
+            # squeeze/deadman signal. Thumb+index pinch is kept for gripper value.
+            left_trigger = 0.0
+            right_trigger = 0.0
+            left_grip = 1.0 if (self._last_left_hand_enable and self._last_left_valid) else 0.0
+            right_grip = 1.0 if (self._last_right_hand_enable and self._last_right_valid) else 0.0
+            left_axis = np.zeros(2, dtype=float)
+            right_axis = np.zeros(2, dtype=float)
+            left_axis_click = False
+            right_axis_click = False
+            left_primary = False
+            left_secondary = False
+            right_primary = False
+            right_secondary = False
+        else:
+            left_trigger = float(xrt.get_left_trigger())
+            right_trigger = float(xrt.get_right_trigger())
+            left_grip = float(xrt.get_left_grip())
+            right_grip = float(xrt.get_right_grip())
+            left_axis = np.array(xrt.get_left_axis(), dtype=float)
+            right_axis = np.array(xrt.get_right_axis(), dtype=float)
+            left_axis_click = bool(xrt.get_left_axis_click())
+            right_axis_click = bool(xrt.get_right_axis_click())
+            left_primary = bool(xrt.get_X_button())
+            left_secondary = bool(xrt.get_Y_button())
+            right_primary = bool(xrt.get_A_button())
+            right_secondary = bool(xrt.get_B_button())
 
         # Align to the controller-mode semantics used by this project:
         # 1) OpenXR basis -> robot basis
@@ -472,8 +575,18 @@ class XRRoboticsWrapper:
             head_pose=Brobot_world_head,
             left_wrist_pose=left_wrist_pose,
             right_wrist_pose=right_wrist_pose,
+            left_hand_pos=self._last_left_hand_pos.copy() if self.use_hand_tracking else None,
+            right_hand_pos=self._last_right_hand_pos.copy() if self.use_hand_tracking else None,
+            left_hand_pinch=bool(self._last_left_hand_pinch) if self.use_hand_tracking else False,
+            left_hand_pinchValue=float(self._last_left_hand_pinch_value) if self.use_hand_tracking else 10.0,
+            right_hand_pinch=bool(self._last_right_hand_pinch) if self.use_hand_tracking else False,
+            right_hand_pinchValue=float(self._last_right_hand_pinch_value) if self.use_hand_tracking else 10.0,
             left_ctrl_trigger=bool(left_trigger > 1e-3),
-            left_ctrl_triggerValue=10.0 - left_trigger * 10.0,
+            left_ctrl_triggerValue=(
+                float(self._last_left_hand_pinch_value)
+                if self.use_hand_tracking
+                else 10.0 - left_trigger * 10.0
+            ),
             left_ctrl_squeeze=left_grip_pressed,
             left_ctrl_squeezeValue=left_grip,
             left_ctrl_aButton=left_primary,
@@ -481,7 +594,11 @@ class XRRoboticsWrapper:
             left_ctrl_thumbstick=left_axis_click,
             left_ctrl_thumbstickValue=left_axis,
             right_ctrl_trigger=bool(right_trigger > 1e-3),
-            right_ctrl_triggerValue=10.0 - right_trigger * 10.0,
+            right_ctrl_triggerValue=(
+                float(self._last_right_hand_pinch_value)
+                if self.use_hand_tracking
+                else 10.0 - right_trigger * 10.0
+            ),
             right_ctrl_squeeze=right_grip_pressed,
             right_ctrl_squeezeValue=right_grip,
             right_ctrl_aButton=right_primary,
