@@ -104,7 +104,7 @@ mkdir -p "$OUTPUT_ROOT"
 mkdir -p "$(dirname "$LOG_FILE")"
 echo "[EXPORT_CLEAN] writing log to $LOG_FILE"
 
-"$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" python -u data_pipeline/export/raw_to_lerobot_v2.py \
+env -u PYTHONPATH "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" python -u data_pipeline/export/raw_to_lerobot_v2.py \
   --input-task-dir "$VIEW_ROOT" \
   --output-root "$OUTPUT_ROOT" \
   --task "$TASK" \
