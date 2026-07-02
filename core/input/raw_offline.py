@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from core.input.base import (
+    BaseTeleopInputProvider,
     MotionIntent,
     TeleopInputSample,
     _build_offline_tele_data,
@@ -184,7 +185,7 @@ def load_raw_dry_run_summary(dataset_root: str | Path, episode_index: int, arm_s
     }
 
 
-class RawEpisodeInputProvider:
+class RawEpisodeInputProvider(BaseTeleopInputProvider):
     def __init__(
         self,
         dataset_root: str | Path,

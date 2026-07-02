@@ -32,6 +32,16 @@ from core.input.xr_input_types import (
 )
 
 
+HAND_WRIST_INDEX = 1
+HAND_RETARGET_START_INDEX = 1
+HAND_RETARGET_COUNT = 25
+HAND_THUMB_TIP_INDEX = 5
+HAND_INDEX_TIP_INDEX = 10
+HAND_PINCH_CLOSE_M = 0.015
+HAND_PINCH_OPEN_M = 0.085
+HAND_PINCH_DEADMAN_M = 0.040
+
+
 class XRRoboticsWrapper:
     """
     XR-Robotics raw poses -> local TeleData used by this project.
@@ -65,11 +75,14 @@ class XRRoboticsWrapper:
         self._right_operation_controller_anchor_pose = None
         self._left_robot_wrist_anchor_pose = ROBOT_HOME_LEFT_WRIST_POSE.copy()
         self._right_robot_wrist_anchor_pose = ROBOT_HOME_RIGHT_WRIST_POSE.copy()
-        if self.use_hand_tracking:
-            raise NotImplementedError(
-                "XRRoboticsWrapper currently supports controller mode first. "
-                "Hand-tracking adaptation can be added later if needed."
-            )
+        self._last_left_hand_pos = np.zeros((HAND_RETARGET_COUNT, 3), dtype=float)
+        self._last_right_hand_pos = np.zeros((HAND_RETARGET_COUNT, 3), dtype=float)
+        self._last_left_hand_pinch_value = 10.0
+        self._last_right_hand_pinch_value = 10.0
+        self._last_left_hand_pinch = False
+        self._last_right_hand_pinch = False
+        self._last_left_hand_active = False
+        self._last_right_hand_active = False
         if self.head_reference_mode not in {
             "calibrated",
             "live",
@@ -123,10 +136,94 @@ class XRRoboticsWrapper:
             return last_pose.copy(), False
         return mat, True
 
+    @staticmethod
+    def _hand_state_array(raw_state):
+        state = np.asarray(raw_state, dtype=float)
+        if state.shape[0] < HAND_RETARGET_START_INDEX + HAND_RETARGET_COUNT or state.shape[1] < 7:
+            return None
+        state = state[:HAND_RETARGET_START_INDEX + HAND_RETARGET_COUNT, :7]
+        if not np.all(np.isfinite(state)):
+            return None
+        if np.allclose(state[:, :3], 0.0):
+            return None
+        return state
+
+    @staticmethod
+    def _hand_active(side: str, state) -> bool:
+        active_fn = getattr(xrt, f"get_{side}_hand_is_active", None)
+        if callable(active_fn):
+            try:
+                return int(active_fn()) == 1
+            except Exception:
+                return False
+        return state is not None
+
+    @staticmethod
+    def _hand_points_to_robot_basis(state):
+        points = state[HAND_RETARGET_START_INDEX:HAND_RETARGET_START_INDEX + HAND_RETARGET_COUNT, :3]
+        return (T_ROBOT_OPENXR[:3, :3] @ points.T).T
+
+    @staticmethod
+    def _hand_pinch_value(state) -> tuple[bool, float]:
+        thumb_tip = state[HAND_THUMB_TIP_INDEX, :3]
+        index_tip = state[HAND_INDEX_TIP_INDEX, :3]
+        distance_m = float(np.linalg.norm(thumb_tip - index_tip))
+        pinch_value = float(
+            np.interp(
+                distance_m,
+                [HAND_PINCH_CLOSE_M, HAND_PINCH_OPEN_M],
+                [5.0, 7.0],
+            )
+        )
+        return distance_m <= HAND_PINCH_DEADMAN_M, float(np.clip(pinch_value, 5.0, 7.0))
+
+    def _read_hand_source(self, side: str, last_pose, last_hand_pos, last_pinch_value):
+        getter = getattr(xrt, f"get_{side}_hand_tracking_state")
+        state = self._hand_state_array(getter())
+        active = self._hand_active(side, state)
+        if not active or state is None:
+            return last_pose.copy(), False, last_hand_pos.copy(), False, float(last_pinch_value), False
+
+        hand_pose, pose_valid = self._safe_pose_matrix(state[HAND_WRIST_INDEX], last_pose)
+        if not pose_valid:
+            return last_pose.copy(), False, last_hand_pos.copy(), False, float(last_pinch_value), bool(active)
+
+        hand_pos = self._hand_points_to_robot_basis(state)
+        pinch_pressed, pinch_value = self._hand_pinch_value(state)
+        return hand_pose, True, hand_pos, pinch_pressed, pinch_value, bool(active)
+
     def _read_robot_basis_poses(self):
         head_raw, head_valid = self._safe_pose_matrix(xrt.get_headset_pose(), self._last_head_pose)
-        left_raw, left_valid = self._safe_pose_matrix(xrt.get_left_controller_pose(), self._last_left_pose)
-        right_raw, right_valid = self._safe_pose_matrix(xrt.get_right_controller_pose(), self._last_right_pose)
+        if self.use_hand_tracking:
+            (
+                left_raw,
+                left_valid,
+                self._last_left_hand_pos,
+                self._last_left_hand_pinch,
+                self._last_left_hand_pinch_value,
+                self._last_left_hand_active,
+            ) = self._read_hand_source(
+                "left",
+                self._last_left_pose,
+                self._last_left_hand_pos,
+                self._last_left_hand_pinch_value,
+            )
+            (
+                right_raw,
+                right_valid,
+                self._last_right_hand_pos,
+                self._last_right_hand_pinch,
+                self._last_right_hand_pinch_value,
+                self._last_right_hand_active,
+            ) = self._read_hand_source(
+                "right",
+                self._last_right_pose,
+                self._last_right_hand_pos,
+                self._last_right_hand_pinch_value,
+            )
+        else:
+            left_raw, left_valid = self._safe_pose_matrix(xrt.get_left_controller_pose(), self._last_left_pose)
+            right_raw, right_valid = self._safe_pose_matrix(xrt.get_right_controller_pose(), self._last_right_pose)
         self._last_head_valid = bool(head_valid)
         self._last_left_valid = bool(left_valid)
         self._last_right_valid = bool(right_valid)

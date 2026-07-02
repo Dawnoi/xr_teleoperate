@@ -1030,3 +1030,8 @@ G1D 当前链路不要使用：
   python teleop/utils/plot_latency_trace.py \
     ./utils/data/latency_trace.jsonl \
     --output ./utils/data/latency_trace.png
+
+
+
+
+bash scripts/start/start_real_robot_wired_3cams_zmq.sh     --input-provider online_inference     --online-inference-transport http     --online-inference-base-url http://115.190.134.186:8017     --online-inference-protocol-profile pi05_dual_arm_20d     --online-inference-prompt "pick up the purple octagonal prism with the right hand, hand it over to the left hand, and place it in the bowl."     --online-inference-enable-motion     --online-inference-transform-config configs/inference/unitree_dual_arm_identity_transform.json
