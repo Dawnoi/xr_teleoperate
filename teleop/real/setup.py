@@ -177,19 +177,38 @@ def setup_base(args, components: RealTeleopComponents, log):
 def setup_arm_and_input(args, components: RealTeleopComponents):
     if args.arm == "G1_29":
         components.arm_ik = G1_29_ArmIK()
-        components.arm_ctrl = G1_29_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+        components.arm_ctrl = G1_29_ArmController(
+            motion_mode=args.motion,
+            simulation_mode=args.sim,
+            control_hz=args.arm_control_hz,
+        )
     elif args.arm == "G1_23":
         components.arm_ik = G1_23_ArmIK()
-        components.arm_ctrl = G1_23_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+        components.arm_ctrl = G1_23_ArmController(
+            motion_mode=args.motion,
+            simulation_mode=args.sim,
+            control_hz=args.arm_control_hz,
+        )
     elif args.arm == "H1_2":
         components.arm_ik = H1_2_ArmIK()
-        components.arm_ctrl = H1_2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+        components.arm_ctrl = H1_2_ArmController(
+            motion_mode=args.motion,
+            simulation_mode=args.sim,
+            control_hz=args.arm_control_hz,
+        )
     elif args.arm == "H1":
         components.arm_ik = H1_ArmIK()
-        components.arm_ctrl = H1_ArmController(simulation_mode=args.sim)
+        components.arm_ctrl = H1_ArmController(
+            simulation_mode=args.sim,
+            control_hz=args.arm_control_hz,
+        )
     elif args.arm == "H2":
         components.arm_ik = H2_ArmIK()
-        components.arm_ctrl = H2_ArmController(motion_mode=args.motion, simulation_mode=args.sim)
+        components.arm_ctrl = H2_ArmController(
+            motion_mode=args.motion,
+            simulation_mode=args.sim,
+            control_hz=args.arm_control_hz,
+        )
     else:
         raise ValueError(f"Unsupported arm: {args.arm}")
     components.tv_wrapper = create_teleop_input_provider(args, arm_ik=components.arm_ik)

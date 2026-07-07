@@ -16,6 +16,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='Controller safety enable logic. "grip" means each arm/ee only moves while the same-side grip is held.')
     parser.add_argument('--max-arm-joint-speed', type=float, default=1.5,
                         help='Outer-loop arm target speed limit in rad/s. Lower values reduce sudden jumps from teleop/IK.')
+    parser.add_argument('--arm-control-hz', type=float, default=250.0,
+                        help='Arm DDS publish frequency in Hz. Use 500 to test lower ctrl_wait.')
     parser.add_argument('--home-return-speed', type=float, default=0.6,
                         help='Dedicated arm joint speed limit in rad/s used only while returning to the ready/home pose via left Y.')
     parser.add_argument('--base-max-vx', type=float, default=0.3,

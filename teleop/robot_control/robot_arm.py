@@ -132,6 +132,46 @@ def _mark_trace_published(
         logger_mp.warning(f"[LATENCY] failed to mark publish for seq={trace_seq}: {e}")
 
 
+def _clear_pending_trace_if_current(controller, trace_seq, cmd_version):
+    if not trace_seq:
+        return
+    with controller.ctrl_lock:
+        if (
+            int(controller._pending_trace_seq) == int(trace_seq)
+            and int(controller._pending_cmd_version) == int(cmd_version)
+        ):
+            controller._pending_trace_seq = 0
+
+
+def _mark_trace_publish_once_for_command(
+    controller,
+    trace_seq,
+    cmd_version,
+    target_set_ns,
+    publish_done_ns,
+    dds_write_ms,
+    ctrl_loop_ms,
+):
+    if not target_set_ns:
+        return None
+    if cmd_version == controller._last_published_cmd_version:
+        _clear_pending_trace_if_current(controller, trace_seq, cmd_version)
+        return None
+
+    enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
+    controller._last_published_cmd_version = cmd_version
+    _mark_trace_published(
+        controller,
+        trace_seq,
+        publish_ts_ns=publish_done_ns,
+        dds_write_ms=dds_write_ms,
+        enqueue_to_publish_ms=enqueue_to_publish_ms,
+        ctrl_loop_ms=ctrl_loop_ms,
+    )
+    _clear_pending_trace_if_current(controller, trace_seq, cmd_version)
+    return enqueue_to_publish_ms
+
+
 def _init_controller_timing_fields(controller):
     controller._timing_lock = threading.Lock()
     controller._publish_loop_ms = deque(maxlen=400)
@@ -180,8 +220,18 @@ def _get_controller_timing_snapshot(controller):
         "enqueue_stats": enqueue_stats,
     }
 
+
+def _configure_control_frequency(controller, control_hz: float, label: str):
+    control_hz_value = float(control_hz)
+    if control_hz_value <= 0.0:
+        raise ValueError(f"{label} control_hz must be positive, got {control_hz_value}")
+    controller.control_hz = control_hz_value
+    controller.control_dt = 1.0 / control_hz_value
+    logger_mp.info(f"[{label}] arm DDS publish target: {control_hz_value:.1f} Hz")
+
+
 class G1_29_ArmController:
-    def __init__(self, motion_mode = False, simulation_mode = False):
+    def __init__(self, motion_mode = False, simulation_mode = False, control_hz: float = 250.0):
         logger_mp.info("Initialize G1_29_ArmController...")
         self.q_target = np.zeros(14)
         self.tauff_target = np.zeros(14)
@@ -196,7 +246,7 @@ class G1_29_ArmController:
 
         self.all_motor_q = None
         self.arm_velocity_limit = 20.0
-        self.control_dt = 1.0 / 250.0
+        _configure_control_frequency(self, control_hz, "G1_29_ArmController")
 
         self._speed_gradual_max = False
         self._gradual_start_time = None
@@ -317,17 +367,14 @@ class G1_29_ArmController:
             publish_done_ns = time.perf_counter_ns()
             dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
             ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
-            enqueue_to_publish_ms = None
-            if cmd_version != self._last_published_cmd_version and target_set_ns:
-                enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
-                self._last_published_cmd_version = cmd_version
-            _mark_trace_published(
+            enqueue_to_publish_ms = _mark_trace_publish_once_for_command(
                 self,
                 trace_seq,
-                publish_ts_ns=publish_done_ns,
-                dds_write_ms=dds_write_ms,
-                enqueue_to_publish_ms=enqueue_to_publish_ms,
-                ctrl_loop_ms=ctrl_loop_ms,
+                cmd_version,
+                target_set_ns,
+                publish_done_ns,
+                dds_write_ms,
+                ctrl_loop_ms,
             )
             _record_controller_timing_sample(
                 self,
@@ -507,7 +554,7 @@ class G1_29_JointIndex(IntEnum):
     kNotUsedJoint5 = 34
 
 class G1_23_ArmController:
-    def __init__(self, motion_mode = False, simulation_mode = False):
+    def __init__(self, motion_mode = False, simulation_mode = False, control_hz: float = 250.0):
         self.simulation_mode = simulation_mode
         self.motion_mode = motion_mode
 
@@ -524,7 +571,7 @@ class G1_23_ArmController:
 
         self.all_motor_q = None
         self.arm_velocity_limit = 20.0
-        self.control_dt = 1.0 / 250.0
+        _configure_control_frequency(self, control_hz, "G1_23_ArmController")
 
         self._speed_gradual_max = False
         self._gradual_start_time = None
@@ -646,17 +693,14 @@ class G1_23_ArmController:
             publish_done_ns = time.perf_counter_ns()
             dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
             ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
-            enqueue_to_publish_ms = None
-            if cmd_version != self._last_published_cmd_version and target_set_ns:
-                enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
-                self._last_published_cmd_version = cmd_version
-            _mark_trace_published(
+            enqueue_to_publish_ms = _mark_trace_publish_once_for_command(
                 self,
                 trace_seq,
-                publish_ts_ns=publish_done_ns,
-                dds_write_ms=dds_write_ms,
-                enqueue_to_publish_ms=enqueue_to_publish_ms,
-                ctrl_loop_ms=ctrl_loop_ms,
+                cmd_version,
+                target_set_ns,
+                publish_done_ns,
+                dds_write_ms,
+                ctrl_loop_ms,
             )
             _record_controller_timing_sample(
                 self,
@@ -828,7 +872,7 @@ class G1_23_JointIndex(IntEnum):
     kNotUsedJoint5 = 34
 
 class H1_2_ArmController:
-    def __init__(self, motion_mode = False, simulation_mode = False):
+    def __init__(self, motion_mode = False, simulation_mode = False, control_hz: float = 250.0):
         self.simulation_mode = simulation_mode
         self.motion_mode = motion_mode
         
@@ -845,7 +889,7 @@ class H1_2_ArmController:
 
         self.all_motor_q = None
         self.arm_velocity_limit = 20.0
-        self.control_dt = 1.0 / 250.0
+        _configure_control_frequency(self, control_hz, "H1_2_ArmController")
 
         self._speed_gradual_max = False
         self._gradual_start_time = None
@@ -967,17 +1011,14 @@ class H1_2_ArmController:
             publish_done_ns = time.perf_counter_ns()
             dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
             ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
-            enqueue_to_publish_ms = None
-            if cmd_version != self._last_published_cmd_version and target_set_ns:
-                enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
-                self._last_published_cmd_version = cmd_version
-            _mark_trace_published(
+            enqueue_to_publish_ms = _mark_trace_publish_once_for_command(
                 self,
                 trace_seq,
-                publish_ts_ns=publish_done_ns,
-                dds_write_ms=dds_write_ms,
-                enqueue_to_publish_ms=enqueue_to_publish_ms,
-                ctrl_loop_ms=ctrl_loop_ms,
+                cmd_version,
+                target_set_ns,
+                publish_done_ns,
+                dds_write_ms,
+                ctrl_loop_ms,
             )
             _record_controller_timing_sample(
                 self,
@@ -1156,7 +1197,7 @@ class H1_2_JointIndex(IntEnum):
     kNotUsedJoint7 = 34
 
 class H1_ArmController:
-    def __init__(self, simulation_mode = False):
+    def __init__(self, simulation_mode = False, control_hz: float = 250.0):
         self.simulation_mode = simulation_mode
         
         logger_mp.info("Initialize H1_ArmController...")
@@ -1170,7 +1211,7 @@ class H1_ArmController:
 
         self.all_motor_q = None
         self.arm_velocity_limit = 20.0
-        self.control_dt = 1.0 / 250.0
+        _configure_control_frequency(self, control_hz, "H1_ArmController")
 
         self._speed_gradual_max = False
         self._gradual_start_time = None
@@ -1279,17 +1320,14 @@ class H1_ArmController:
             publish_done_ns = time.perf_counter_ns()
             dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
             ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
-            enqueue_to_publish_ms = None
-            if cmd_version != self._last_published_cmd_version and target_set_ns:
-                enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
-                self._last_published_cmd_version = cmd_version
-            _mark_trace_published(
+            enqueue_to_publish_ms = _mark_trace_publish_once_for_command(
                 self,
                 trace_seq,
-                publish_ts_ns=publish_done_ns,
-                dds_write_ms=dds_write_ms,
-                enqueue_to_publish_ms=enqueue_to_publish_ms,
-                ctrl_loop_ms=ctrl_loop_ms,
+                cmd_version,
+                target_set_ns,
+                publish_done_ns,
+                dds_write_ms,
+                ctrl_loop_ms,
             )
             _record_controller_timing_sample(
                 self,
@@ -1422,7 +1460,7 @@ class H1_JointIndex(IntEnum):
     kLeftElbow = 19
 
 class H2_ArmController:
-    def __init__(self, motion_mode=False, simulation_mode=False):
+    def __init__(self, motion_mode=False, simulation_mode=False, control_hz: float = 250.0):
         logger_mp.info("Initialize H2_ArmController...")
         self.q_target = np.zeros(14)
         self.tauff_target = np.zeros(14)
@@ -1437,7 +1475,7 @@ class H2_ArmController:
 
         self.all_motor_q = None
         self.arm_velocity_limit = 20.0
-        self.control_dt = 1.0 / 250.0
+        _configure_control_frequency(self, control_hz, "H2_ArmController")
 
         self._speed_gradual_max = False
         self._gradual_start_time = None
@@ -1561,17 +1599,14 @@ class H2_ArmController:
             publish_done_ns = time.perf_counter_ns()
             dds_write_ms = (publish_done_ns - write_start_ns) / 1e6
             ctrl_loop_ms = (publish_done_ns - loop_start_ns) / 1e6
-            enqueue_to_publish_ms = None
-            if cmd_version != self._last_published_cmd_version and target_set_ns:
-                enqueue_to_publish_ms = (publish_done_ns - target_set_ns) / 1e6
-                self._last_published_cmd_version = cmd_version
-            _mark_trace_published(
+            enqueue_to_publish_ms = _mark_trace_publish_once_for_command(
                 self,
                 trace_seq,
-                publish_ts_ns=publish_done_ns,
-                dds_write_ms=dds_write_ms,
-                enqueue_to_publish_ms=enqueue_to_publish_ms,
-                ctrl_loop_ms=ctrl_loop_ms,
+                cmd_version,
+                target_set_ns,
+                publish_done_ns,
+                dds_write_ms,
+                ctrl_loop_ms,
             )
             _record_controller_timing_sample(
                 self,

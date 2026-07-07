@@ -29,6 +29,7 @@ VLA_PROMPT="${VLA_PROMPT:-pick up the pink octagonal prism with the right hand, 
 VLA_ARM_SIDE="${VLA_ARM_SIDE:-both}"
 VLA_ENABLE_MOTION="${VLA_ENABLE_MOTION:-0}"
 VLA_AUTO_START="${VLA_AUTO_START:-0}"
+ARM_CONTROL_HZ="${ARM_CONTROL_HZ:-250}"
 
 if [[ -z "${VLA_TRANSFORM_CONFIG:-}" ]]; then
   if [[ "${VLA_ARM_SIDE}" == "right" ]]; then
@@ -59,6 +60,7 @@ echo "[START_VLA] arm side: ${VLA_ARM_SIDE}"
 echo "[START_VLA] transform config: ${VLA_TRANSFORM_CONFIG}"
 echo "[START_VLA] enable motion: ${VLA_ENABLE_MOTION} (0=dry-run, 1=real motion)"
 echo "[START_VLA] auto start: ${VLA_AUTO_START} (0=press r, 1=start immediately)"
+echo "[START_VLA] arm control hz: ${ARM_CONTROL_HZ}"
 
 exec python "${REAL_TELEOP_ENTRY}" \
   --input-provider online_inference \
@@ -71,6 +73,7 @@ exec python "${REAL_TELEOP_ENTRY}" \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
+  --arm-control-hz "${ARM_CONTROL_HZ}" \
   --max-arm-joint-speed "${MAX_ARM_JOINT_SPEED:-1.0}" \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
