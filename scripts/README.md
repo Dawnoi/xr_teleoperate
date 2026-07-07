@@ -87,6 +87,31 @@ MAX_ARM_JOINT_SPEED=1.0
 
 ## 数据导出脚本
 
+Raw multi-cam episode 审查（只读，不改原始数据）：
+
+```bash
+DATASET=utils/data/multi_cam_record/transfer_black \
+EPISODE_START=207 \
+EPISODE_END=239 \
+bash scripts/data/audit_multi_cam_record.sh
+```
+
+默认规则：
+
+- 自动排除只看确定坏数据：`data.json` 缺失/损坏、字段结构错误、qpos 长度/非有限值错误、必要图片缺失、采样时间戳缺失/倒退/大断点、短帧数硬阈值。
+- 人工复查不自动排除：左/右夹爪 action 没有低于闭合阈值、闭合持续帧数太短、长帧数异常、相机对齐偏大、idx 不连续、可选 EE action 跳变。
+- 报告会同时显示 state 夹爪最小值，但默认不拿 state 阈值触发复查；需要检查反馈闭合时再加 `STATE_GRIPPER_REVIEW=1`。
+- 左夹爪没有有效闭合属于人工复查规则，不写入 `*_hard_fail_episodes.txt`。
+
+常用覆盖项：
+
+```bash
+DECODE_IMAGES=1 \
+PROGRESS_INTERVAL=1 \
+OUTPUT_PREFIX=audit_0207_0239_v2 \
+bash scripts/data/audit_multi_cam_record.sh
+```
+
 Raw episode -> LeRobot v2（全量导出，不排除问题 episode）：
 
 ```bash
