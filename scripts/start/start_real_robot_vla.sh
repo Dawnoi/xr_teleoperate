@@ -15,7 +15,7 @@ unset PYTHONPATH || true
 
 REAL_TELEOP_ENTRY="${REAL_TELEOP_ENTRY:-teleop/real/teleop_hand_and_arm.py}"
 
-NETWORK_INTERFACE="${NETWORK_INTERFACE:-eno1}"
+NETWORK_INTERFACE="${NETWORK_INTERFACE:-enx9c69d3212b05}"
 SENDER_IP="${SENDER_IP:-192.168.123.164}"
 
 HEAD_ZMQ_PORT="${HEAD_ZMQ_PORT:-5556}"
@@ -23,11 +23,11 @@ LEFT_WRIST_ZMQ_PORT="${LEFT_WRIST_ZMQ_PORT:-5557}"
 RIGHT_WRIST_ZMQ_PORT="${RIGHT_WRIST_ZMQ_PORT:-5558}"
 
 VLA_TRANSPORT="${VLA_TRANSPORT:-http}"
-VLA_BASE_URL="${VLA_BASE_URL:-http://127.0.0.1:8017}"
+VLA_BASE_URL="${VLA_BASE_URL:-http://127.0.0.1:18027}"
 VLA_PROTOCOL_PROFILE="${VLA_PROTOCOL_PROFILE:-pi05_dual_arm_20d}"
 VLA_PROMPT="${VLA_PROMPT:-pick up the pink octagonal prism with the right hand, hand it over to the left hand, and place it in the bowl}"
 VLA_ARM_SIDE="${VLA_ARM_SIDE:-both}"
-VLA_ENABLE_MOTION="${VLA_ENABLE_MOTION:-0}"
+VLA_ENABLE_MOTION="${VLA_ENABLE_MOTION:-1}"
 VLA_AUTO_START="${VLA_AUTO_START:-0}"
 ARM_CONTROL_HZ="${ARM_CONTROL_HZ:-250}"
 
@@ -59,6 +59,7 @@ echo "[START_VLA] protocol profile: ${VLA_PROTOCOL_PROFILE}"
 echo "[START_VLA] arm side: ${VLA_ARM_SIDE}"
 echo "[START_VLA] transform config: ${VLA_TRANSFORM_CONFIG}"
 echo "[START_VLA] enable motion: ${VLA_ENABLE_MOTION} (0=dry-run, 1=real motion)"
+echo "[START_VLA] dex1 adaptive force-hold: enabled for online_inference"
 echo "[START_VLA] auto start: ${VLA_AUTO_START} (0=press r, 1=start immediately)"
 echo "[START_VLA] arm control hz: ${ARM_CONTROL_HZ}"
 

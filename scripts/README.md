@@ -47,14 +47,14 @@ bash scripts/start/start_real_robot_wired_3cams_zmq.sh
 VLA / online inference 真机推理：
 
 ```bash
-# 默认 dry-run：只发观测、解析动作，不下发机械臂运动。
-VLA_BASE_URL=http://127.0.0.1:8017 \
+# 默认允许真机运动：启动前确认 transform config / 工作空间 / 相机链路都正确。
+VLA_BASE_URL=http://127.0.0.1:18027 \
 SENDER_IP=192.168.123.164 \
 bash scripts/start/start_real_robot_vla.sh
 
-# 允许真机运动：先确认 transform config / 工作空间 / 相机链路都正确。
-VLA_ENABLE_MOTION=1 \
-VLA_BASE_URL=http://127.0.0.1:8017 \
+# 临时 dry-run：只发观测、解析动作，不下发机械臂运动。
+VLA_ENABLE_MOTION=0 \
+VLA_BASE_URL=http://127.0.0.1:18027 \
 VLA_PROMPT="your task prompt" \
 bash scripts/start/start_real_robot_vla.sh
 ```
@@ -64,10 +64,10 @@ bash scripts/start/start_real_robot_vla.sh
 ```bash
 NETWORK_INTERFACE=eno1
 SENDER_IP=192.168.123.164
-VLA_BASE_URL=http://127.0.0.1:8017
+VLA_BASE_URL=http://127.0.0.1:18027
 VLA_PROTOCOL_PROFILE=pi05_dual_arm_20d
 VLA_ARM_SIDE=both                    # both / left / right
-VLA_ENABLE_MOTION=0                  # 0=dry-run, 1=real motion
+VLA_ENABLE_MOTION=1                  # 0=dry-run, 1=real motion
 VLA_AUTO_START=0                     # 0=按 r 启动, 1=启动后立即开始
 VLA_TRANSFORM_CONFIG=configs/inference/unitree_dual_arm_identity_transform.json
 MAX_ARM_JOINT_SPEED=1.0
