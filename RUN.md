@@ -1035,3 +1035,109 @@ G1D 当前链路不要使用：
 
 
 bash scripts/start/start_real_robot_wired_3cams_zmq.sh     --input-provider online_inference     --online-inference-transport http     --online-inference-base-url http://115.190.134.186:8017     --online-inference-protocol-profile pi05_dual_arm_20d     --online-inference-prompt "pick up the purple octagonal prism with the right hand, hand it over to the left hand, and place it in the bowl."     --online-inference-enable-motion     --online-inference-transform-config configs/inference/unitree_dual_arm_identity_transform.json
+
+## VLA + Dex1 force-hold 额外夹紧
+
+Dex1 force-hold 只处理一种情况：
+
+```text
+夹爪已经碰到物体 / 边角
+Dex1 触发 force-hold
+```
+
+它不处理空抓。模型空抓时不会触发 force-hold，系统继续执行 VLA 推理动作。
+
+额外夹紧只在 VLA 推理入口生效：
+
+```text
+--input-provider online_inference
+```
+
+手柄遥操作、手部追踪遥操作、离线回放不会使用自适应额外夹紧；这些模式触发 force-hold 时只锁住接触位置。
+
+当前行为：
+
+```text
+force-hold rising edge
+-> 记录接触位置 contact_q
+-> VLA 推理: 初始 hold_q = contact_q - initial_offset
+-> VLA 推理: 后续按 tau_est 自适应微调，低力矩时继续向物理闭合端小步闭合
+-> 非 VLA: 锁存 hold_q = contact_q
+-> 默认 initial_offset = 0.20 rad
+-> 不再设置最大额外闭合 offset；闭合停止/回松由 tau_est 阈值决定
+```
+
+自适应夹持目标：
+
+```text
+tau_est < 2.5  -> 每 20ms 小幅继续闭合
+2.5 <= tau_est <= 3.7 -> 保持当前 hold_q
+tau_est > 3.7  -> 小幅松开
+tau_est > 5.0  -> 危险微松并持续打日志
+```
+
+对应环境变量：
+
+```bash
+DEX1_FORCE_HOLD_INITIAL_OFFSET=0.20
+DEX1_FORCE_HOLD_ADJUST_INTERVAL_SEC=0.02
+DEX1_FORCE_HOLD_TAU_LOW=2.50
+DEX1_FORCE_HOLD_TAU_HIGH=3.70
+DEX1_FORCE_HOLD_TAU_DANGER=5.00
+DEX1_FORCE_HOLD_Q_STEP_CLOSE=0.03
+DEX1_FORCE_HOLD_Q_STEP_RELEASE=0.02
+DEX1_FORCE_HOLD_Q_STEP_DANGER_RELEASE=0.05
+DEX1_FORCE_HOLD_DIAG=1
+DEX1_FORCE_HOLD_DIAG_INTERVAL_SEC=1.0
+```
+
+现在没有“最多再夹多少”的 offset 限制。只要 `tau_est < DEX1_FORCE_HOLD_TAU_LOW`，夹爪就会继续小步闭合，直到 `tau_est` 进入目标区间、超过上限触发回松，或者到达 Dex1 物理闭合位置 `q=0.0`。
+
+force-hold 的力矩相关参数目前只用于“触发判断”，不是进入 force-hold 后的持续力矩闭环：
+
+```bash
+DEX1_FORCE_HOLD_TAU_ENGAGE_THRESH=1.50
+```
+
+含义：
+
+```text
+tau_est 绝对值大于该阈值
++ 夹爪仍在闭合
++ 命令位置和实际位置有明显误差
+-> 判定为接触
+-> 进入 force-hold
+```
+
+如果太容易误触发，可以增大该阈值；如果接触后不容易触发，可以减小该阈值。
+
+当前默认 `1.50` 来自实测：稳定夹持时 `tau_est` 在 2.x 左右，完全闭合 / 硬顶时左夹爪 `tau_est` 约 6.9。因此 `1.50` 用作更敏感的进入 force-hold 接触阈值，后续夹持目标不应接近 6.9。
+
+注意：当前不下发非零 `tau`，Dex1 命令里的 `tau` 保持 0.0。VLA 夹持强度由 `tau_est` 反馈调节位置命令，`DEX1_FORCE_HOLD_TAU_ENGAGE_THRESH` 只决定何时进入 force-hold。
+
+已实测 Dex1 的 `tau` 更像保持力矩，不能可靠产生闭合动作。因此纯力矩闭合模式已移除，不作为 VLA 主流程选项。
+
+日志形态：
+
+```text
+[Dex1_1_Gripper_Controller] right force-hold diag: active=False, extra_close_enabled=True, closing_intent=True, contact_detected=False, large_command_error=True, driver_ok=True, tau_abs=1.200/1.500, command_error=0.300/0.200, raw_target_q=..., state_q=..., detect_age=none.
+
+[Dex1_1_Gripper_Controller] right gripper force-hold engaged at
+contact_q=3.335, hold_q=3.135, extra_close_enabled=True, initial_offset=0.200, physical_close_q=0.000, tau_low=2.500, tau_high=3.700, tau_danger=5.000, tau_est=...
+```
+
+其中 `force-hold diag` 表示还没进入，并会直接打印卡在哪个条件：
+
+```text
+closing_intent=False       -> VLA 没有继续闭合夹爪
+contact_detected=False     -> tau_est 还没超过进入阈值
+large_command_error=False  -> 命令位置和实际位置差距还不够
+driver_ok=False            -> Dex1 驱动 lost 标志异常
+extra_close_enabled=False  -> 当前不是 VLA 推理入口，不会自适应额外夹紧
+```
+
+自适应调节日志：
+
+```text
+[Dex1_1_Gripper_Controller] right adaptive force-hold reason=close, tau_est=1.900, hold_q=3.115, contact_q=3.335, physical_close_q=0.000.
+```

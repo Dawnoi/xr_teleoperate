@@ -249,6 +249,7 @@ def setup_end_effector(args, log) -> EndEffectorRuntime:
             ee.dual_gripper_state_array,
             ee.dual_gripper_action_array,
             simulation_mode=args.sim,
+            force_hold_extra_close_enabled=(args.input_provider == "online_inference"),
         )
     elif args.ee in {"inspire_dfx", "inspire_ftp"}:
         controller_cls = _inspire_controller_class(args.ee)

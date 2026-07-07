@@ -35,6 +35,18 @@ NETWORK_INTERFACE=enx9c69d3212b05 bash scripts/start/start_real_robot_wired.sh
 NETWORK_INTERFACE=wlo1 bash scripts/start/start_real_robot_wifi.sh
 ```
 
+Dex1 夹爪键盘开合 / `tau_est` 反馈探测：
+
+```bash
+bash scripts/debug/dex1_gripper_keyboard_probe.sh
+```
+
+进入后用 `a` / 左键闭合，`d` / 右键张开，空格把目标位置设为当前实际位置。
+
+默认读取 `scripts/start/start_real_robot_vla.sh` 里的 `NETWORK_INTERFACE` 默认值，保持和 VLA 推理脚本一致。需要临时覆盖时仍可使用 `NETWORK_INTERFACE=...`。
+
+运行前先停掉真机遥操作或 VLA 进程，避免多个进程同时发布 `rt/dex1/*/cmd`。
+
 三相机 ZMQ 录制：
 
 ```bash

@@ -5,3 +5,4 @@
 - `latency_trace.py`：输入到下发/执行的 latency trace
 - `timing_debugger.py`：主循环和 DDS/AGV timing 日志
 - `gripper_state_ui.py`：夹爪状态调试 UI
+- `dex1_gripper_keyboard_probe.py`：Dex1 键盘开合与 `tau_est` 实时探测
