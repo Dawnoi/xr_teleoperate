@@ -507,6 +507,7 @@ if __name__ == '__main__':
             any_zero_takeover_this_frame = operator_state.any_zero_takeover_this_frame
             takeover_logic_ms = operator_state.takeover_logic_ms
 
+            end_effector_start = time.perf_counter()
             apply_end_effector_command(
                 args=args,
                 tele_data=tele_data,
@@ -519,6 +520,7 @@ if __name__ == '__main__':
                 left_gripper_value=components.ee.left_gripper_value,
                 right_gripper_value=components.ee.right_gripper_value,
             )
+            end_effector_command_ms = (time.perf_counter() - end_effector_start) * 1000.0
 
             # high level base control
             base_result = apply_base_command(
@@ -605,17 +607,24 @@ if __name__ == '__main__':
             post_home_takeover_armed = arm_command.post_home_takeover_armed
             left_takeover_settle_frames = arm_command.left_takeover_settle_frames
             right_takeover_settle_frames = arm_command.right_takeover_settle_frames
+            operator_sync_start = time.perf_counter()
             operator_state_flow.sync_from_arm_command(
                 left_takeover_settle_frames=left_takeover_settle_frames,
                 right_takeover_settle_frames=right_takeover_settle_frames,
             )
+            operator_sync_ms = (time.perf_counter() - operator_sync_start) * 1000.0
+
+            provider_feedback_ms = 0.0
             if args.input_provider == "online_inference" and provider_feedback is not None:
+                provider_feedback_start = time.perf_counter()
                 report_feedback = getattr(tv_wrapper, "report_control_feedback", None)
                 if callable(report_feedback):
                     report_feedback(provider_feedback)
+                provider_feedback_ms = (time.perf_counter() - provider_feedback_start) * 1000.0
 
             trace_seq = None
             if latency_tracker is not None and latency_tracker.can_start_new_trace():
+                latency_trace_prepare_start = time.perf_counter()
                 max_command_delta = float(np.max(np.abs(sol_q - current_lr_arm_q)))
                 if max_command_delta >= args.latency_command_threshold:
                     online_trace_extra = {}
@@ -650,6 +659,17 @@ if __name__ == '__main__':
                             "ik_ms": ik_ms,
                             "safety_ms": safety_ms,
                             "gravity_ms": gravity_ms,
+                            "arm_cmd_input_ms": arm_command.arm_cmd_input_ms,
+                            "arm_cmd_takeover_reset_ms": arm_command.arm_cmd_takeover_reset_ms,
+                            "arm_cmd_target_extra_ms": arm_command.arm_cmd_target_extra_ms,
+                            "arm_cmd_feedback_gate_ms": arm_command.arm_cmd_feedback_gate_ms,
+                            "arm_cmd_enable_gating_ms": arm_command.arm_cmd_enable_gating_ms,
+                            "arm_cmd_takeover_settle_ms": arm_command.arm_cmd_takeover_settle_ms,
+                            "arm_cmd_speed_feedback_ms": arm_command.arm_cmd_speed_feedback_ms,
+                            "arm_cmd_hold_update_ms": arm_command.arm_cmd_hold_update_ms,
+                            "end_effector_command_ms": end_effector_command_ms,
+                            "operator_sync_ms": operator_sync_ms,
+                            "provider_feedback_ms": provider_feedback_ms,
                             "left_arm_enabled": bool(left_arm_enabled),
                             "right_arm_enabled": bool(right_arm_enabled),
                             "home_return_active": bool(home_return_active),
@@ -662,7 +682,10 @@ if __name__ == '__main__':
                             "right_joint_delta_norm": float(np.linalg.norm(sol_q[-7:] - current_lr_arm_q[-7:])),
                         },
                     )
+                    latency_trace_prepare_ms = (time.perf_counter() - latency_trace_prepare_start) * 1000.0
+                    latency_tracker.set_fields(trace_seq, latency_trace_prepare_ms=latency_trace_prepare_ms)
 
+            action_history_start = time.perf_counter()
             action_command_monotonic_ns = int(time.monotonic_ns())
             append_timed_sample(
                 action_history,
@@ -670,7 +693,14 @@ if __name__ == '__main__':
                 q=sol_q.copy(),
                 tauff=sol_tauff.copy(),
             )
+            action_history_append_ms = (time.perf_counter() - action_history_start) * 1000.0
+            if trace_seq is not None:
+                latency_tracker.set_fields(trace_seq, action_history_append_ms=action_history_append_ms)
+            ctrl_dual_arm_start = time.perf_counter()
             arm_ctrl.ctrl_dual_arm(sol_q, sol_tauff, trace_seq=trace_seq)
+            ctrl_dual_arm_call_ms = (time.perf_counter() - ctrl_dual_arm_start) * 1000.0
+            if trace_seq is not None:
+                latency_tracker.set_fields(trace_seq, ctrl_dual_arm_call_ms=ctrl_dual_arm_call_ms)
             if home_return_active and np.all(np.abs(sol_q - home_target_q) < 0.05):
                 home_return_active = False
                 calibration_hold_q = current_hold_q.copy()

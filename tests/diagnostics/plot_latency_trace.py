@@ -63,14 +63,28 @@ TOP_LEVEL_STYLES = {
 SEGMENT_SPECS = [
     ("tele_fetch_ms", "tele_fetch", "#B279A2"),
     ("takeover_logic_ms", "takeover", "#9D755D"),
+    ("end_effector_command_ms", "ee_cmd", "#D37295"),
     ("base_control_ms", "base_ctrl", "#72B7B2"),
+    ("arm_cmd_input_ms", "cmd_input", "#8CD17D"),
+    ("arm_cmd_takeover_reset_ms", "cmd_reset", "#B6992D"),
+    ("arm_cmd_target_extra_ms", "cmd_target_extra", "#FF9DA6"),
     ("ik_ms", "ik", "#E45756"),
+    ("arm_cmd_feedback_gate_ms", "cmd_fb_gate", "#C44E52"),
+    ("arm_cmd_enable_gating_ms", "cmd_gate", "#499894"),
+    ("arm_cmd_takeover_settle_ms", "cmd_settle", "#9C755F"),
     ("safety_ms", "safety", "#F2CF5B"),
+    ("arm_cmd_speed_feedback_ms", "cmd_speed_fb", "#FFB000"),
     ("gravity_ms", "gravity", "#54A24B"),
+    ("arm_cmd_hold_update_ms", "cmd_hold", "#59A14F"),
+    ("operator_sync_ms", "op_sync", "#86BCB6"),
+    ("provider_feedback_ms", "feedback", "#B07AA1"),
+    ("latency_trace_prepare_ms", "trace_prep", "#D4A6C8"),
+    ("action_history_append_ms", "act_hist", "#A0CBE8"),
+    ("ctrl_dual_arm_call_ms", "ctrl_set", "#FFBE7D"),
     ("controller_wait_ms", "ctrl_wait", "#4C78A8"),
     ("dds_write_ms", "dds_write", "#1F77B4"),
     ("unaccounted_pre_publish_ms", "unknown_pre_pub", "#BAB0AC"),
-    ("pub_to_exec_ms", "pub_to_exec_main", "#F58518"),
+    ("pub_to_exec_thread_ms", "pub_to_exec_thread", "#B6992D"),
 ]
 
 BASE_SEGMENT_SPECS = [
@@ -381,14 +395,14 @@ def _summary_text(records):
     for line in _base_inference_lines(completed):
         lines.append(line)
 
-    top_records = _top_latency_records(completed, top_k=5)
+    top_records = _top_latency_records(completed, top_k=5, key="recv_to_exec_thread_ms")
     if top_records:
-        lines.extend(["", "Worst traces (top5 recv->exec):"])
+        lines.extend(["", "Worst traces (top5 recv->exec_thread):"])
         for idx, record in enumerate(top_records, start=1):
             lines.append(
-                f"#{idx} seq={record['seq']} recv->exec={float(record.get('recv_to_exec_ms') or 0.0):.2f} "
+                f"#{idx} seq={record['seq']} recv->exec_thread={float(record.get('recv_to_exec_thread_ms') or 0.0):.2f} "
                 f"base={_segment_value(record, 'base_control_ms'):.2f} ik={_segment_value(record, 'ik_ms'):.2f} "
-                f"pub->exec={float(record.get('pub_to_exec_ms') or 0.0):.2f}"
+                f"pub->exec_thread={float(record.get('pub_to_exec_thread_ms') or 0.0):.2f}"
             )
 
     q_delta = _metric_array(completed, "q_delta_trigger")
@@ -412,7 +426,7 @@ def _plot_top_level_full(ax, completed, top_records):
         ax.plot(seq, _rolling_stat(values, window=31), color=style["color"], linewidth=1.6, alpha=0.95)
     for idx, record in enumerate(top_records, start=1):
         seq = int(record["seq"])
-        value = float(record.get("recv_to_exec_ms") or 0.0)
+        value = float(record.get("recv_to_exec_thread_ms") or 0.0)
         ax.scatter([seq], [value], s=130, facecolors="none", edgecolors="black", linewidths=1.3, zorder=6)
         ax.text(seq, value + 0.35, str(idx), fontsize=8, ha="center", va="bottom", color="black")
     ax.set_title("Top-level latency (scatter + rolling median, worst traces highlighted)")
@@ -478,15 +492,21 @@ def _plot_recent_breakdown(ax, records):
 
     for idx, record in enumerate(records):
         recv_to_pub = float(record.get("recv_to_pub_ms") or 0.0)
-        recv_to_exec = float(record.get("recv_to_exec_ms") or 0.0)
+        recv_to_exec = float(record.get("recv_to_exec_thread_ms") or 0.0)
         ax.vlines(recv_to_pub, idx - 0.38, idx + 0.38, color="black", linewidth=1.1)
-        ax.text(recv_to_exec + 0.35, idx, f"pub {recv_to_pub:.1f} / exec {recv_to_exec:.1f}", va="center", fontsize=8)
+        ax.text(
+            recv_to_exec + 0.35,
+            idx,
+            f"pub {recv_to_pub:.1f} / lowstate {recv_to_exec:.1f}",
+            va="center",
+            fontsize=8,
+        )
 
     ax.axvline(0.0, color="black", linestyle="--", linewidth=1.0)
     ax.set_yticks(y)
     ax.set_yticklabels([f"seq {r['seq']}" for r in records])
     ax.set_xlabel("ms (0 = tele_data ready / receive time)")
-    ax.set_title("Recent full breakdown timeline")
+    ax.set_title("Recent full breakdown timeline (exec = lowstate thread)")
     ax.grid(True, axis="x", alpha=0.25)
     handles, labels = ax.get_legend_handles_labels()
     uniq = dict(zip(labels, handles))
@@ -636,24 +656,24 @@ def _format_detail_value(value):
 
 def write_top_latency_report(records, out_path: Path, top_k: int = 20):
     completed = completed_records(records)
-    top_records = _top_latency_records(completed, top_k=top_k)
+    top_records = _top_latency_records(completed, top_k=top_k, key="recv_to_exec_thread_ms")
     lines = [
         "# xr_teleoperate latency top-k report",
         "",
         f"- samples: {len(completed)} completed / {len(records)} total",
-        f"- ranking metric: recv_to_exec_ms",
+        f"- ranking metric: recv_to_exec_thread_ms",
         f"- top_k: {len(top_records)}",
         "",
         "## Ranked overview",
         "",
-        "| rank | seq | recv->exec | recv->pub | pub->exec | fetch->exec | base | ik | mode | dominant |",
+        "| rank | seq | recv->exec_thread | recv->pub | pub->exec_thread | fetch->exec | base | ik | mode | dominant |",
         "|---:|---:|---:|---:|---:|---:|---:|---:|---|---|",
     ]
     for idx, record in enumerate(top_records, start=1):
         dominant = ", ".join(f"{name}:{value:.1f}" for name, value in _dominant_segments(record, top_n=2))
         lines.append(
-            f"| {idx} | {record['seq']} | {float(record.get('recv_to_exec_ms') or 0.0):.2f} | "
-            f"{float(record.get('recv_to_pub_ms') or 0.0):.2f} | {float(record.get('pub_to_exec_ms') or 0.0):.2f} | "
+            f"| {idx} | {record['seq']} | {float(record.get('recv_to_exec_thread_ms') or 0.0):.2f} | "
+            f"{float(record.get('recv_to_pub_ms') or 0.0):.2f} | {float(record.get('pub_to_exec_thread_ms') or 0.0):.2f} | "
             f"{float(record.get('fetch_to_exec_ms') or 0.0):.2f} | {_segment_value(record, 'base_control_ms'):.2f} | "
             f"{_segment_value(record, 'ik_ms'):.2f} | {record.get('base_control_mode') or 'none'} | {dominant} |"
         )
@@ -669,11 +689,18 @@ def write_top_latency_report(records, out_path: Path, top_k: int = 20):
         "recv_to_pub_ms",
         "pub_to_exec_thread_ms", "pub_to_exec_ms",
         "recv_to_exec_thread_ms", "recv_to_exec_ms", "fetch_to_exec_ms",
-        "tele_fetch_ms", "takeover_logic_ms", "base_control_ms", "base_move_ms", "base_height_ms", "base_misc_ms",
+        "tele_fetch_ms", "takeover_logic_ms", "end_effector_command_ms",
+        "base_control_ms", "base_move_ms", "base_height_ms", "base_misc_ms",
         "base_control_mode", "base_vx_cmd", "base_vy_cmd", "base_wz_cmd", "base_z_cmd",
         "base_async_publish_hz", "base_async_move_avg_ms", "base_async_height_avg_ms",
         "base_async_cycle_avg_ms", "base_async_queue_avg_ms",
-        "ik_ms", "safety_ms", "gravity_ms", "enqueue_to_publish_ms", "controller_wait_ms", "dds_write_ms",
+        "ik_ms", "safety_ms", "gravity_ms",
+        "arm_cmd_input_ms", "arm_cmd_takeover_reset_ms", "arm_cmd_target_extra_ms",
+        "arm_cmd_feedback_gate_ms", "arm_cmd_enable_gating_ms", "arm_cmd_takeover_settle_ms",
+        "arm_cmd_speed_feedback_ms", "arm_cmd_hold_update_ms",
+        "operator_sync_ms", "provider_feedback_ms",
+        "latency_trace_prepare_ms", "action_history_append_ms", "ctrl_dual_arm_call_ms",
+        "enqueue_to_publish_ms", "controller_wait_ms", "dds_write_ms",
         "known_pre_publish_ms", "unaccounted_pre_publish_ms", "known_post_receive_ms", "unaccounted_post_receive_ms",
         "max_command_delta", "left_joint_delta_norm", "right_joint_delta_norm",
         "q_delta_thread_trigger", "dq_peak_thread_trigger",
@@ -715,7 +742,7 @@ def plot_records(records, out_path: Path, tail: int, hist_bins: int, top_k: int 
         raise ValueError("No completed records found in trace file.")
 
     tail_completed = completed[-tail:]
-    top_records = _top_latency_records(completed, top_k=top_k)
+    top_records = _top_latency_records(completed, top_k=top_k, key="recv_to_exec_thread_ms")
 
     fig = plt.figure(figsize=(24, 26), constrained_layout=True)
     gs = fig.add_gridspec(5, 2, height_ratios=[1.1, 1.0, 1.15, 1.0, 1.0])

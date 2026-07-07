@@ -45,6 +45,14 @@ class ArmCommandResult:
     ik_ms: float
     safety_ms: float
     gravity_ms: float
+    arm_cmd_input_ms: float
+    arm_cmd_takeover_reset_ms: float
+    arm_cmd_target_extra_ms: float
+    arm_cmd_feedback_gate_ms: float
+    arm_cmd_enable_gating_ms: float
+    arm_cmd_takeover_settle_ms: float
+    arm_cmd_speed_feedback_ms: float
+    arm_cmd_hold_update_ms: float
     sol_q_before_speed_limit: np.ndarray
     left_arm_enabled: bool
     right_arm_enabled: bool
@@ -341,6 +349,7 @@ def build_arm_command(
     does not call ``tv_wrapper.report_control_feedback``.
     """
 
+    arm_cmd_input_start = time.perf_counter()
     log = logger if log is None else log
     input_provider = str(input_provider)
     is_online_inference = input_provider == "online_inference"
@@ -351,10 +360,12 @@ def build_arm_command(
     current_hold_tauff = np.asarray(current_hold_tauff, dtype=float)
     workspace_min = np.asarray(workspace_min, dtype=float)
     workspace_max = np.asarray(workspace_max, dtype=float)
+    arm_cmd_input_ms = (time.perf_counter() - arm_cmd_input_start) * 1000.0
 
     ik_ms = 0.0
     provider_feedback = None
 
+    arm_cmd_takeover_reset_start = time.perf_counter()
     post_home_takeover_armed = _handle_takeover_reset(
         arm_ik=arm_ik,
         current_lr_arm_q=current_lr_arm_q,
@@ -363,7 +374,9 @@ def build_arm_command(
         normalized_head_mode=normalized_head_mode,
         sync_reference_to_current_live_pose=sync_reference_to_current_live_pose,
     )
+    arm_cmd_takeover_reset_ms = (time.perf_counter() - arm_cmd_takeover_reset_start) * 1000.0
 
+    arm_cmd_target_start = time.perf_counter()
     if home_return_active:
         sol_q = np.asarray(home_target_q, dtype=float).copy()
         sol_tauff = current_hold_tauff.copy()
@@ -402,13 +415,18 @@ def build_arm_command(
     else:
         sol_q = current_hold_q.copy()
         sol_tauff = current_hold_tauff.copy()
+    arm_cmd_target_ms = (time.perf_counter() - arm_cmd_target_start) * 1000.0
+    arm_cmd_target_extra_ms = max(0.0, arm_cmd_target_ms - float(ik_ms))
 
+    arm_cmd_feedback_gate_start = time.perf_counter()
     if is_online_inference and provider_feedback is not None:
         sol_q = current_hold_q.copy()
         sol_tauff = current_hold_tauff.copy()
         left_arm_enabled = False
         right_arm_enabled = False
+    arm_cmd_feedback_gate_ms = (time.perf_counter() - arm_cmd_feedback_gate_start) * 1000.0
 
+    arm_cmd_enable_gating_start = time.perf_counter()
     sol_q, sol_tauff = _apply_arm_enable_gating(
         sol_q=sol_q,
         sol_tauff=sol_tauff,
@@ -420,6 +438,9 @@ def build_arm_command(
         right_zero_takeover_this_frame=right_zero_takeover_this_frame,
         home_return_active=home_return_active,
     )
+    arm_cmd_enable_gating_ms = (time.perf_counter() - arm_cmd_enable_gating_start) * 1000.0
+
+    arm_cmd_takeover_settle_start = time.perf_counter()
     left_takeover_settle_frames, right_takeover_settle_frames = _count_down_takeover_settle_frames(
         left_zero_takeover_this_frame=left_zero_takeover_this_frame,
         right_zero_takeover_this_frame=right_zero_takeover_this_frame,
@@ -430,6 +451,7 @@ def build_arm_command(
         takeover_settle_frames=takeover_settle_frames,
         log=log,
     )
+    arm_cmd_takeover_settle_ms = (time.perf_counter() - arm_cmd_takeover_settle_start) * 1000.0
 
     sol_q, sol_q_before_speed_limit, safety_ms = _limit_speed(
         sol_q=sol_q,
@@ -440,6 +462,7 @@ def build_arm_command(
         frequency=frequency,
     )
 
+    arm_cmd_speed_feedback_start = time.perf_counter()
     if is_online_inference and provider_feedback is None:
         provider_feedback = _online_speed_limit_feedback(
             sol_q_before_speed_limit=sol_q_before_speed_limit,
@@ -449,13 +472,16 @@ def build_arm_command(
         )
         if provider_feedback is not None:
             sol_q = current_hold_q.copy()
+    arm_cmd_speed_feedback_ms = (time.perf_counter() - arm_cmd_speed_feedback_start) * 1000.0
 
     gravity_start = time.perf_counter()
     sol_tauff = compute_arm_gravity_tauff(arm_ik, sol_q)
     gravity_ms = (time.perf_counter() - gravity_start) * 1000.0
 
+    arm_cmd_hold_update_start = time.perf_counter()
     current_hold_q = np.asarray(sol_q, dtype=float).copy()
     current_hold_tauff = np.asarray(sol_tauff, dtype=float).copy()
+    arm_cmd_hold_update_ms = (time.perf_counter() - arm_cmd_hold_update_start) * 1000.0
 
     return ArmCommandResult(
         sol_q=current_hold_q.copy(),
@@ -466,6 +492,14 @@ def build_arm_command(
         ik_ms=ik_ms,
         safety_ms=safety_ms,
         gravity_ms=gravity_ms,
+        arm_cmd_input_ms=arm_cmd_input_ms,
+        arm_cmd_takeover_reset_ms=arm_cmd_takeover_reset_ms,
+        arm_cmd_target_extra_ms=arm_cmd_target_extra_ms,
+        arm_cmd_feedback_gate_ms=arm_cmd_feedback_gate_ms,
+        arm_cmd_enable_gating_ms=arm_cmd_enable_gating_ms,
+        arm_cmd_takeover_settle_ms=arm_cmd_takeover_settle_ms,
+        arm_cmd_speed_feedback_ms=arm_cmd_speed_feedback_ms,
+        arm_cmd_hold_update_ms=arm_cmd_hold_update_ms,
         sol_q_before_speed_limit=sol_q_before_speed_limit,
         left_arm_enabled=bool(left_arm_enabled),
         right_arm_enabled=bool(right_arm_enabled),

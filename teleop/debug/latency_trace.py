@@ -208,10 +208,24 @@ class SimpleLatencyTracker:
         # Derived breakdown helpers.
         known_pre_publish_keys = [
             "takeover_logic_ms",
+            "end_effector_command_ms",
             "base_control_ms",
+            "arm_cmd_input_ms",
+            "arm_cmd_takeover_reset_ms",
+            "arm_cmd_target_extra_ms",
             "ik_ms",
+            "arm_cmd_feedback_gate_ms",
+            "arm_cmd_enable_gating_ms",
+            "arm_cmd_takeover_settle_ms",
             "safety_ms",
+            "arm_cmd_speed_feedback_ms",
             "gravity_ms",
+            "arm_cmd_hold_update_ms",
+            "operator_sync_ms",
+            "provider_feedback_ms",
+            "latency_trace_prepare_ms",
+            "action_history_append_ms",
+            "ctrl_dual_arm_call_ms",
             "enqueue_to_publish_ms",
         ]
         known_pre_publish = 0.0
