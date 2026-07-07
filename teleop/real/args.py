@@ -76,7 +76,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='JPEG quality for online inference observation images.')
     parser.add_argument('--online-inference-action-step-sec', type=float, default=0.10,
                         help='Nominal server action step duration in seconds.')
-    parser.add_argument('--online-inference-chunk-step-mode', type=str, choices=['timed', 'per_tick'], default='timed',
+    parser.add_argument('--online-inference-chunk-step-mode', type=str, choices=['timed', 'per_tick'], default='per_tick',
                         help='How to advance action steps inside an online inference chunk.')
     parser.add_argument('--online-inference-interp-sec', type=float, default=0.01,
                         help='Nominal server interpolation interval in seconds.')

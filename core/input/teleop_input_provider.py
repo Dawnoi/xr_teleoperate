@@ -144,7 +144,7 @@ def _create_online_inference_provider(args) -> OnlineInferenceInputProvider:
         n_obs_steps=getattr(args, "online_inference_n_obs_steps", 2),
         camera_freq=getattr(args, "online_inference_camera_freq", 30.0),
         action_step_sec=getattr(args, "online_inference_action_step_sec", 0.10),
-        chunk_step_mode=getattr(args, "online_inference_chunk_step_mode", "timed"),
+        chunk_step_mode=getattr(args, "online_inference_chunk_step_mode", "per_tick"),
         interpolation_interval_sec=getattr(args, "online_inference_interp_sec", 0.01),
         post_action_delay_ms=getattr(args, "online_inference_post_action_delay_ms", 75),
         response_timeout_sec=getattr(args, "online_inference_response_timeout_sec", 2.0),

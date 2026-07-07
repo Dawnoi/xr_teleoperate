@@ -38,7 +38,7 @@ class OnlineInferenceConfig:
     n_obs_steps: int = 2
     camera_freq: float = 30.0
     action_step_sec: float = 0.10
-    chunk_step_mode: str = "timed"
+    chunk_step_mode: str = "per_tick"
     interpolation_interval_sec: float = 0.01
     post_action_delay_ms: int = 75
     max_post_action_delay_ms: int = 5000
