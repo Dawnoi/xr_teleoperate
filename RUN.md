@@ -1036,6 +1036,73 @@ G1D 当前链路不要使用：
 
 bash scripts/start/start_real_robot_wired_3cams_zmq.sh     --input-provider online_inference     --online-inference-transport http     --online-inference-base-url http://115.190.134.186:8017     --online-inference-protocol-profile pi05_dual_arm_20d     --online-inference-prompt "pick up the purple octagonal prism with the right hand, hand it over to the left hand, and place it in the bowl."     --online-inference-enable-motion     --online-inference-transform-config configs/inference/unitree_dual_arm_identity_transform.json
 
+## VLA RTC 异步 chunk 调度
+
+RTC 使用独立入口：
+
+```text
+--input-provider online_inference_rtc
+```
+
+该入口只支持：
+
+```text
+--online-inference-transport http
+--online-inference-protocol-profile pi05_dual_arm_20d
+```
+
+它不会回退到普通 `online_inference`。配置不匹配会直接报错，避免用户误以为已经启用 RTC。
+
+dry-run 示例：
+
+```bash
+bash scripts/start/start_real_robot_wired_3cams_zmq.sh \
+  --input-provider online_inference_rtc \
+  --online-inference-transport http \
+  --online-inference-base-url http://127.0.0.1:8017 \
+  --online-inference-protocol-profile pi05_dual_arm_20d \
+  --online-inference-prompt "pick up the cube" \
+  --online-inference-dry-run \
+  --online-inference-rtc-horizon 50 \
+  --online-inference-rtc-s 10 \
+  --online-inference-rtc-d 7
+```
+
+其中 `--online-inference-rtc-d` 是发送给服务端的**预测延迟步数**，不是本地固定接管位置。
+
+真机运动时再加：
+
+```text
+--online-inference-enable-motion
+--online-inference-transform-config configs/inference/unitree_dual_arm_identity_transform.json
+```
+
+调度语义：
+
+```text
+执行旧 chunk
+-> 游标到 s 时异步发送 observation + rtc.old_chunk/s/d
+   这里的 d 是预测延迟步数，用于服务端生成更贴近接管时刻的新 chunk
+-> 继续执行旧 chunk
+-> 收到新 chunk 时按旧 chunk 实际执行游标计算 actual_d = current_old_cursor - s
+-> 从新 chunk[actual_d] 接续执行
+```
+
+日志字段含义：
+
+```text
+online_rtc_predicted_d / online_rtc_predicted_delay_steps
+  发请求时给服务端的预测延迟步数。
+
+online_rtc_actual_d / online_rtc_actual_delay_steps
+  收到响应时由本地旧 chunk 实际执行进度算出的接管步数。
+
+online_rtc_takeover_old_index
+  接管发生前，旧 chunk 下一步将执行的游标。
+```
+
+`horizon/s/d` 必须满足服务端 RTC 模型约束。若服务端返回 chunk shape 不是 `(horizon, 20)`，本地直接报错停止，不做截断或降级。
+
 ## VLA + Dex1 force-hold 额外夹紧
 
 Dex1 force-hold 只处理一种情况：

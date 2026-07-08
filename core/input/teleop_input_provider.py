@@ -5,6 +5,7 @@ from typing import Any
 import logging_mp
 
 from inference.online_session import OnlineInferenceConfig, OnlineInferenceSession
+from inference.rtc_session import AsyncInferenceTransport, OnlineInferenceRTCConfig, OnlineInferenceRTCSession, RTCConfig
 from inference.pose_transform import load_pose_transformer
 from inference.transport import HttpJsonInferenceTransport, TcpJsonTransport
 from core.input.base import (
@@ -30,6 +31,7 @@ from core.input.lerobot_offline import (
     validate_lerobot_offline_episode,
 )
 from core.input.online_inference_provider import OnlineInferenceInputProvider
+from core.input.online_inference_rtc_provider import OnlineInferenceRTCInputProvider
 from core.input.xr_provider import XRTeleopInputProvider
 
 
@@ -176,6 +178,68 @@ def _create_online_inference_provider(args) -> OnlineInferenceInputProvider:
     )
 
 
+def _create_online_inference_rtc_provider(args) -> OnlineInferenceRTCInputProvider:
+    enable_motion = bool(getattr(args, "online_inference_enable_motion", False))
+    dry_run = bool(getattr(args, "online_inference_dry_run", False))
+    protocol_profile = str(getattr(args, "online_inference_protocol_profile", "pi05_dual_arm_20d") or "pi05_dual_arm_20d").strip()
+    transport_kind = str(getattr(args, "online_inference_transport", "http") or "http").strip()
+    if transport_kind not in {"http", "http_json"}:
+        raise ValueError("online_inference_rtc requires HTTP transport")
+    transformer = load_pose_transformer(
+        enable_motion=enable_motion and not dry_run,
+        transform_config_path=getattr(args, "online_inference_transform_config", None),
+        arm_side="both",
+    )
+    config = OnlineInferenceRTCConfig(
+        arm_side=getattr(args, "online_inference_arm_side", "both"),
+        protocol_profile=protocol_profile,
+        task_prompt=getattr(args, "online_inference_prompt", ""),
+        n_obs_steps=getattr(args, "online_inference_n_obs_steps", 2),
+        camera_freq=getattr(args, "online_inference_camera_freq", 30.0),
+        action_step_sec=getattr(args, "online_inference_action_step_sec", 0.10),
+        chunk_step_mode=getattr(args, "online_inference_chunk_step_mode", "per_tick"),
+        interpolation_interval_sec=getattr(args, "online_inference_interp_sec", 0.01),
+        post_action_delay_ms=getattr(args, "online_inference_post_action_delay_ms", 75),
+        response_timeout_sec=getattr(args, "online_inference_response_timeout_sec", 2.0),
+        jpeg_quality=getattr(args, "online_inference_jpeg_quality", 85),
+        enable_motion=enable_motion,
+        dry_run=dry_run,
+    )
+    rtc_config = RTCConfig(
+        horizon=getattr(args, "online_inference_rtc_horizon", 50),
+        request_step_s=getattr(args, "online_inference_rtc_s", 10),
+        predicted_delay_steps_d=getattr(args, "online_inference_rtc_d", 7),
+    )
+    transport = _create_online_inference_transport(args, protocol_profile, transport_kind)
+    if not callable(getattr(transport, "send_json_async", None)):
+        transport = AsyncInferenceTransport(transport)
+    session = OnlineInferenceRTCSession(
+        config=config,
+        rtc_config=rtc_config,
+        transport=transport,
+        pose_transformer=transformer,
+    )
+    logger_mp.info(
+        "Using RTC online inference input provider: transport=%s protocol_profile=%s host=%s port=%s arm_side=%s enable_motion=%s dry_run=%s horizon=%d s=%d d=%d.",
+        transport_kind,
+        config.protocol_profile,
+        getattr(args, "online_inference_host", "127.0.0.1"),
+        getattr(args, "online_inference_port", 5555),
+        config.arm_side,
+        config.enable_motion,
+        config.dry_run,
+        rtc_config.horizon,
+        rtc_config.request_step_s,
+        rtc_config.predicted_delay_steps_d,
+    )
+    return OnlineInferenceRTCInputProvider(
+        session=session,
+        arm_side=config.arm_side,
+        ee=getattr(args, "ee", None),
+        no_gripper=getattr(args, "no_gripper", False),
+    )
+
+
 def create_teleop_input_provider(args, arm_ik=None) -> BaseTeleopInputProvider:
     input_provider = getattr(args, "input_provider", "xr") or "xr"
 
@@ -185,6 +249,8 @@ def create_teleop_input_provider(args, arm_ik=None) -> BaseTeleopInputProvider:
         return _create_lerobot_offline_provider(args, arm_ik=arm_ik)
     if input_provider == "online_inference":
         return _create_online_inference_provider(args)
+    if input_provider == "online_inference_rtc":
+        return _create_online_inference_rtc_provider(args)
 
     raise ValueError(f"unsupported input_provider: {input_provider}")
 
@@ -198,6 +264,7 @@ __all__ = [
     "LeRobotOfflineInputProvider",
     "MotionIntent",
     "OnlineInferenceInputProvider",
+    "OnlineInferenceRTCInputProvider",
     "TeleopInputSample",
     "XRTeleopInputProvider",
     "_build_offline_tele_data",

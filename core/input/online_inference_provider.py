@@ -26,6 +26,7 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
         ee: str | None = None,
         no_gripper: bool = False,
         dex1_max_width_m: float = 0.054,
+        motion_source: str = "online_inference",
     ):
         self.session = session
         self.arm_side = str(arm_side)
@@ -34,6 +35,7 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
         self.ee = ee
         self.no_gripper = bool(no_gripper)
         self.dex1_max_width_m = float(dex1_max_width_m)
+        self.motion_source = str(motion_source)
         self._frame_index = 0
 
         if not self.no_gripper and self.ee != "dex1":
@@ -97,7 +99,7 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
             right_wrist_pose=np.asarray(step.right_pose, dtype=float),
             timestamp=time.time(),
             frame_index=self._frame_index,
-            source="online_inference",
+            source=self.motion_source,
             metadata=metadata,
         )
         self._frame_index += 1

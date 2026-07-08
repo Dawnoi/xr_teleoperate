@@ -40,7 +40,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='"legacy_main" reproduces the original main-branch controller mapping semantics as closely as possible. "anchored_safe" uses the newer grip-anchor based takeover-safe mapping.')
     parser.add_argument('--calibration-mode', type=str, choices=['manual', 'auto'], default='manual',
                         help='Calibration trigger in head_coupled/hybrid mode. "manual" waits for key c after r; "auto" calibrates once live pose data is available. fixed_per_grip/live_head_reference do not require manual calibration.')
-    parser.add_argument('--input-provider', type=str, choices=['xr', 'lerobot_offline', 'online_inference'], default='xr',
+    parser.add_argument('--input-provider', type=str, choices=['xr', 'lerobot_offline', 'online_inference', 'online_inference_rtc'], default='xr',
                         help='Teleop input provider backend: live XR input, offline LeRobot replay, or Pika-style online inference.')
     parser.add_argument('--offline-replay-dataset-root', type=str, default='',
                         help='Dataset root for offline replay provider.')
@@ -92,6 +92,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='Allow online inference provider to enable robot motion when all safety checks pass.')
     parser.add_argument('--online-inference-dry-run', action='store_true',
                         help='Send observations and parse actions without enabling arm motion.')
+    parser.add_argument('--online-inference-rtc-horizon', type=int, default=50,
+                        help='RTC action chunk horizon. Only used by --input-provider online_inference_rtc.')
+    parser.add_argument('--online-inference-rtc-s', type=int, default=10,
+                        help='RTC request step s. Only used by --input-provider online_inference_rtc.')
+    parser.add_argument('--online-inference-rtc-d', type=int, default=7,
+                        help='RTC predicted delay steps d sent to the server. The local takeover cursor is computed from the actual executed old-chunk cursor, not fixed to d.')
     parser.add_argument('--auto-start', action='store_true',
                         help='Enter START state automatically after initialization. Intended for offline replay entrypoints.')
     parser.add_argument('--disable-arm-workspace-limit', action='store_true',
