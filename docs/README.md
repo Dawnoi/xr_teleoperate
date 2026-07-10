@@ -7,3 +7,7 @@
 - `datasets/`：数据集格式、采集、回放、导出说明
 - `refactor/`：重构计划、迁移记录、历史 review
 - `online_inference_*.md`：现有在线推理设计文档，后续可归入 `architecture/` 或 `inference/` 专题
+
+常用运行手册：
+
+- `runbooks/g1d_slam_usage.md`：G1D SLAM HTTP SDK 和真机导航 demo 使用说明

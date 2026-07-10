@@ -48,6 +48,15 @@ from teleop.control_flow.end_effector_command import (
     apply_end_effector_command,
     read_online_gripper_widths,
 )
+from teleop.runtime.provider_switch import ActiveProviderKind, TeleopProviderRuntime
+from teleop.ui.command_bus import UiCommandBus, UiCommandName
+from teleop.ui.integration import (
+    build_runtime_camera_status,
+    build_runtime_web_payload,
+    dispatch_ui_commands,
+)
+from teleop.ui.server import TeleopUiServer
+from teleop.ui.state_store import UiStateStore
 from sshkeyboard import listen_keyboard, stop_listening
 
 # state transition
@@ -97,6 +106,32 @@ def on_press(key):
             operator_runtime.request_home("keyboard")
     else:
         logger_mp.warning(f"[on_press] {key} was pressed, but no action is defined for this key.")
+
+
+PROVIDER_UI_COMMANDS = {
+    UiCommandName.SET_PROVIDER_HOLD,
+    UiCommandName.SET_PROVIDER_XR,
+    UiCommandName.START_RAW_REPLAY,
+    UiCommandName.STOP_RAW_REPLAY,
+}
+
+
+def split_ui_commands(commands):
+    keyboard_commands = []
+    provider_commands = []
+    for command in commands:
+        if command.name in PROVIDER_UI_COMMANDS:
+            provider_commands.append(command)
+        else:
+            keyboard_commands.append(command)
+    return keyboard_commands, provider_commands
+
+
+def recording_is_active_or_armed(record_running, recording_flow):
+    if bool(record_running):
+        return True
+    flow_state = getattr(recording_flow, "state", None)
+    return bool(getattr(flow_state, "waiting_for_first_frame", False))
 
 def reset_arm_ik_state(arm_ik, arm_q):
     arm_q = np.asarray(arm_q, dtype=float).copy()
@@ -152,6 +187,21 @@ def start_keyboard_listener():
     return listen_keyboard_thread
 
 
+def get_camera_frame_by_id(cameras, camera_id: int):
+    camera_name_by_id = {
+        0: "head",
+        1: "left_wrist",
+        2: "right_wrist",
+    }
+    camera_name = camera_name_by_id.get(int(camera_id))
+    if camera_name is None:
+        return None, None
+    source = cameras.sources().get(camera_name) if cameras is not None else None
+    if source is None:
+        return None, None
+    return source.get_latest(copy=True)
+
+
 def cleanup_real_teleop_resources(
     *,
     args,
@@ -162,9 +212,13 @@ def cleanup_real_teleop_resources(
     sim_state_subscriber,
     agv_bridge,
     cameras,
+    ui_server,
     exit_go_home: bool,
     exit_home_hold_sec: float,
 ):
+    if ui_server is not None:
+        ui_server.stop()
+
     try:
         if arm_ctrl is not None:
             if exit_go_home:
@@ -238,6 +292,10 @@ if __name__ == '__main__':
     recording_flow = None
     sim_state_subscriber = None
     agv_bridge = None
+    ui_command_bus = None
+    ui_state_store = None
+    ui_server = None
+    provider_runtime = None
     exit_go_home = True
     exit_home_hold_sec = 5.0
     args = parse_args()
@@ -291,6 +349,7 @@ if __name__ == '__main__':
         arm_ik = components.arm_ik
         arm_ctrl = components.arm_ctrl
         tv_wrapper = components.tv_wrapper
+        provider_runtime = TeleopProviderRuntime(live_provider=tv_wrapper, live_provider_name=args.input_provider)
         gripper_ctrl = components.ee.gripper_ctrl
         loco_wrapper = components.loco_wrapper
         agv_bridge = components.agv_bridge
@@ -298,6 +357,31 @@ if __name__ == '__main__':
         recording_flow = components.recording_flow
         sim_state_subscriber = components.sim_state_subscriber
         latency_tracker = components.latency_tracker
+        if args.ui:
+            ui_command_bus = UiCommandBus()
+            ui_state_store = UiStateStore(
+                build_runtime_web_payload(
+                    args=args,
+                    recorder=recorder,
+                    recording_flow=recording_flow,
+                    record_running=RECORD_RUNNING,
+                    started=START,
+                    ready=READY,
+                    stopping=STOP,
+                    provider_status=provider_runtime.status(),
+                )
+            )
+            ui_server = TeleopUiServer(
+                command_bus=ui_command_bus,
+                state_store=ui_state_store,
+                camera_status_getter=lambda: build_runtime_camera_status(components.cameras),
+                camera_frame_getter=lambda camera_id: get_camera_frame_by_id(components.cameras, camera_id),
+                host=args.ui_host,
+                port=args.ui_port,
+                publish_rate_hz=args.ui_preview_fps,
+            )
+            ui_server.start()
+            logger_mp.info("[UI] web control enabled at http://%s:%d", ui_server.host, ui_server.port)
 
         logger_mp.info("Move arms to home pose before entering teleop wait state...")
         arm_ctrl.ctrl_dual_arm_go_home()
@@ -329,6 +413,31 @@ if __name__ == '__main__':
             START = True
             logger_mp.info("[AUTO_START] entering START state automatically.")
         while not START and not STOP: # wait for start or stop signal.
+            if ui_command_bus is not None:
+                keyboard_commands, provider_commands = split_ui_commands(ui_command_bus.drain())
+                dispatch_ui_commands(keyboard_commands, on_press)
+                for command in provider_commands:
+                    if command.name == UiCommandName.SET_PROVIDER_HOLD:
+                        provider_runtime.set_hold(reason="ui_wait_hold")
+                    elif command.name == UiCommandName.SET_PROVIDER_XR:
+                        provider_runtime.set_live(reason="ui_wait_xr")
+                    elif command.name == UiCommandName.START_RAW_REPLAY:
+                        provider_runtime.fail_raw_replay("teleop is not started; start teleop before real replay")
+                    elif command.name == UiCommandName.STOP_RAW_REPLAY:
+                        provider_runtime.stop_raw_replay(reason="ui_wait_stop")
+            if ui_state_store is not None:
+                ui_state_store.update(
+                    build_runtime_web_payload(
+                        args=args,
+                        recorder=recorder,
+                        recording_flow=recording_flow,
+                        record_running=RECORD_RUNNING,
+                        started=START,
+                        ready=READY,
+                        stopping=STOP,
+                        provider_status=provider_runtime.status(),
+                    )
+                )
             time.sleep(0.033)
 
         logger_mp.info("---------------------🚀start Tracking🚀-------------------------")
@@ -358,6 +467,12 @@ if __name__ == '__main__':
         # main loop. robot start to follow VR user's motion
         while not STOP:
             start_time = time.time()
+            ui_provider_commands = []
+            if ui_command_bus is not None:
+                keyboard_commands, ui_provider_commands = split_ui_commands(ui_command_bus.drain())
+                dispatch_ui_commands(keyboard_commands, on_press)
+                if STOP:
+                    break
 
             # record mode
             if recording_flow is not None:
@@ -417,6 +532,21 @@ if __name__ == '__main__':
                 q=current_lr_arm_q.copy(),
                 dq=current_lr_arm_dq.copy(),
             )
+            if ui_state_store is not None:
+                ui_state_store.update(
+                    build_runtime_web_payload(
+                        args=args,
+                        recorder=recorder,
+                        recording_flow=recording_flow,
+                        record_running=RECORD_RUNNING,
+                        current_lr_arm_q=current_lr_arm_q,
+                        current_state_sample_ns=current_state_sample_ns,
+                        started=START,
+                        ready=READY,
+                        stopping=STOP,
+                        provider_status=provider_runtime.status(),
+                    )
+                )
             if latency_tracker is not None:
                 latency_tracker.maybe_timeout()
                 latency_tracker.maybe_mark_execute(
@@ -434,9 +564,76 @@ if __name__ == '__main__':
             )
             camera_sources = components.cameras.sources()
 
-            # get xr's tele data
+            for command in ui_provider_commands:
+                payload = command.payload or {}
+                if command.name == UiCommandName.SET_PROVIDER_HOLD:
+                    current_hold_q = current_lr_arm_q.copy()
+                    current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
+                    home_return_active = False
+                    post_home_takeover_armed = False
+                    provider_runtime.set_hold(reason=str(payload.get("reason", "ui_hold")))
+                    logger_mp.info("[UI_PROVIDER] switched to HOLD.")
+                elif command.name == UiCommandName.SET_PROVIDER_XR:
+                    home_return_active = False
+                    post_home_takeover_armed = False
+                    provider_runtime.set_live(reason=str(payload.get("reason", "ui_xr")))
+                    operator_state_flow = OperatorStateFlow(
+                        takeover_settle_frames=TAKEOVER_SETTLE_FRAMES,
+                        log=logger_mp,
+                    )
+                    logger_mp.info("[UI_PROVIDER] switched to XR live.")
+                elif command.name == UiCommandName.START_RAW_REPLAY:
+                    if recording_is_active_or_armed(RECORD_RUNNING, recording_flow):
+                        provider_runtime.fail_raw_replay("recording is active or armed; stop/cancel recording before real replay")
+                        logger_mp.error("[UI_REPLAY] rejected: recording is active or armed.")
+                    else:
+                        current_hold_q = current_lr_arm_q.copy()
+                        current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
+                        home_return_active = False
+                        post_home_takeover_armed = False
+                        if provider_runtime.active_provider_kind != ActiveProviderKind.HOLD:
+                            provider_runtime.set_hold(reason="raw_replay_start_sync_hold")
+                        provider_runtime.start_raw_replay(
+                            dataset_root=str(payload.get("dataset_root", "")),
+                            episode_index=int(payload.get("episode_index", -1)),
+                            episode_name=str(payload.get("episode_name", "")),
+                            arm_source=str(payload.get("arm_source", "action")),
+                            speed_scale=float(payload.get("speed_scale", 1.0)),
+                        )
+                        operator_state_flow = OperatorStateFlow(
+                            takeover_settle_frames=0,
+                            log=logger_mp,
+                        )
+                        logger_mp.info(
+                            "[UI_REPLAY] started raw replay: root=%s episode=%s arm_source=%s speed_scale=%.3f",
+                            payload.get("dataset_root", ""),
+                            payload.get("episode_name", ""),
+                            payload.get("arm_source", "action"),
+                            float(payload.get("speed_scale", 1.0)),
+                        )
+                elif command.name == UiCommandName.STOP_RAW_REPLAY:
+                    current_hold_q = current_lr_arm_q.copy()
+                    current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
+                    home_return_active = False
+                    post_home_takeover_armed = False
+                    provider_runtime.stop_raw_replay(reason=str(payload.get("reason", "ui_stop")))
+                    logger_mp.info("[UI_REPLAY] stopped raw replay -> HOLD.")
+
+            if provider_runtime.active_provider_kind == ActiveProviderKind.HOLD:
+                arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
+                current_time = time.time()
+                time_elapsed = current_time - start_time
+                sleep_time = max(0, (1 / args.frequency) - time_elapsed)
+                time.sleep(sleep_time)
+                continue
+
+            active_provider = provider_runtime.active_provider()
+            active_input_provider = provider_runtime.active_input_provider_name()
+            is_ui_raw_replay = provider_runtime.active_provider_kind == ActiveProviderKind.RAW_REPLAY
+
+            # get active provider tele data
             tele_fetch_start = time.perf_counter()
-            sample = tv_wrapper.get_sample(
+            sample = active_provider.get_sample(
                 current_left_robot_wrist_pose=current_left_wrist_pose,
                 current_right_robot_wrist_pose=current_right_wrist_pose,
                 current_state_host_monotonic_ns=current_state_sample_ns,
@@ -450,8 +647,19 @@ if __name__ == '__main__':
             tele_fetch_dt = time.perf_counter() - tele_fetch_start
             timing_debugger.add_tele_fetch(tele_fetch_dt, sample is not None)
             if sample is None:
-                if bool(getattr(tv_wrapper, "done", False)):
-                    if args.input_provider == "lerobot_offline":
+                if is_ui_raw_replay:
+                    provider_runtime.finish_raw_replay(reason="provider_done")
+                    current_hold_q = current_lr_arm_q.copy()
+                    current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
+                    arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
+                    logger_mp.info("[UI_REPLAY] raw replay provider finished -> HOLD.")
+                    current_time = time.time()
+                    time_elapsed = current_time - start_time
+                    sleep_time = max(0, (1 / args.frequency) - time_elapsed)
+                    time.sleep(sleep_time)
+                    continue
+                if bool(getattr(active_provider, "done", False)):
+                    if active_input_provider == "lerobot_offline":
                         exit_go_home = args.offline_replay_end_action == "home"
                         logger_mp.info(
                             "[OFFLINE_REPLAY] input provider finished. end_action=%s, stopping main loop.",
@@ -463,9 +671,10 @@ if __name__ == '__main__':
                 timing_debugger.maybe_report(arm_ctrl=arm_ctrl, gripper_ctrl=gripper_ctrl)
                 time.sleep(0.01)
                 continue
+            provider_runtime.note_sample(sample)
             tele_data = sample.tele_data
             motion_intent = sample.motion_intent
-            if args.input_provider == "online_inference" and bool(getattr(sample, "done", False)):
+            if active_input_provider == "online_inference" and bool(getattr(sample, "done", False)):
                 metadata = getattr(motion_intent, "metadata", {}) or {}
                 logger_mp.error(
                     "[ONLINE_INFERENCE] provider entered fail-closed state: status=%s error=%s",
@@ -478,34 +687,48 @@ if __name__ == '__main__':
             tele_data_recv_ts_ns = time.perf_counter_ns()
             tele_fetch_ms = tele_fetch_dt * 1000.0
 
-            operator_state = operator_state_flow.apply(
-                args=args,
-                operator_runtime=operator_runtime,
-                tele_data=tele_data,
-                started=bool(START),
-                on_press=on_press,
-                motion_intent=motion_intent,
-                home_return_active=home_return_active,
-                normalized_head_mode=normalized_head_mode,
-                tv_wrapper=tv_wrapper,
-                arm_ik=arm_ik,
-                current_hold_q=current_hold_q,
-                reset_arm_ik_state=reset_arm_ik_state,
-                timer=time.perf_counter,
-            )
-            tele_data = operator_state.tele_data
-            left_arm_enabled = operator_state.left_arm_enabled
-            right_arm_enabled = operator_state.right_arm_enabled
-            home_return_active = operator_state.home_return_active
-            post_home_takeover_armed = operator_state.post_home_takeover_armed or post_home_takeover_armed
-            left_takeover_settle_frames = operator_state.left_takeover_settle_frames
-            right_takeover_settle_frames = operator_state.right_takeover_settle_frames
-            left_takeover_rising_edge = operator_state.left_takeover_rising_edge
-            right_takeover_rising_edge = operator_state.right_takeover_rising_edge
-            left_zero_takeover_this_frame = operator_state.left_zero_takeover_this_frame
-            right_zero_takeover_this_frame = operator_state.right_zero_takeover_this_frame
-            any_zero_takeover_this_frame = operator_state.any_zero_takeover_this_frame
-            takeover_logic_ms = operator_state.takeover_logic_ms
+            if is_ui_raw_replay:
+                left_arm_enabled = True
+                right_arm_enabled = True
+                home_return_active = False
+                post_home_takeover_armed = False
+                left_takeover_settle_frames = 0
+                right_takeover_settle_frames = 0
+                left_takeover_rising_edge = False
+                right_takeover_rising_edge = False
+                left_zero_takeover_this_frame = False
+                right_zero_takeover_this_frame = False
+                any_zero_takeover_this_frame = False
+                takeover_logic_ms = 0.0
+            else:
+                operator_state = operator_state_flow.apply(
+                    args=args,
+                    operator_runtime=operator_runtime,
+                    tele_data=tele_data,
+                    started=bool(START),
+                    on_press=on_press,
+                    motion_intent=motion_intent,
+                    home_return_active=home_return_active,
+                    normalized_head_mode=normalized_head_mode,
+                    tv_wrapper=tv_wrapper,
+                    arm_ik=arm_ik,
+                    current_hold_q=current_hold_q,
+                    reset_arm_ik_state=reset_arm_ik_state,
+                    timer=time.perf_counter,
+                )
+                tele_data = operator_state.tele_data
+                left_arm_enabled = operator_state.left_arm_enabled
+                right_arm_enabled = operator_state.right_arm_enabled
+                home_return_active = operator_state.home_return_active
+                post_home_takeover_armed = operator_state.post_home_takeover_armed or post_home_takeover_armed
+                left_takeover_settle_frames = operator_state.left_takeover_settle_frames
+                right_takeover_settle_frames = operator_state.right_takeover_settle_frames
+                left_takeover_rising_edge = operator_state.left_takeover_rising_edge
+                right_takeover_rising_edge = operator_state.right_takeover_rising_edge
+                left_zero_takeover_this_frame = operator_state.left_zero_takeover_this_frame
+                right_zero_takeover_this_frame = operator_state.right_zero_takeover_this_frame
+                any_zero_takeover_this_frame = operator_state.any_zero_takeover_this_frame
+                takeover_logic_ms = operator_state.takeover_logic_ms
 
             end_effector_start = time.perf_counter()
             apply_end_effector_command(
@@ -565,7 +788,7 @@ if __name__ == '__main__':
                     home_return_active=home_return_active,
                     home_target_q=home_target_q,
                     control_dt=control_dt,
-                    input_provider=args.input_provider,
+                    input_provider=active_input_provider,
                     frequency=args.frequency,
                     max_arm_joint_speed=args.max_arm_joint_speed,
                     home_return_speed=args.home_return_speed,
@@ -615,7 +838,7 @@ if __name__ == '__main__':
             operator_sync_ms = (time.perf_counter() - operator_sync_start) * 1000.0
 
             provider_feedback_ms = 0.0
-            if args.input_provider == "online_inference" and provider_feedback is not None:
+            if active_input_provider == "online_inference" and provider_feedback is not None:
                 provider_feedback_start = time.perf_counter()
                 report_feedback = getattr(tv_wrapper, "report_control_feedback", None)
                 if callable(report_feedback):
@@ -628,7 +851,7 @@ if __name__ == '__main__':
                 max_command_delta = float(np.max(np.abs(sol_q - current_lr_arm_q)))
                 if max_command_delta >= args.latency_command_threshold:
                     online_trace_extra = {}
-                    if args.input_provider == "online_inference" and motion_intent is not None:
+                    if active_input_provider == "online_inference" and motion_intent is not None:
                         online_trace_extra = {
                             key: value
                             for key, value in (getattr(motion_intent, "metadata", {}) or {}).items()
@@ -701,6 +924,11 @@ if __name__ == '__main__':
             ctrl_dual_arm_call_ms = (time.perf_counter() - ctrl_dual_arm_start) * 1000.0
             if trace_seq is not None:
                 latency_tracker.set_fields(trace_seq, ctrl_dual_arm_call_ms=ctrl_dual_arm_call_ms)
+            if is_ui_raw_replay and bool(getattr(sample, "done", False)):
+                current_hold_q = sol_q.copy()
+                current_hold_tauff = sol_tauff.copy()
+                provider_runtime.finish_raw_replay(reason="sample_done")
+                logger_mp.info("[UI_REPLAY] raw replay reached final frame -> HOLD.")
             if home_return_active and np.all(np.abs(sol_q - home_target_q) < 0.05):
                 home_return_active = False
                 calibration_hold_q = current_hold_q.copy()
@@ -721,6 +949,21 @@ if __name__ == '__main__':
                 )
                 RECORD_RUNNING = frame_recording.record_running
                 READY = frame_recording.ready
+                if ui_state_store is not None:
+                    ui_state_store.update(
+                        build_runtime_web_payload(
+                            args=args,
+                            recorder=recorder,
+                            recording_flow=recording_flow,
+                            record_running=RECORD_RUNNING,
+                            current_lr_arm_q=current_lr_arm_q,
+                            current_state_sample_ns=current_state_sample_ns,
+                            started=START,
+                            ready=READY,
+                            stopping=STOP,
+                            provider_status=provider_runtime.status(),
+                        )
+                    )
                 if frame_recording.should_continue_frame:
                     continue
 
@@ -747,6 +990,7 @@ if __name__ == '__main__':
             sim_state_subscriber=sim_state_subscriber or components.sim_state_subscriber,
             agv_bridge=agv_bridge or components.agv_bridge,
             cameras=components.cameras.close_list(),
+            ui_server=ui_server,
             exit_go_home=exit_go_home,
             exit_home_hold_sec=exit_home_hold_sec,
         )

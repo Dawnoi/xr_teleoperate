@@ -128,6 +128,20 @@ python teleop/real/teleop_hand_and_arm.py \
 - `--record-arm-repr pose`：只录左右腕位姿
 - `--record-arm-repr both`：同时录关节角和左右腕位姿
 
+可选 Web UI 参数：
+
+- `--ui`：启动本机 Web UI 控制面
+- `--ui-host`：UI 监听地址，默认 `127.0.0.1`
+- `--ui-port`：UI 监听端口，默认 `8085`
+- `--ui-preview-fps`：UI 状态推送和预览刷新上限，默认 `5.0`
+
+UI 的边界：
+
+- UI 不新建 ROS 节点，不另开机器人控制链路。
+- UI 按钮只投递 `start / stop / home / recenter / recording` 意图，真正执行仍在 `teleop/real/teleop_hand_and_arm.py` 主循环里复用原有按键逻辑。
+- UI 不启动、不停止相机；相机仍由 `--head-camera-id` / `--head-zmq-endpoint` 等启动参数决定。
+- UI 预览只读取当前相机 source 的 latest frame，不参与 episode 写盘，不改变录制对齐。
+
 示例（假设本地三路相机分别是 `/dev/video0 /dev/video2 /dev/video4`）：
 
 ```bash
@@ -171,6 +185,39 @@ python teleop/real/teleop_hand_and_arm.py \
     --camera-fps 30 \
     --camera-fourcc MJPG \
     --camera-buffer-size 1
+```
+
+带 Web UI 的录制示例：
+
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
+python teleop/real/teleop_hand_and_arm.py \
+    --input-mode controller \
+    --arm G1_29 \
+    --ee dex1 \
+    --network-interface eno1 \
+    --base-controller g1d_agv \
+    --controller-deadman grip \
+    --head-reference-mode fixed_per_grip \
+    --controller-mapping-mode anchored_safe \
+    --controller-orientation-mode relative \
+    --record \
+    --headless \
+    --task-dir ./utils/data \
+    --task-name pick_cube \
+    --head-camera-id 0 \
+    --left-camera-id 2 \
+    --right-camera-id 4 \
+    --ui \
+    --ui-host 0.0.0.0 \
+    --ui-port 8085
+```
+
+启动后浏览器打开：
+
+```text
+http://<robot-host-ip>:8085
 ```
 
 ### 1.0.1 远端单路 ZED 数采（推荐：取 LEFT 作为 RGB）

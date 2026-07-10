@@ -136,6 +136,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='Timeout in seconds for one latency trace sample.')
     parser.add_argument('--latency-summary-every', type=int, default=10,
                         help='Print percentile summary every N completed/timeout latency samples.')
+    parser.add_argument('--ui', action='store_true',
+                        help='Enable optional local web UI control server. Commands are queued into the existing teleop control loop. Also enables --headless to avoid starting the Rerun live viewer.')
+    parser.add_argument('--ui-host', type=str, default='127.0.0.1',
+                        help='Bind host for the optional web UI server.')
+    parser.add_argument('--ui-port', type=int, default=8085,
+                        help='Bind port for the optional web UI server.')
+    parser.add_argument('--ui-preview-fps', type=float, default=5.0,
+                        help='Maximum state publish rate for the optional web UI event stream.')
     # mode flags
     parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
@@ -168,4 +176,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def parse_args(argv=None):
-    return build_arg_parser().parse_args(argv)
+    args = build_arg_parser().parse_args(argv)
+    if args.ui:
+        args.headless = True
+    return args
