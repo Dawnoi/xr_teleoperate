@@ -242,6 +242,8 @@ observation.fk.cmd.right.gripper_flange
 [x, y, z, roll, pitch, yaw]
 ```
 
+FK 列仅在导出时显式启用 `export_fk=1` 时写入。该模式使用指定的 G1D URDF，未录制的底盘、升降和躯干自由度固定为模型中立位，因此输出坐标相对 G1D 机身参考构型，不是世界坐标。
+
 图像引用列：
 
 - `observation.images.cam0`: struct，包含 `{path: string, timestamp: double}`

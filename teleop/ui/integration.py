@@ -118,7 +118,7 @@ def build_runtime_web_payload(
         ),
         active_root_dir=str(Path(str(args.task_dir)) / str(args.task_name)),
         playback_status={"state": "disabled", "error": "playback is not implemented in xr_teleoperate UI"},
-        convert_status={"state": "disabled", "error": "convert is not implemented in xr_teleoperate UI"},
+        convert_status={"ok": True, "state": "idle", "phase": "idle", "running": False, "message": "ready: LeRobot v2 raw exporter is available"},
         provider_status=provider_status,
         teleop_status={
             "started": bool(started),

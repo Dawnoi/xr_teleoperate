@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from data_pipeline.recording.lerobot_v2_writer import CAMERA_SLOTS, CHUNK_NAME, LeRobotV2Writer
+from data_pipeline.export.g1d_fk import G1DArmFkProvider
 
 
 SLOT_TO_RAW_CAMERA_KEY = {
@@ -62,12 +63,6 @@ def finite_vector(values: Any, expected_len: int, label: str) -> np.ndarray:
     if not np.all(np.isfinite(arr)):
         raise ValueError(f"{label} contains NaN or Inf")
     return arr.copy()
-
-
-def create_arm_ik():
-    from teleop.robot_control.robot_arm_ik import G1_29_ArmIK
-
-    return G1_29_ArmIK()
 
 
 def load_raw_episode_data(episode_dir: Path) -> List[Dict[str, Any]]:
@@ -420,13 +415,20 @@ def count_jsonl_rows(path: Path) -> int:
     return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
 
 
-def verify_exported_episode(output_root: Path, episode_index: int, expected_rows: int, pose_sidecar: bool) -> Dict[str, Any]:
+def verify_exported_episode(
+    output_root: Path,
+    episode_index: int,
+    expected_rows: int,
+    pose_sidecar: bool,
+    export_fk: bool = False,
+) -> Dict[str, Any]:
     return verify_exported_episode_with_options(
         output_root,
         episode_index,
         expected_rows,
         pose_sidecar,
         verify_video_frames=True,
+        export_fk=export_fk,
     )
 
 
@@ -436,6 +438,7 @@ def verify_exported_episode_with_options(
     expected_rows: int,
     pose_sidecar: bool,
     verify_video_frames: bool,
+    export_fk: bool,
 ) -> Dict[str, Any]:
     parquet_path = output_root / "data" / CHUNK_NAME / f"episode_{episode_index:06d}.parquet"
     if not parquet_path.is_file():
@@ -450,6 +453,16 @@ def verify_exported_episode_with_options(
         finite_vector(values, 16, f"parquet observation.state[{row_index}]")
     for row_index, values in enumerate(rows["action"]):
         finite_vector(values, 16, f"parquet action[{row_index}]")
+
+    fk_columns = [name for name in table.column_names if name.startswith("observation.fk.")]
+    if export_fk:
+        if len(fk_columns) != 32:
+            raise RuntimeError(f"FK column count mismatch: {len(fk_columns)} != 32")
+        for column_name in fk_columns:
+            for row_index, values in enumerate(rows[column_name]):
+                finite_vector(values, 6, f"parquet {column_name}[{row_index}]")
+    elif fk_columns:
+        raise RuntimeError("FK columns present while export_fk=0")
 
     video_counts: Dict[str, int] = {}
     for slot in CAMERA_SLOTS:
@@ -483,6 +496,7 @@ def verify_exported_episode_with_options(
         "video_frames": video_counts,
         "alignment_rows": alignment_rows,
         "raw_pose_rows": pose_rows,
+        "export_fk": bool(export_fk),
     }
 
 
@@ -581,6 +595,7 @@ def export_raw_episode(
     frame_progress_every: int = 0,
     verify_export: bool = True,
     verify_video_frames: bool = False,
+    export_fk: bool = False,
 ) -> Dict[str, Any]:
     if not writer.create_episode():
         raise RuntimeError("LeRobotV2Writer refused to create a new episode")
@@ -653,6 +668,7 @@ def export_raw_episode(
             frame_count,
             pose_sidecar,
             verify_video_frames=verify_video_frames,
+            export_fk=export_fk,
         )
 
     return {
@@ -692,6 +708,8 @@ def export_raw_task_dir(
     strict_image_validate: bool = False,
     verify_export: bool = True,
     verify_video_frames: bool = False,
+    export_fk: bool = False,
+    urdf_path: str | Path | None = None,
 ) -> Dict[str, Any]:
     input_task_dir = Path(input_task_dir).resolve()
     output_root = Path(output_root).resolve()
@@ -736,14 +754,21 @@ def export_raw_task_dir(
         if report_episode:
             print_progress(f"{label} precheck done")
 
+    fk_provider = None
+    resolved_urdf_path = None
+    if export_fk:
+        if urdf_path is None or not str(urdf_path).strip():
+            raise ValueError("urdf_path is required when export_fk=1")
+        resolved_urdf_path = Path(urdf_path).expanduser().resolve()
+        fk_provider = G1DArmFkProvider(resolved_urdf_path)
+
     print_progress(f"preparing output root {output_root}")
     prepare_output_root(input_task_dir, output_root, overwrite)
 
     print_progress("initializing LeRobot writer")
-    arm_ik = create_arm_ik()
     writer = LeRobotV2Writer(
         task_dir=str(output_root),
-        arm_ik=arm_ik,
+        fk_provider=fk_provider,
         task_goal=task_text,
         frequency=frequency,
         rerun_log=False,
@@ -771,6 +796,7 @@ def export_raw_task_dir(
                 frame_progress_every=frame_progress_every,
                 verify_export=bool(verify_export),
                 verify_video_frames=bool(verify_video_frames),
+                export_fk=bool(export_fk),
             )
         )
         if report_episode:
@@ -785,6 +811,8 @@ def export_raw_task_dir(
         "strict_image_validate": bool(strict_image_validate),
         "verify_export": bool(verify_export),
         "verify_video_frames": bool(verify_video_frames),
+        "export_fk": bool(export_fk),
+        "urdf_path": str(resolved_urdf_path) if resolved_urdf_path is not None else "",
         "episodes_total": len(episode_dirs),
         "episodes_exported": len(episode_summaries),
         "frames_total": int(sum(item["frame_count"] for item in episode_summaries)),
@@ -830,6 +858,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="0",
         help="Decode exported mp4 files to count frames after writing. Default 0.",
     )
+    parser.add_argument("--export-fk", default="0", help="Export G1D FK columns as xyz+rpy. Default 0.")
+    parser.add_argument("--urdf-path", type=Path, help="G1D URDF required when --export-fk=1.")
     return parser
 
 
@@ -846,6 +876,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         strict_image_validate=parse_bool_flag(args.strict_image_validate, "--strict-image-validate"),
         verify_export=parse_bool_flag(args.verify_export, "--verify-export"),
         verify_video_frames=parse_bool_flag(args.verify_video_frames, "--verify-video-frames"),
+        export_fk=parse_bool_flag(args.export_fk, "--export-fk"),
+        urdf_path=args.urdf_path,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

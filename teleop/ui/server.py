@@ -13,6 +13,7 @@ import cv2
 
 from teleop.ui.command_bus import UiCommandBus, UiCommandName
 from teleop.ui.episode_store import PlaybackSession, latest_episode_summary, list_episodes
+from teleop.ui.exporter import DEFAULT_UI_URDF_PATH, UiExportManager, UiExportRequest
 from teleop.ui.state_store import UiStateStore
 
 
@@ -27,6 +28,7 @@ class TeleopUiServer:
         camera_status_getter: Callable[[], dict[str, Any]] | None = None,
         camera_frame_getter: Callable[[int], tuple[Any, dict[str, Any] | None]] | None = None,
         web_root: str | Path | None = None,
+        convert_manager: UiExportManager | None = None,
         host: str = "127.0.0.1",
         port: int = 8085,
         publish_rate_hz: float = 5.0,
@@ -36,6 +38,7 @@ class TeleopUiServer:
         self.camera_status_getter = camera_status_getter if camera_status_getter is not None else self._empty_camera_status
         self.camera_frame_getter = camera_frame_getter if camera_frame_getter is not None else self._empty_camera_frame
         self.web_root = Path(web_root) if web_root is not None else Path(__file__).resolve().parent / "web"
+        self.convert_manager = convert_manager if convert_manager is not None else UiExportManager()
         self.host = str(host)
         self.port = int(port)
         self.publish_rate_hz = float(publish_rate_hz)
@@ -169,6 +172,19 @@ class TeleopUiServer:
                     owner.command_bus.submit(UiCommandName.STOP_RAW_REPLAY, payload={"reason": "ui_stop"})
                     owner._json_ok(self, {"ok": True, "queued": True, "command": UiCommandName.STOP_RAW_REPLAY.value})
                     return
+                if path == "/inference/status":
+                    owner._json_ok(self, owner._inference_status())
+                    return
+                if path == "/inference/start":
+                    owner._handle_inference_start(self, parsed.query)
+                    return
+                if path == "/inference/stop":
+                    command = owner.command_bus.submit(
+                        UiCommandName.STOP_ONLINE_INFERENCE,
+                        payload={"reason": "ui_stop"},
+                    )
+                    owner._json_ok(self, {"ok": True, "queued": True, "command": command.name.value})
+                    return
                 if path == "/recording/set_root_dir":
                     owner._json_ok(self, {"ok": True, "root_dir": ""})
                     return
@@ -176,7 +192,10 @@ class TeleopUiServer:
                     owner._json_ok(self, {"ok": True, "fps": 0.0})
                     return
                 if path == "/convert/status":
-                    owner._json_ok(self, {"state": "disabled", "error": "convert is not implemented in xr_teleoperate UI"})
+                    owner._json_ok(self, owner.convert_manager.status())
+                    return
+                if path == "/convert/start":
+                    owner._handle_convert_start(self, parsed.query)
                     return
                 if owner._unsupported_reference_route(path):
                     owner._json_ok(
@@ -349,6 +368,68 @@ class TeleopUiServer:
         )
         self._json_ok(handler, {"ok": True, "queued": True, "command": command.name.value})
 
+    def _handle_inference_start(self, handler: BaseHTTPRequestHandler, query: str) -> None:
+        rejection = self._inference_start_rejection()
+        if rejection:
+            self._json_ok(handler, {"ok": False, "error": rejection}, status=400)
+            return
+        params = parse_qs(query)
+        prompt = self._first_query_value(params, "prompt")
+        if not prompt:
+            self._json_ok(handler, {"ok": False, "error": "inference prompt is required"}, status=400)
+            return
+        command = self.command_bus.submit(
+            UiCommandName.START_ONLINE_INFERENCE,
+            payload={"prompt": str(prompt)},
+        )
+        self._json_ok(handler, {"ok": True, "queued": True, "command": command.name.value})
+
+    def _handle_convert_start(self, handler: BaseHTTPRequestHandler, query: str) -> None:
+        params = parse_qs(query)
+        export_video, video_error = self._bool_query(params, "export_video", False)
+        export_fk, fk_error = self._bool_query(params, "export_fk", False)
+        export_verify, verify_error = self._bool_query(params, "export_verify", True)
+        bool_error = video_error or fk_error or verify_error
+        if bool_error:
+            self._json_ok(handler, {"ok": False, "error": bool_error}, status=400)
+            return
+
+        fps, fps_error = self._positive_float_query(params, "fps", self._default_fps())
+        if fps_error:
+            self._json_ok(handler, {"ok": False, "error": fps_error}, status=400)
+            return
+
+        source_root_text = self._first_query_value(params, "source_root") or self._default_episode_root()
+        output_root_text = self._first_query_value(params, "output_root")
+        dataset_name = self._first_query_value(params, "dataset_name")
+        task_text = self._first_query_value(params, "default_task") or self._first_query_value(params, "task")
+        if not str(output_root_text).strip():
+            self._json_ok(handler, {"ok": False, "error": "output_root is required"}, status=400)
+            return
+        if not str(dataset_name).strip():
+            self._json_ok(handler, {"ok": False, "error": "dataset_name is required"}, status=400)
+            return
+        if not str(task_text).strip():
+            self._json_ok(handler, {"ok": False, "error": "default_task is required"}, status=400)
+            return
+
+        request = UiExportRequest(
+            source_root=Path(source_root_text),
+            output_root=Path(output_root_text),
+            dataset_name=dataset_name,
+            task=task_text,
+            fps=fps,
+            format_version=self._first_query_value(params, "format_version") or "v2",
+            export_mode=self._first_query_value(params, "export_mode") or "new",
+            export_video=export_video,
+            export_fk=export_fk,
+            export_verify=export_verify,
+            selected_episodes=tuple(str(value).strip() for value in params.get("episode", []) if str(value).strip()),
+            urdf_path=self._first_query_value(params, "urdf_path") or DEFAULT_UI_URDF_PATH,
+        )
+        result = self.convert_manager.start(request)
+        self._json_ok(handler, result, status=200 if result.get("ok") else 400)
+
     def _real_replay_start_rejection(self) -> str:
         recording_rejection = self._provider_hold_rejection()
         if recording_rejection:
@@ -360,6 +441,16 @@ class TeleopUiServer:
         provider = snapshot.get("provider", {})
         if isinstance(provider, dict) and str(provider.get("active_provider", "")) not in {"hold", "raw_replay"}:
             return "real replay requires active provider hold"
+        return ""
+
+    def _inference_start_rejection(self) -> str:
+        recording_rejection = self._provider_hold_rejection()
+        if recording_rejection:
+            return recording_rejection
+        _, snapshot = self.state_store.snapshot()
+        provider = snapshot.get("provider", {})
+        if isinstance(provider, dict) and str(provider.get("active_provider", "")) != "hold":
+            return "online inference requires active provider hold"
         return ""
 
     def _provider_hold_rejection(self) -> str:
@@ -379,6 +470,16 @@ class TeleopUiServer:
         if not isinstance(provider, dict):
             provider = {"active_provider": "unknown", "real_replay": {"state": "disabled"}}
         return {"ok": True, "provider": provider}
+
+    def _inference_status(self) -> dict[str, Any]:
+        _, snapshot = self.state_store.snapshot()
+        provider = snapshot.get("provider", {})
+        if not isinstance(provider, dict):
+            provider = {"active_provider": "unknown"}
+        online_inference = provider.get("online_inference", {})
+        if not isinstance(online_inference, dict):
+            online_inference = {"state": "disabled", "error": "missing online inference status"}
+        return {"ok": True, "provider": provider, "online_inference": online_inference}
 
     @staticmethod
     def _episode_index_from_name(episode_name: str) -> tuple[int, str]:
@@ -408,7 +509,7 @@ class TeleopUiServer:
     @staticmethod
     def _unsupported_reference_route(path: str) -> bool:
         return (
-            path in {"/camera/start", "/camera/stop", "/convert/start"}
+            path in {"/camera/start", "/camera/stop"}
             or path in {"/recording/delete_episodes"}
         )
 
@@ -421,6 +522,27 @@ class TeleopUiServer:
         _, snapshot = self.state_store.snapshot()
         recording = snapshot.get("recording", {})
         return bool(recording.get("enabled", True)) if isinstance(recording, dict) else True
+
+    def _default_fps(self) -> float:
+        _, snapshot = self.state_store.snapshot()
+        recording = snapshot.get("recording", {})
+        if not isinstance(recording, dict):
+            return 30.0
+        fps = recording.get("fps", 0.0)
+        if isinstance(fps, (int, float)) and float(fps) > 0.0:
+            return float(fps)
+        return 30.0
+
+    def _bool_query(self, params: dict[str, list[str]], name: str, default: bool) -> tuple[bool, str]:
+        text = self._first_query_value(params, name)
+        if not text:
+            return bool(default), ""
+        value = str(text).strip().lower()
+        if value in {"1", "true", "yes", "y", "on"}:
+            return True, ""
+        if value in {"0", "false", "no", "n", "off"}:
+            return False, ""
+        return bool(default), f"{name} must be boolean 0/1/true/false/yes/no/on/off"
 
     @staticmethod
     def _first_query_value(params: dict[str, list[str]], name: str) -> str:

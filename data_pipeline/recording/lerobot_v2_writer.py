@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-import pinocchio as pin
 import pyarrow as pa
 import pyarrow.parquet as pq
 
@@ -157,13 +156,17 @@ def _json_safe_value(value: Any) -> Any:
     return value
 
 
-def _pose6_from_se3(se3: pin.SE3) -> List[float]:
-    translation = np.asarray(se3.translation, dtype=float).reshape(3)
-    rpy = np.asarray(pin.rpy.matrixToRpy(np.asarray(se3.rotation, dtype=float)), dtype=float).reshape(3)
-    return [float(translation[0]), float(translation[1]), float(translation[2]), float(rpy[0]), float(rpy[1]), float(rpy[2])]
+def _fk_feature_keys() -> List[str]:
+    keys = []
+    for group in ARM_GROUPS:
+        for side in SIDE_GROUPS:
+            for label in ARM_JOINT_LABELS:
+                keys.append(f"observation.fk.{group}.{side}.{label}")
+            keys.append(f"observation.fk.{group}.{side}.gripper_flange")
+    return keys
 
 
-def _make_feature_spec() -> Dict[str, Dict[str, Any]]:
+def _make_feature_spec(export_fk: bool) -> Dict[str, Dict[str, Any]]:
     features: Dict[str, Dict[str, Any]] = OrderedDict()
     features["timestamp"] = {"dtype": "float64", "shape": []}
     features["frame_index"] = {"dtype": "int64", "shape": []}
@@ -173,12 +176,8 @@ def _make_feature_spec() -> Dict[str, Dict[str, Any]]:
     features["observation.state"] = {"dtype": "list<float64>", "length": STATE_VECTOR_SIZE}
     features["action"] = {"dtype": "list<float64>", "length": STATE_VECTOR_SIZE}
 
-    for group in ARM_GROUPS:
-        for side in SIDE_GROUPS:
-            for label in ARM_JOINT_LABELS:
-                key = f"observation.fk.fb.{side}.{label}" if group == "fb" else f"observation.fk.cmd.{side}.{label}"
-                features[key] = {"dtype": "list<float64>", "length": 6}
-            key = f"observation.fk.fb.{side}.gripper_flange" if group == "fb" else f"observation.fk.cmd.{side}.gripper_flange"
+    if export_fk:
+        for key in _fk_feature_keys():
             features[key] = {"dtype": "list<float64>", "length": 6}
 
     for slot in CAMERA_SLOTS:
@@ -192,7 +191,7 @@ def _make_feature_spec() -> Dict[str, Dict[str, Any]]:
     return features
 
 
-def _build_parquet_schema() -> pa.Schema:
+def _build_parquet_schema(export_fk: bool) -> pa.Schema:
     fields: List[pa.Field] = [
         pa.field("timestamp", pa.float64()),
         pa.field("frame_index", pa.int64()),
@@ -202,13 +201,8 @@ def _build_parquet_schema() -> pa.Schema:
         pa.field("observation.state", pa.list_(pa.float64())),
         pa.field("action", pa.list_(pa.float64())),
     ]
-    for group in ARM_GROUPS:
-        for side in SIDE_GROUPS:
-            for label in ARM_JOINT_LABELS:
-                key = f"observation.fk.fb.{side}.{label}" if group == "fb" else f"observation.fk.cmd.{side}.{label}"
-                fields.append(pa.field(key, pa.list_(pa.float64())))
-            key = f"observation.fk.fb.{side}.gripper_flange" if group == "fb" else f"observation.fk.cmd.{side}.gripper_flange"
-            fields.append(pa.field(key, pa.list_(pa.float64())))
+    if export_fk:
+        fields.extend(pa.field(key, pa.list_(pa.float64())) for key in _fk_feature_keys())
     for slot in CAMERA_SLOTS:
         fields.append(pa.field(f"observation.images.{slot}", _struct_type()))
     return pa.schema(fields)
@@ -641,7 +635,8 @@ class LeRobotV2Writer:
     def __init__(
         self,
         task_dir: str,
-        arm_ik,
+        arm_ik=None,
+        fk_provider=None,
         task_goal: Optional[str] = None,
         task_desc: Optional[str] = None,
         task_steps: Optional[str] = None,
@@ -659,15 +654,15 @@ class LeRobotV2Writer:
         self.task_desc = _normalize_text(task_desc)
         self.task_steps = _normalize_text(task_steps)
 
-        if arm_ik is None or not hasattr(arm_ik, "reduced_robot"):
-            raise ValueError("LeRobotV2Writer requires an arm_ik with reduced_robot.model for FK generation.")
-        self._fk_model = arm_ik.reduced_robot.model
-        self._fk_data = self._fk_model.createData()
-        self._fk_lock = threading.Lock()
-        self._fk_frame_ids = self._resolve_fk_frame_ids()
+        if arm_ik is not None:
+            raise ValueError("arm_ik is no longer accepted for LeRobot FK; pass an explicit G1D fk_provider instead")
+        if fk_provider is not None and not callable(getattr(fk_provider, "compute", None)):
+            raise TypeError("fk_provider must define compute(arm_qpos)")
+        self._fk_provider = fk_provider
+        self._export_fk = fk_provider is not None
 
-        self._parquet_schema = _build_parquet_schema()
-        self._feature_spec = _make_feature_spec()
+        self._parquet_schema = _build_parquet_schema(export_fk=self._export_fk)
+        self._feature_spec = _make_feature_spec(export_fk=self._export_fk)
 
         self.meta_dir = os.path.join(self.dataset_root, "meta")
         self.alignment_dir = os.path.join(self.meta_dir, "alignment")
@@ -768,35 +763,6 @@ class LeRobotV2Writer:
 
     def _control_temp_path(self, episode_index: int) -> str:
         return os.path.join(self.control_dir, f"episode_{episode_index:06d}.partial.jsonl")
-
-    def _resolve_fk_frame_ids(self) -> Dict[str, int]:
-        frame_map = OrderedDict()
-        for idx, frame_name in enumerate(LEFT_ARM_LINK_NAMES, start=1):
-            key = f"observation.fk.fb.left.joint{idx}"
-            frame_map[key] = frame_name
-        frame_map["observation.fk.fb.left.gripper_flange"] = "L_ee"
-        for idx, frame_name in enumerate(RIGHT_ARM_LINK_NAMES, start=1):
-            key = f"observation.fk.fb.right.joint{idx}"
-            frame_map[key] = frame_name
-        frame_map["observation.fk.fb.right.gripper_flange"] = "R_ee"
-        for idx, frame_name in enumerate(LEFT_ARM_LINK_NAMES, start=1):
-            key = f"observation.fk.cmd.left.joint{idx}"
-            frame_map[key] = frame_name
-        frame_map["observation.fk.cmd.left.gripper_flange"] = "L_ee"
-        for idx, frame_name in enumerate(RIGHT_ARM_LINK_NAMES, start=1):
-            key = f"observation.fk.cmd.right.joint{idx}"
-            frame_map[key] = frame_name
-        frame_map["observation.fk.cmd.right.gripper_flange"] = "R_ee"
-
-        resolved: Dict[str, int] = {}
-        for key, frame_name in frame_map.items():
-            frame_id = self._fk_model.getFrameId(frame_name)
-            if frame_id < 0 or frame_id >= self._fk_model.nframes:
-                raise RuntimeError(f"FK frame '{frame_name}' required by {key} was not found in the reduced model.")
-            if self._fk_model.frames[frame_id].name != frame_name:
-                raise RuntimeError(f"FK frame '{frame_name}' lookup returned mismatched frame id {frame_id}.")
-            resolved[key] = int(frame_id)
-        return resolved
 
     def _load_existing_meta(self) -> None:
         if os.path.exists(self._meta_tasks_path):
@@ -1109,19 +1075,29 @@ class LeRobotV2Writer:
     def _compute_fk_for_qpos(self, arm_qpos: np.ndarray, group: str) -> Dict[str, List[float]]:
         if group not in ARM_GROUPS:
             raise ValueError(f"FK group must be one of {ARM_GROUPS}, got {group!r}")
-        q = np.asarray(arm_qpos, dtype=float).reshape(-1)
-        if q.shape[0] != ARM_VECTOR_SIZE:
-            raise ValueError(f"arm qpos expected length {ARM_VECTOR_SIZE}, got {q.shape[0]}")
-        if not np.all(np.isfinite(q)):
-            raise ValueError("arm qpos contains NaN or Inf")
-        out: Dict[str, List[float]] = {}
-        with self._fk_lock:
-            pin.framesForwardKinematics(self._fk_model, self._fk_data, q)
-            pin.updateFramePlacements(self._fk_model, self._fk_data)
-            for key, frame_id in self._fk_frame_ids.items():
-                if key.startswith(f"observation.fk.{group}."):
-                    out[key] = _pose6_from_se3(self._fk_data.oMf[frame_id])
-        return out
+        if self._fk_provider is None:
+            raise RuntimeError("FK computation requested without fk_provider")
+        raw_result = self._fk_provider.compute(arm_qpos)
+        if not isinstance(raw_result, dict):
+            raise TypeError(f"fk_provider.compute must return dict, got {type(raw_result).__name__}")
+        expected_relative_keys = {
+            f"{side}.{label}"
+            for side in SIDE_GROUPS
+            for label in (*ARM_JOINT_LABELS, "gripper_flange")
+        }
+        if set(raw_result) != expected_relative_keys:
+            missing = sorted(expected_relative_keys - set(raw_result))
+            unexpected = sorted(set(raw_result) - expected_relative_keys)
+            raise ValueError(f"fk_provider keys mismatch: missing={missing}, unexpected={unexpected}")
+        result = {}
+        for relative_key, value in raw_result.items():
+            vector = np.asarray(value, dtype=float).reshape(-1)
+            if vector.shape != (6,):
+                raise ValueError(f"fk_provider {relative_key} expected length 6, got {vector.shape[0]}")
+            if not np.all(np.isfinite(vector)):
+                raise ValueError(f"fk_provider {relative_key} contains NaN or Inf")
+            result[f"observation.fk.{group}.{relative_key}"] = vector.tolist()
+        return result
 
     def _camera_meta_for_slot(self, camera_timestamps: Dict[str, Any], slot: str) -> Tuple[str, Dict[str, Any]]:
         for source_name in CAMERA_SOURCE_ALIASES[slot]:
@@ -1327,17 +1303,14 @@ class LeRobotV2Writer:
             raise ValueError("timestamps.sample_monotonic_ns is required")
         sample_monotonic_ns = int(sample_monotonic_ns)
 
-        try:
-            fk_fb = self._compute_fk_for_qpos(np.concatenate([left_arm_qpos[:7], right_arm_qpos[:7]]), "fb")
-            fk_cmd = self._compute_fk_for_qpos(
-                np.concatenate([left_arm_action_qpos[:7], right_arm_action_qpos[:7]]),
-                "cmd",
+        fk_samples = {}
+        if self._export_fk:
+            fk_samples["fk_fb"] = self._compute_fk_for_qpos(
+                np.concatenate([left_arm_qpos[:7], right_arm_qpos[:7]]), "fb"
             )
-        except Exception as exc:
-            with self._state_lock:
-                self._current_failure_reason = f"FK computation failed: {exc}"
-            logger_mp.warning("[LeRobotV2Writer] episode failed: FK computation failed: %s", exc)
-            return
+            fk_samples["fk_cmd"] = self._compute_fk_for_qpos(
+                np.concatenate([left_arm_action_qpos[:7], right_arm_action_qpos[:7]]), "cmd"
+            )
 
         with self._state_lock:
             if self._current_first_sample_monotonic_ns is None:
@@ -1380,8 +1353,6 @@ class LeRobotV2Writer:
             "task_index": task_index,
             "state_qpos": np.concatenate([left_arm_qpos[:7], left_arm_qpos[7:8], right_arm_qpos[:7], right_arm_qpos[7:8]]),
             "action_qpos": np.concatenate([left_arm_action_qpos[:7], left_arm_action_qpos[7:8], right_arm_action_qpos[:7], right_arm_action_qpos[7:8]]),
-            "fk_fb": fk_fb,
-            "fk_cmd": fk_cmd,
             "images": {
                 slot: {
                     "path": _dataset_relpath(
@@ -1393,6 +1364,7 @@ class LeRobotV2Writer:
                 for slot in CAMERA_SLOTS
             },
         }
+        sample.update(fk_samples)
         alignment_row = self._build_alignment_row(
             timestamps,
             episode_index,
@@ -1434,14 +1406,15 @@ class LeRobotV2Writer:
         if not np.all(np.isfinite(action_qpos)):
             raise ValueError("action vector contains NaN or Inf")
 
-        for fk_group in ("fk_fb", "fk_cmd"):
-            fk_map = sample[fk_group]
-            for key in fk_map:
-                fk_arr = np.asarray(fk_map[key], dtype=float)
-                if fk_arr.shape[0] != 6:
-                    raise ValueError(f"{key} expected length 6")
-                if not np.all(np.isfinite(fk_arr)):
-                    raise ValueError(f"{key} contains NaN or Inf")
+        if self._export_fk:
+            for fk_group in ("fk_fb", "fk_cmd"):
+                fk_map = sample[fk_group]
+                for key in fk_map:
+                    fk_arr = np.asarray(fk_map[key], dtype=float)
+                    if fk_arr.shape[0] != 6:
+                        raise ValueError(f"{key} expected length 6")
+                    if not np.all(np.isfinite(fk_arr)):
+                        raise ValueError(f"{key} contains NaN or Inf")
 
         for slot in CAMERA_SLOTS:
             image_meta = sample["images"][slot]
@@ -1461,12 +1434,8 @@ class LeRobotV2Writer:
         columns["task_index"] = []
         columns["observation.state"] = []
         columns["action"] = []
-        for group in ARM_GROUPS:
-            for side in SIDE_GROUPS:
-                for label in ARM_JOINT_LABELS:
-                    key = f"observation.fk.fb.{side}.{label}" if group == "fb" else f"observation.fk.cmd.{side}.{label}"
-                    columns[key] = []
-                key = f"observation.fk.fb.{side}.gripper_flange" if group == "fb" else f"observation.fk.cmd.{side}.gripper_flange"
+        if self._export_fk:
+            for key in _fk_feature_keys():
                 columns[key] = []
         for slot in CAMERA_SLOTS:
             columns[f"observation.images.{slot}"] = []
@@ -1483,10 +1452,11 @@ class LeRobotV2Writer:
             columns["observation.state"].append(np.asarray(sample["state_qpos"], dtype=float).tolist())
             columns["action"].append(np.asarray(sample["action_qpos"], dtype=float).tolist())
 
-            for key, value in sample["fk_fb"].items():
-                columns[key].append(np.asarray(value, dtype=float).tolist())
-            for key, value in sample["fk_cmd"].items():
-                columns[key].append(np.asarray(value, dtype=float).tolist())
+            if self._export_fk:
+                for key, value in sample["fk_fb"].items():
+                    columns[key].append(np.asarray(value, dtype=float).tolist())
+                for key, value in sample["fk_cmd"].items():
+                    columns[key].append(np.asarray(value, dtype=float).tolist())
 
             for slot in CAMERA_SLOTS:
                 columns[f"observation.images.{slot}"].append(
@@ -1504,12 +1474,8 @@ class LeRobotV2Writer:
         arrays["task_index"] = pa.array(columns["task_index"], type=pa.int64())
         arrays["observation.state"] = pa.array(columns["observation.state"], type=pa.list_(pa.float64()))
         arrays["action"] = pa.array(columns["action"], type=pa.list_(pa.float64()))
-        for group in ARM_GROUPS:
-            for side in SIDE_GROUPS:
-                for label in ARM_JOINT_LABELS:
-                    key = f"observation.fk.fb.{side}.{label}" if group == "fb" else f"observation.fk.cmd.{side}.{label}"
-                    arrays[key] = pa.array(columns[key], type=pa.list_(pa.float64()))
-                key = f"observation.fk.fb.{side}.gripper_flange" if group == "fb" else f"observation.fk.cmd.{side}.gripper_flange"
+        if self._export_fk:
+            for key in _fk_feature_keys():
                 arrays[key] = pa.array(columns[key], type=pa.list_(pa.float64()))
         for slot in CAMERA_SLOTS:
             arrays[f"observation.images.{slot}"] = pa.array(columns[f"observation.images.{slot}"], type=_struct_type())

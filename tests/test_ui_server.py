@@ -3,6 +3,8 @@ import json
 import pathlib
 import sys
 import tempfile
+import threading
+import time
 import unittest
 
 import numpy as np
@@ -12,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teleop.ui.command_bus import UiCommandBus, UiCommandName
+from teleop.ui.exporter import DEFAULT_UI_URDF_PATH, UiExportManager, UiExportRequest
 from teleop.ui.server import TeleopUiServer
 from teleop.ui.state_store import UiStateStore
 
@@ -56,6 +59,10 @@ class TeleopUiServerTest(unittest.TestCase):
         self.assertIn(":root", css_body)
         self.assertEqual(js_status, 200)
         self.assertIn("function renderRecord", js_body)
+        self.assertIn(DEFAULT_UI_URDF_PATH, js_body)
+        self.assertIn("/assets/g1_d/g1_d.urdf", DEFAULT_UI_URDF_PATH)
+        self.assertNotIn("/home/luodongxu/agx_arm_ws/src/nero-dual-arm", js_body)
+        self.assertNotIn("/home/luopengcheng/Programs/nero-dual-arm", js_body)
 
     def test_reference_frontend_empty_data_routes_exist(self):
         server = TeleopUiServer(
@@ -70,8 +77,384 @@ class TeleopUiServerTest(unittest.TestCase):
         self.assertEqual(self._get_json(server, "/camera/realsense_list"), {"devices": []})
         self.assertEqual(self._get_json(server, "/recording/episodes"), {"ok": True, "episodes": [], "root_dir": "."})
         convert_status = self._get_json(server, "/convert/status")
-        self.assertEqual(convert_status["state"], "disabled")
-        self.assertIn("not implemented", convert_status["error"])
+        self.assertEqual(convert_status["state"], "idle")
+        self.assertNotIn("error", convert_status)
+        self.assertIn("ready", convert_status["message"])
+
+    def test_inference_routes_queue_commands_and_report_provider_status(self):
+        command_bus = UiCommandBus()
+        server = TeleopUiServer(
+            command_bus=command_bus,
+            state_store=UiStateStore(
+                {
+                    "recording": {"active": False, "phase": "idle"},
+                    "provider": {
+                        "active_provider": "hold",
+                        "online_inference": {"state": "idle", "prompt": "", "error": ""},
+                    },
+                }
+            ),
+            host="127.0.0.1",
+            port=0,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+
+        start = self._get_json(server, "/inference/start?prompt=pick%20up%20the%20cube")
+        status = self._get_json(server, "/inference/status")
+        stop = self._get_json(server, "/inference/stop")
+
+        self.assertEqual(start["command"], UiCommandName.START_ONLINE_INFERENCE.value)
+        self.assertEqual(status["online_inference"]["state"], "idle")
+        self.assertEqual(stop["command"], UiCommandName.STOP_ONLINE_INFERENCE.value)
+        commands = command_bus.drain()
+        self.assertEqual(
+            [command.name for command in commands],
+            [UiCommandName.START_ONLINE_INFERENCE, UiCommandName.STOP_ONLINE_INFERENCE],
+        )
+        self.assertEqual(commands[0].payload, {"prompt": "pick up the cube"})
+
+    def test_inference_start_rejects_active_recording_and_raw_replay(self):
+        command_bus = UiCommandBus()
+        server = TeleopUiServer(
+            command_bus=command_bus,
+            state_store=UiStateStore(
+                {
+                    "recording": {"active": True, "phase": "recording"},
+                    "provider": {"active_provider": "raw_replay"},
+                }
+            ),
+            host="127.0.0.1",
+            port=0,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+
+        status, result = self._get(server, "/inference/start?prompt=pick%20up%20the%20cube")
+
+        self.assertEqual(status, 400)
+        self.assertIn("recording", result)
+        self.assertEqual(command_bus.drain(), [])
+
+    def test_convert_start_route_passes_reference_query_to_manager(self):
+        class FakeConvertManager:
+            def __init__(self):
+                self.requests = []
+
+            def status(self):
+                return {"ok": True, "state": "idle", "phase": "idle", "running": False, "message": "ready"}
+
+            def start(self, request):
+                self.requests.append(request)
+                return {"ok": True, "state": "running", "phase": "exporting", "running": True, "message": "started"}
+
+        manager = FakeConvertManager()
+        server = TeleopUiServer(
+            command_bus=UiCommandBus(),
+            state_store=UiStateStore({"recording": {"active": False, "fps": 22.0}}),
+            convert_manager=manager,
+            host="127.0.0.1",
+            port=0,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+
+        result = self._get_json(
+            server,
+            "/convert/start?"
+            "source_root=/tmp/raw_task&output_root=/tmp/export&dataset_name=nero_ui"
+            "&default_task=pick%20cube&format_version=v2&export_mode=replace"
+            "&export_video=1&export_fk=0&export_verify=1"
+            "&episode=episode_0001&episode=episode_0002",
+        )
+
+        self.assertEqual(result["ok"], True)
+        self.assertEqual(result["phase"], "exporting")
+        self.assertEqual(len(manager.requests), 1)
+        request = manager.requests[0]
+        self.assertEqual(str(request.source_root), "/tmp/raw_task")
+        self.assertEqual(str(request.output_root), "/tmp/export")
+        self.assertEqual(request.dataset_name, "nero_ui")
+        self.assertEqual(request.task, "pick cube")
+        self.assertEqual(request.fps, 22.0)
+        self.assertEqual(request.format_version, "v2")
+        self.assertEqual(request.export_mode, "replace")
+        self.assertEqual(request.export_video, True)
+        self.assertEqual(request.export_fk, False)
+        self.assertEqual(request.export_verify, True)
+        self.assertEqual(request.selected_episodes, ("episode_0001", "episode_0002"))
+
+    def test_ui_export_manager_exports_selected_episodes_with_raw_v2_exporter(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            source_root = root / "raw_task"
+            output_root = root / "exports"
+            self._write_raw_episode_stub(source_root / "episode_0001", frame_count=2)
+            self._write_raw_episode_stub(source_root / "episode_0002", frame_count=3)
+            calls = []
+
+            def fake_export_raw_task_dir(**kwargs):
+                input_task_dir = pathlib.Path(kwargs["input_task_dir"])
+                episode_names = sorted(path.name for path in input_task_dir.iterdir() if path.name.startswith("episode_"))
+                calls.append({**kwargs, "episode_names": episode_names})
+                return {
+                    "source_root": str(input_task_dir),
+                    "output_root": str(kwargs["output_root"]),
+                    "task": kwargs["task"],
+                    "fps": kwargs["fps"],
+                    "verify_export": kwargs["verify_export"],
+                    "verify_video_frames": kwargs["verify_video_frames"],
+                    "episodes_total": 1,
+                    "episodes_exported": 1,
+                    "frames_total": 3,
+                    "episodes": [{"source_episode": "episode_0002", "episode_index": 0, "frame_count": 3}],
+                }
+
+            manager = UiExportManager(export_raw_task_dir=fake_export_raw_task_dir)
+            start_status = manager.start(
+                UiExportRequest(
+                    source_root=source_root,
+                    output_root=output_root,
+                    dataset_name="nero_dataset",
+                    task="pick cube",
+                    fps=30.0,
+                    format_version="v2",
+                    export_mode="replace",
+                    export_video=True,
+                    export_fk=True,
+                    export_verify=True,
+                    selected_episodes=("episode_0002",),
+                    urdf_path=DEFAULT_UI_URDF_PATH,
+                )
+            )
+
+            final_status = self._wait_convert_done(manager)
+
+            self.assertEqual(start_status["ok"], True)
+            self.assertEqual(final_status["ok"], True)
+            self.assertEqual(final_status["state"], "done")
+            self.assertEqual(final_status["phase"], "done")
+            self.assertEqual(final_status["processed_frames"], 3)
+            self.assertEqual(final_status["total_frames"], 3)
+            self.assertEqual(final_status["output_total_frames"], 3)
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0]["episode_names"], ["episode_0002"])
+            self.assertEqual(pathlib.Path(calls[0]["output_root"]), output_root / "nero_dataset")
+            self.assertEqual(calls[0]["task"], "pick cube")
+            self.assertEqual(calls[0]["fps"], 30.0)
+            self.assertEqual(calls[0]["overwrite"], True)
+            self.assertEqual(calls[0]["verify_export"], True)
+            self.assertEqual(calls[0]["verify_video_frames"], True)
+            self.assertEqual(calls[0]["export_fk"], True)
+            self.assertEqual(pathlib.Path(calls[0]["urdf_path"]), pathlib.Path(DEFAULT_UI_URDF_PATH))
+
+    def test_ui_export_manager_rejects_missing_fk_urdf(self):
+        manager = UiExportManager(export_raw_task_dir=lambda **_kwargs: {})
+
+        result = manager.start(
+            UiExportRequest(
+                source_root=pathlib.Path("/tmp/raw_task"),
+                output_root=pathlib.Path("/tmp/export"),
+                dataset_name="nero_dataset",
+                task="pick cube",
+                fps=30.0,
+                format_version="v2",
+                export_mode="new",
+                export_video=False,
+                export_fk=True,
+                export_verify=False,
+                selected_episodes=(),
+                urdf_path="/tmp/xr_teleoperate_missing_g1d.urdf",
+            )
+        )
+
+        self.assertEqual(result["ok"], False)
+        self.assertEqual(result["state"], "error")
+        self.assertIn("urdf_path", result["error"])
+
+    def test_ui_export_manager_reports_bad_source_root_as_status_error(self):
+        manager = UiExportManager(export_raw_task_dir=lambda **_kwargs: {})
+
+        result = manager.start(
+            UiExportRequest(
+                source_root=pathlib.Path("/tmp/xr_teleoperate_missing_raw_task"),
+                output_root=pathlib.Path("/tmp/export"),
+                dataset_name="nero_dataset",
+                task="pick cube",
+                fps=30.0,
+                format_version="v2",
+                export_mode="new",
+                export_video=False,
+                export_fk=False,
+                export_verify=False,
+                selected_episodes=("episode_0001",),
+                urdf_path=DEFAULT_UI_URDF_PATH,
+            )
+        )
+
+        self.assertEqual(result["ok"], False)
+        self.assertEqual(result["state"], "error")
+        self.assertIn("source_root", result["error"])
+
+    def test_ui_export_manager_rejects_dataset_name_path_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            source_root = root / "raw_task"
+            output_root = root / "exports"
+            self._write_raw_episode_stub(source_root / "episode_0001", frame_count=1)
+            calls = []
+            manager = UiExportManager(export_raw_task_dir=lambda **kwargs: calls.append(kwargs) or {})
+
+            result = manager.start(
+                UiExportRequest(
+                    source_root=source_root,
+                    output_root=output_root,
+                    dataset_name="..",
+                    task="pick cube",
+                    fps=30.0,
+                    format_version="v2",
+                    export_mode="replace",
+                    export_video=False,
+                    export_fk=False,
+                    export_verify=False,
+                    selected_episodes=("episode_0001",),
+                    urdf_path=DEFAULT_UI_URDF_PATH,
+                )
+            )
+
+            self.assertEqual(result["ok"], False)
+            self.assertEqual(result["state"], "error")
+            self.assertIn("dataset_name", result["error"])
+            self.assertEqual(calls, [])
+
+    def test_ui_export_manager_rejects_output_root_overlapping_source_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            source_root = root / "raw_task"
+            self._write_raw_episode_stub(source_root / "episode_0001", frame_count=1)
+            self._write_raw_episode_stub(source_root / "episode_0002", frame_count=1)
+            calls = []
+            manager = UiExportManager(export_raw_task_dir=lambda **kwargs: calls.append(kwargs) or {})
+
+            equal_source_result = manager.start(
+                UiExportRequest(
+                    source_root=source_root,
+                    output_root=root,
+                    dataset_name="raw_task",
+                    task="pick cube",
+                    fps=30.0,
+                    format_version="v2",
+                    export_mode="replace",
+                    export_video=False,
+                    export_fk=False,
+                    export_verify=False,
+                    selected_episodes=("episode_0002",),
+                    urdf_path=DEFAULT_UI_URDF_PATH,
+                )
+            )
+            ancestor_result = manager.start(
+                UiExportRequest(
+                    source_root=source_root,
+                    output_root=pathlib.Path(tmp).parent,
+                    dataset_name=pathlib.Path(tmp).name,
+                    task="pick cube",
+                    fps=30.0,
+                    format_version="v2",
+                    export_mode="replace",
+                    export_video=False,
+                    export_fk=False,
+                    export_verify=False,
+                    selected_episodes=("episode_0002",),
+                    urdf_path=DEFAULT_UI_URDF_PATH,
+                )
+            )
+
+            self.assertEqual(equal_source_result["ok"], False)
+            self.assertIn("overlap", equal_source_result["error"])
+            self.assertEqual(ancestor_result["ok"], False)
+            self.assertIn("overlap", ancestor_result["error"])
+            self.assertEqual(calls, [])
+
+    def test_convert_start_route_rejects_missing_output_root_before_path_coercion(self):
+        class FakeConvertManager:
+            def __init__(self):
+                self.requests = []
+
+            def status(self):
+                return {"ok": True, "state": "idle", "phase": "idle", "running": False, "message": "ready"}
+
+            def start(self, request):
+                self.requests.append(request)
+                return {"ok": True, "state": "running", "phase": "exporting", "running": True, "message": "started"}
+
+        manager = FakeConvertManager()
+        server = TeleopUiServer(
+            command_bus=UiCommandBus(),
+            state_store=UiStateStore({"recording": {"active": False, "fps": 22.0}}),
+            convert_manager=manager,
+            host="127.0.0.1",
+            port=0,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+
+        result = self._get_json(
+            server,
+            "/convert/start?source_root=/tmp/raw_task&dataset_name=nero_ui&default_task=pick%20cube",
+        )
+
+        self.assertEqual(result["ok"], False)
+        self.assertIn("output_root", result["error"])
+        self.assertEqual(manager.requests, [])
+
+    def test_ui_export_manager_rejects_concurrent_start_without_clobbering_running_status(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            source_root = root / "raw_task"
+            output_root = root / "exports"
+            self._write_raw_episode_stub(source_root / "episode_0001", frame_count=1)
+            release_export = threading.Event()
+
+            def slow_export_raw_task_dir(**kwargs):
+                release_export.wait(timeout=2.0)
+                return {
+                    "source_root": str(kwargs["input_task_dir"]),
+                    "output_root": str(kwargs["output_root"]),
+                    "task": kwargs["task"],
+                    "fps": kwargs["fps"],
+                    "episodes_exported": 1,
+                    "frames_total": 1,
+                    "episodes": [{"source_episode": "episode_0001", "episode_index": 0, "frame_count": 1}],
+                }
+
+            manager = UiExportManager(export_raw_task_dir=slow_export_raw_task_dir)
+            request = UiExportRequest(
+                source_root=source_root,
+                output_root=output_root,
+                dataset_name="nero_dataset",
+                task="pick cube",
+                fps=30.0,
+                format_version="v2",
+                export_mode="new",
+                export_video=False,
+                export_fk=False,
+                export_verify=False,
+                selected_episodes=("episode_0001",),
+                urdf_path=DEFAULT_UI_URDF_PATH,
+            )
+            first = manager.start(request)
+            second = manager.start(request)
+            running_status = manager.status()
+            release_export.set()
+            final_status = self._wait_convert_done(manager)
+
+            self.assertEqual(first["ok"], True)
+            self.assertEqual(second["ok"], False)
+            self.assertIn("already running", second["error"])
+            self.assertEqual(running_status["state"], "running")
+            self.assertEqual(running_status["running"], True)
+            self.assertNotIn("error", running_status)
+            self.assertEqual(final_status["state"], "done")
 
     def test_recording_episodes_and_playback_read_raw_episode_files(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -334,7 +717,7 @@ class TeleopUiServerTest(unittest.TestCase):
         server.start()
         self.addCleanup(server.stop)
 
-        for path in ("/camera/start", "/camera/stop", "/convert/start"):
+        for path in ("/camera/start", "/camera/stop"):
             result = self._get_json(server, path)
             self.assertEqual(result["ok"], False)
             self.assertIn("not implemented", result["error"])
@@ -404,6 +787,31 @@ class TeleopUiServerTest(unittest.TestCase):
         body = response.read()
         conn.close()
         return status, headers, body
+
+    @staticmethod
+    def _write_raw_episode_stub(episode_dir: pathlib.Path, frame_count: int) -> None:
+        episode_dir.mkdir(parents=True)
+        rows = []
+        for frame_index in range(frame_count):
+            rows.append(
+                {
+                    "idx": frame_index,
+                    "colors": {},
+                    "states": {},
+                    "actions": {},
+                    "timestamps": {"sample_monotonic_ns": frame_index + 1},
+                }
+            )
+        (episode_dir / "data.json").write_text(json.dumps({"data": rows}), encoding="utf-8")
+
+    @staticmethod
+    def _wait_convert_done(manager: UiExportManager) -> dict:
+        deadline = time.monotonic() + 2.0
+        status = manager.status()
+        while status.get("running") and time.monotonic() < deadline:
+            time.sleep(0.01)
+            status = manager.status()
+        return status
 
 
 if __name__ == "__main__":
