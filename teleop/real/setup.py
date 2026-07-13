@@ -18,7 +18,7 @@ from core.control.motion_switcher import LocoClientWrapper, MotionSwitcher
 from core.input.teleop_input_provider import create_teleop_input_provider
 from data_pipeline.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
 from data_pipeline.recording.teleop_recording_flow import TeleopRecordingFlow
-from teleop.debug.latency_trace import SimpleLatencyTracker
+from teleop.debug.latency_setup import setup_latency_tracker
 from teleop.robot_control.robot_arm import (
     G1_23_ArmController,
     G1_29_ArmController,
@@ -335,7 +335,6 @@ def setup_recorder(args):
         rerun_log=not args.headless,
     )
 
-
 def setup_cameras(args, log) -> CameraRuntime:
     cameras = CameraRuntime()
     if not bool(args.record or args.ui or args.input_provider == "online_inference"):
@@ -397,29 +396,3 @@ def setup_recording_flow(args, components: RealTeleopComponents, log):
         dual_gripper_state_array=components.ee.dual_gripper_state_array,
         dual_gripper_action_array=components.ee.dual_gripper_action_array,
     )
-
-
-def setup_latency_tracker(args, arm_ctrl, log):
-    if not args.latency_trace:
-        return None
-    latency_tracker = SimpleLatencyTracker(
-        output_path=args.latency_trace_path,
-        summary_every=args.latency_summary_every,
-        log_each_trace=True,
-        timeout_s=args.latency_timeout,
-    )
-    if hasattr(arm_ctrl, 'set_latency_tracker'):
-        arm_ctrl.set_latency_tracker(latency_tracker)
-    if hasattr(arm_ctrl, 'set_latency_exec_thresholds'):
-        arm_ctrl.set_latency_exec_thresholds(
-            args.latency_exec_q_threshold,
-            args.latency_exec_dq_threshold,
-        )
-    log.info(
-        "[LATENCY] tracing enabled: output=%s, command_threshold=%.4f rad, exec_q_threshold=%.4f rad, exec_dq_threshold=%.4f rad/s",
-        args.latency_trace_path,
-        args.latency_command_threshold,
-        args.latency_exec_q_threshold,
-        args.latency_exec_dq_threshold,
-    )
-    return latency_tracker

@@ -225,7 +225,17 @@ class TeleopProviderRuntime:
     def note_online_inference_runtime_debug(self, debug: dict[str, Any]) -> None:
         if self._active_provider_kind != ActiveProviderKind.ONLINE_INFERENCE:
             return
+        execution_trace = dict((self._online_inference.runtime_debug or {}).get("execution_trace") or {})
         self._online_inference.runtime_debug = dict(debug)
+        if execution_trace:
+            self._online_inference.runtime_debug["execution_trace"] = execution_trace
+
+    def note_online_inference_execution_trace(self, trace: dict[str, Any]) -> None:
+        if self._active_provider_kind != ActiveProviderKind.ONLINE_INFERENCE:
+            return
+        runtime_debug = dict(self._online_inference.runtime_debug or {})
+        runtime_debug["execution_trace"] = dict(trace)
+        self._online_inference.runtime_debug = runtime_debug
 
     def _close_online_provider(self) -> None:
         provider = self._online_provider

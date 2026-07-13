@@ -35,6 +35,7 @@ from teleop.real.args import parse_args
 from data_pipeline.recording.alignment import append_timed_sample
 from core.input.online_inference_provider import create_online_inference_provider
 from core.input.teleop_input_provider import validate_lerobot_offline_episode
+from teleop.debug.inference_pose_debug import wrist_pose_to_debug_sample
 from teleop.debug.timing_debugger import TimingDebugger
 from teleop.real.setup import (
     RealTeleopComponents,
@@ -569,6 +570,16 @@ if __name__ == '__main__':
                 q=current_lr_arm_q.copy(),
                 dq=current_lr_arm_dq.copy(),
             )
+            if latency_tracker is not None:
+                latency_tracker.maybe_timeout()
+                latency_tracker.maybe_mark_execute(
+                    current_lr_arm_q,
+                    current_lr_arm_dq,
+                    q_threshold=args.latency_exec_q_threshold,
+                    dq_threshold=args.latency_exec_dq_threshold,
+                )
+                if provider_runtime.active_provider_kind == ActiveProviderKind.ONLINE_INFERENCE:
+                    provider_runtime.note_online_inference_execution_trace(latency_tracker.get_snapshot())
             if ui_state_store is not None:
                 ui_state_store.update(
                     build_runtime_web_payload(
@@ -583,14 +594,6 @@ if __name__ == '__main__':
                         stopping=STOP,
                         provider_status=provider_runtime.status(),
                     )
-                )
-            if latency_tracker is not None:
-                latency_tracker.maybe_timeout()
-                latency_tracker.maybe_mark_execute(
-                    current_lr_arm_q,
-                    current_lr_arm_dq,
-                    q_threshold=args.latency_exec_q_threshold,
-                    dq_threshold=args.latency_exec_dq_threshold,
                 )
             current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, current_lr_arm_q)
 
@@ -936,7 +939,14 @@ if __name__ == '__main__':
                 provider_feedback_ms = (time.perf_counter() - provider_feedback_start) * 1000.0
 
             trace_seq = None
-            if latency_tracker is not None and latency_tracker.can_start_new_trace():
+            if (
+                latency_tracker is not None
+                and latency_tracker.can_start_new_trace()
+                and (
+                    not bool(getattr(latency_tracker, "online_inference_only", False))
+                    or active_input_provider == "online_inference"
+                )
+            ):
                 latency_trace_prepare_start = time.perf_counter()
                 max_command_delta = float(np.max(np.abs(sol_q - current_lr_arm_q)))
                 if max_command_delta >= args.latency_command_threshold:
@@ -1035,6 +1045,11 @@ if __name__ == '__main__':
                             "target_submitted": True,
                         },
                         "trajectory": {
+                            "sample_monotonic_ns": int(time.monotonic_ns()),
+                            "left_target": wrist_pose_to_debug_sample(motion_intent.left_wrist_pose),
+                            "right_target": wrist_pose_to_debug_sample(motion_intent.right_wrist_pose),
+                            "left_feedback": wrist_pose_to_debug_sample(current_left_wrist_pose),
+                            "right_feedback": wrist_pose_to_debug_sample(current_right_wrist_pose),
                             "left_target_xyz": np.asarray(motion_intent.left_wrist_pose, dtype=float)[:3, 3].tolist(),
                             "right_target_xyz": np.asarray(motion_intent.right_wrist_pose, dtype=float)[:3, 3].tolist(),
                             "left_feedback_xyz": np.asarray(current_left_wrist_pose, dtype=float)[:3, 3].tolist(),
@@ -1042,6 +1057,8 @@ if __name__ == '__main__':
                         },
                     }
                 )
+                if latency_tracker is not None:
+                    provider_runtime.note_online_inference_execution_trace(latency_tracker.get_snapshot())
             if is_ui_raw_replay and bool(getattr(sample, "done", False)):
                 current_hold_q = sol_q.copy()
                 current_hold_tauff = sol_tauff.copy()

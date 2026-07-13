@@ -2,6 +2,7 @@ import json
 import os
 import threading
 import time
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -34,24 +35,28 @@ class SimpleLatencyTracker:
 
     def __init__(
         self,
-        output_path: str,
+        output_path: Optional[str],
         summary_every: int = 1,
         log_each_trace: bool = True,
         timeout_s: float = 2.0,
+        online_inference_only: bool = False,
     ):
-        self.output_path = output_path
+        self.output_path = str(output_path) if output_path else None
         self.summary_every = max(1, int(summary_every))
         self.log_each_trace = bool(log_each_trace)
+        self.online_inference_only = bool(online_inference_only)
         self.timeout_ns = int(float(timeout_s) * 1e9)
         self._lock = threading.Lock()
         self._next_seq = 0
         self._active: Optional[TraceRecord] = None
+        self._latest_payload: Optional[Dict[str, object]] = None
         self._completed = 0
         self._dropped = 0
 
-        out_dir = os.path.dirname(os.path.abspath(self.output_path))
-        if out_dir:
-            os.makedirs(out_dir, exist_ok=True)
+        if self.output_path is not None:
+            out_dir = os.path.dirname(os.path.abspath(self.output_path))
+            if out_dir:
+                os.makedirs(out_dir, exist_ok=True)
 
     def can_start_new_trace(self) -> bool:
         with self._lock:
@@ -79,6 +84,12 @@ class SimpleLatencyTracker:
                 return
             for key, value in fields.items():
                 self._active.fields[key] = value
+
+    def get_snapshot(self) -> Dict[str, Optional[Dict[str, object]]]:
+        with self._lock:
+            current = self._build_payload(self._active) if self._active is not None else None
+            latest = deepcopy(self._latest_payload) if self._latest_payload is not None else None
+        return {"current": current, "latest": latest}
 
     def mark_publish(
         self,
@@ -176,7 +187,47 @@ class SimpleLatencyTracker:
         return record.seq if record is not None else None
 
     def _finalize_record(self, record: TraceRecord):
-        payload = {
+        payload = self._build_payload(record)
+        with self._lock:
+            self._latest_payload = deepcopy(payload)
+
+        if self.output_path is not None:
+            with open(self.output_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+        if self.log_each_trace:
+            if record.status == "completed":
+                logger_mp.info(
+                    "[LATENCY] seq=%s recv->pub=%.2f ms | pub->exec=%.2f ms | recv->exec=%.2f ms | tele=%.2f base=%.2f(move=%.2f,height=%.2f,misc=%.2f) ik=%.2f queue=%.2f wait=%.2f dds=%.3f ms",
+                    payload["seq"],
+                    payload["recv_to_pub_ms"] or -1.0,
+                    payload["pub_to_exec_ms"] or -1.0,
+                    payload["recv_to_exec_ms"] or -1.0,
+                    float(payload.get("tele_fetch_ms") or 0.0),
+                    float(payload.get("base_control_ms") or 0.0),
+                    float(payload.get("base_move_ms") or 0.0),
+                    float(payload.get("base_height_ms") or 0.0),
+                    float(payload.get("base_misc_ms") or 0.0),
+                    float(payload.get("ik_ms") or 0.0),
+                    float(payload.get("enqueue_to_publish_ms") or 0.0),
+                    float(payload.get("controller_wait_ms") or 0.0),
+                    float(payload.get("dds_write_ms") or 0.0),
+                )
+            else:
+                logger_mp.warning(
+                    "[LATENCY] seq=%s timeout status=%s recv->pub=%s ms recv->exec=%s ms",
+                    payload["seq"],
+                    payload["status"],
+                    "%.2f" % payload["recv_to_pub_ms"] if payload["recv_to_pub_ms"] is not None else "N/A",
+                    "%.2f" % payload["recv_to_exec_ms"] if payload["recv_to_exec_ms"] is not None else "N/A",
+                )
+
+        total = self._completed + self._dropped
+        if self.output_path is not None and total % self.summary_every == 0:
+            self._log_summary()
+
+    def _build_payload(self, record: TraceRecord) -> Dict[str, object]:
+        payload: Dict[str, object] = {
             "seq": int(record.seq),
             "status": record.status,
             "t_recv_ns": int(record.t_recv_ns),
@@ -254,40 +305,7 @@ class SimpleLatencyTracker:
             payload["known_post_receive_ms"] = None
             payload["unaccounted_post_receive_ms"] = None
             payload["fetch_to_exec_ms"] = None
-
-        with open(self.output_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
-        if self.log_each_trace:
-            if record.status == "completed":
-                logger_mp.info(
-                    "[LATENCY] seq=%s recv->pub=%.2f ms | pub->exec=%.2f ms | recv->exec=%.2f ms | tele=%.2f base=%.2f(move=%.2f,height=%.2f,misc=%.2f) ik=%.2f queue=%.2f wait=%.2f dds=%.3f ms",
-                    payload["seq"],
-                    payload["recv_to_pub_ms"] or -1.0,
-                    payload["pub_to_exec_ms"] or -1.0,
-                    payload["recv_to_exec_ms"] or -1.0,
-                    float(payload.get("tele_fetch_ms") or 0.0),
-                    float(payload.get("base_control_ms") or 0.0),
-                    float(payload.get("base_move_ms") or 0.0),
-                    float(payload.get("base_height_ms") or 0.0),
-                    float(payload.get("base_misc_ms") or 0.0),
-                    float(payload.get("ik_ms") or 0.0),
-                    float(payload.get("enqueue_to_publish_ms") or 0.0),
-                    float(payload.get("controller_wait_ms") or 0.0),
-                    float(payload.get("dds_write_ms") or 0.0),
-                )
-            else:
-                logger_mp.warning(
-                    "[LATENCY] seq=%s timeout status=%s recv->pub=%s ms recv->exec=%s ms",
-                    payload["seq"],
-                    payload["status"],
-                    "%.2f" % payload["recv_to_pub_ms"] if payload["recv_to_pub_ms"] is not None else "N/A",
-                    "%.2f" % payload["recv_to_exec_ms"] if payload["recv_to_exec_ms"] is not None else "N/A",
-                )
-
-        total = self._completed + self._dropped
-        if total % self.summary_every == 0:
-            self._log_summary()
+        return payload
 
     def _log_summary(self):
         try:
@@ -385,5 +403,9 @@ class SimpleLatencyTracker:
         payload["online_step_output_to_pub_ms"] = cls._delta_ms(step_output_perf_ns, payload.get("t_pub_ns"))
         payload["online_step_output_to_exec_ms"] = cls._delta_ms(step_output_perf_ns, payload.get("t_exec_ns"))
         payload["online_step_output_to_exec_thread_ms"] = cls._delta_ms(step_output_perf_ns, payload.get("t_exec_thread_ns"))
+        payload["online_obs_send_to_publish_ms"] = cls._delta_ms(obs_send_perf_ns, payload.get("t_pub_ns"))
+        payload["online_action_recv_to_publish_ms"] = cls._delta_ms(action_recv_perf_ns, payload.get("t_pub_ns"))
+        payload["online_action_recv_to_exec_ms"] = cls._delta_ms(action_recv_perf_ns, payload.get("t_exec_ns"))
+        payload["online_action_recv_to_exec_thread_ms"] = cls._delta_ms(action_recv_perf_ns, payload.get("t_exec_thread_ns"))
         payload["online_obs_send_to_exec_ms"] = cls._delta_ms(obs_send_perf_ns, payload.get("t_exec_ns"))
         payload["online_obs_send_to_exec_thread_ms"] = cls._delta_ms(obs_send_perf_ns, payload.get("t_exec_thread_ns"))

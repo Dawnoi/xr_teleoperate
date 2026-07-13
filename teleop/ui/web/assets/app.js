@@ -1,3 +1,5 @@
+import * as THREE from "./vendor/three.module.js";
+
 async function api(path) {
   const resp = await fetch(path, { cache: "no-store" });
   const text = await resp.text();
@@ -49,6 +51,7 @@ const state = {
   inferenceTrajectoryHistory: [],
   lastInferenceTrajectorySampleNs: 0,
   lastInferenceRenderMs: 0,
+  inferenceThreeState: new WeakMap(),
   shuttingDown: false,
   drawRaf: 0,
   lastCurveDrawMs: 0,
@@ -314,9 +317,21 @@ function renderInference() {
   const safety = runtimeDebug.safety || {};
   const feedback = safety.provider_feedback || {};
   const feedbackText = feedback.reason || feedback.error || (Object.keys(feedback).length ? JSON.stringify(feedback) : "-");
+  const executionTrace = runtimeDebug.execution_trace || {};
+  const pendingTrace = executionTrace.current || null;
+  const latestTrace = executionTrace.latest || null;
+  const trace = latestTrace || pendingTrace || {};
+  const traceState = pendingTrace ? `pending #${pendingTrace.seq ?? "-"}` : latestTrace ? `${latestTrace.status || "completed"} #${latestTrace.seq ?? "-"}` : "waiting";
   const chunkIndex = Number(latestAction.chunk_index ?? latestAction.online_chunk_index ?? -1);
   const chunkSize = Number(latestAction.chunk_size ?? latestAction.online_chunk_size ?? 0);
   const ms = (value) => Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)} ms` : "-";
+  const traceMs = (key) => ms(trace[key]);
+  const inferencePreviews = requiredNames.map((name) => {
+    const stream = streams.find((item) => String(item.camera_name || "") === name);
+    const cameraId = Number(stream?.camera_id);
+    const ready = Number.isFinite(cameraId);
+    return `<div class="preview-tile"><div class="preview-title"><b>${esc(name)}</b><span>${ready ? `${stream.shared_age_ms ?? "-"}ms` : "missing"}</span></div><div class="preview"><span class="hint" data-inference-camera-hint="${ready ? cameraId : ""}">${ready ? `等待 ${esc(name)}...` : "相机未就绪"}</span>${ready ? `<img data-inference-camera="${cameraId}" data-frame-src="/camera/frame?camera_id=${cameraId}" style="display:none">` : ""}</div></div>`;
+  }).join("");
   return `<div class="grid">
     <div class="card hero full"><div class="card-head"><div><div class="eyebrow">HTTP pi0.5</div><div class="headline">真机推理</div><div class="subline">当前 provider=${esc(provider.active_provider || "hold")} · ${esc(phase)}</div></div>${badge(active ? "running" : inference.state || "idle", active ? "RUNNING" : inference.state || "IDLE")}</div>
       <div class="form"><label class="full">任务描述 / prompt<input id="inferencePrompt" value="${esc(prompt)}" placeholder="例如：pick up the cube" oninput="localStorage.inferencePrompt=this.value"></label></div>
@@ -326,8 +341,11 @@ function renderInference() {
     <div class="card"><div class="card-head"><h2>会话状态</h2>${badge(phase)}</div><div class="kv"><span class="muted">阶段</span><span>${esc(phase)}</span><span class="muted">协议</span><span>${esc(debug.protocol_profile || "pi05_dual_arm_20d")}</span><span class="muted">手臂</span><span>${esc(debug.arm_side || "both")}</span><span class="muted">动作块</span><span>${chunkIndex >= 0 ? `${chunkIndex + 1}/${chunkSize || "?"}` : "-"}</span>${phase === "post_action_delay" ? `<span class="muted">延迟剩余</span><span>${Number(postActionDelay.remaining_ms ?? 0).toFixed(1)} ms</span>` : ""}</div></div>
     <div class="card"><div class="card-head"><h2>最近推理数据</h2><span class="mini">HTTP 18027</span></div><div class="kv"><span class="muted">观测序号</span><span>${esc(latestObservation.observation_seq ?? "-")}</span><span class="muted">动作块序号</span><span>${esc(latestAction.chunk_seq ?? "-")}</span><span class="muted">实际发送 prompt</span><span>${esc(latestObservation.prompt || "-")}</span><span class="muted">错误</span><span class="${inference.error ? "err-text" : ""}">${esc(inference.error || debug.error || "-")}</span></div></div>
     <div class="card full"><div class="card-head"><div><h2>推理闭环延迟</h2><p class="mini">HTTP 从 observation 发出到 action 收到；其余是同一轮主控制循环的实测耗时。</p></div><span class="pill">${esc(runtimeDebug.updated_monotonic_ns ? "live" : "waiting")}</span></div><div class="metric-grid"><div class="metric"><span>HTTP 往返</span><b>${ms(latency.http_roundtrip_ms)}</b></div><div class="metric"><span>读取输入</span><b>${ms(latency.tele_fetch_ms)}</b></div><div class="metric"><span>IK</span><b>${ms(latency.ik_ms)}</b></div><div class="metric"><span>安全限幅</span><b>${ms(latency.safety_ms)}</b></div><div class="metric"><span>重力补偿</span><b>${ms(latency.gravity_ms)}</b></div><div class="metric"><span>反馈上报</span><b>${ms(latency.provider_feedback_ms)}</b></div><div class="metric"><span>目标下发</span><b>${ms(latency.target_submit_ms)}</b><small class="mini">仅表示 ctrl_dual_arm 调用完成</small></div></div></div>
+    <div class="card full"><div class="card-head"><div><h2>执行 trace</h2><p class="mini">DDS 发布后的反馈运动由低层状态线程按 q/dq 阈值检测，不表示已到达最终目标。</p></div>${badge(pendingTrace ? "running" : trace.status || "idle", traceState)}</div><div class="metric-grid"><div class="metric"><span>上传到 DDS 发布</span><b>${traceMs("online_obs_send_to_publish_ms")}</b></div><div class="metric"><span>action 到 DDS 发布</span><b>${traceMs("online_action_recv_to_publish_ms")}</b></div><div class="metric"><span>DDS 发布到线程反馈运动</span><b>${traceMs("pub_to_exec_thread_ms")}</b></div><div class="metric"><span>上传到线程反馈运动</span><b>${traceMs("online_obs_send_to_exec_thread_ms")}</b></div><div class="metric"><span>控制线程排队</span><b>${traceMs("enqueue_to_publish_ms")}</b></div><div class="metric"><span>DDS 写入</span><b>${traceMs("dds_write_ms")}</b></div><div class="metric"><span>线程触发关节差</span><b>${Number(trace.q_delta_thread_trigger || 0).toFixed(4)} rad</b><small class="mini">dq ${Number(trace.dq_peak_thread_trigger || 0).toFixed(4)} rad/s</small></div></div></div>
     <div class="card full"><div class="card-head"><div><h2>安全与下发</h2><p class="mini">出现 workspace、速度或 IK 拒绝时，控制链会反馈 provider 并保持当前姿态。</p></div>${badge(feedback.fatal ? "error" : "ok", feedback.fatal ? "REJECTED" : "CLEAR")}</div><div class="metric-grid three"><div class="metric"><span>安全反馈</span><b class="${feedback.fatal ? "err-text" : ""}">${esc(feedbackText)}</b></div><div class="metric"><span>目标关节最大差</span><b>${Number(safety.command_delta_max_abs || 0).toFixed(4)} rad</b><small class="mini">L2 ${Number(safety.command_delta_l2 || 0).toFixed(4)} rad</small></div><div class="metric"><span>目标提交</span><b>${safety.target_submitted ? "已调用" : "未提交"}</b><small class="mini">不是 DDS 执行确认</small></div></div></div>
-    <div class="card full"><div class="card-head"><div><h2>双臂腕部目标与反馈轨迹</h2><p class="mini">目标来自模型 action pose；反馈来自当前机械臂关节 FK。仅保留最近 180 个主循环样本。</p></div><span class="pill">XYZ · m</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left wrist XYZ</b><span>target / feedback</span></div><canvas id="inferenceLeftWristCurveCanvas" height="220"></canvas><div class="curve-legend" id="inferenceLeftWristLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right wrist XYZ</b><span>target / feedback</span></div><canvas id="inferenceRightWristCurveCanvas" height="220"></canvas><div class="curve-legend" id="inferenceRightWristLegend"></div></div></div></div>
+    <div class="card full"><div class="card-head"><div><h2>双臂 TCP 3D 轨迹</h2><p class="mini">目标来自模型 action pose；反馈来自当前机械臂关节 FK。拖拽旋转，滚轮缩放。</p></div><span class="pill">目标 / 反馈</span></div><div class="inference-3d-wrap"><canvas id="inferenceDualTcpCanvas" class="inference-3d-canvas"></canvas><p id="inferenceWebglError" class="err-text hidden">浏览器不支持 WebGL，无法渲染双臂 TCP 3D 轨迹。</p></div></div>
+    <div class="card full"><div class="card-head"><div><h2>双臂位置与姿态轨迹</h2><p class="mini">XYZ 与 Rot6D 都同时显示目标和反馈；旋转误差为二者相对旋转角。</p></div><span class="pill">最近 180 点</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left wrist XYZ</b><span>target / feedback</span></div><canvas id="inferenceLeftWristCurveCanvas" height="220"></canvas><div class="curve-legend" id="inferenceLeftWristLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right wrist XYZ</b><span>target / feedback</span></div><canvas id="inferenceRightWristCurveCanvas" height="220"></canvas><div class="curve-legend" id="inferenceRightWristLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Left Rot6D / rotation error</b><span>target / feedback</span></div><canvas id="inferenceLeftRot6dCanvas" height="220"></canvas><canvas id="inferenceLeftRotationErrorCanvas" height="160"></canvas><div class="curve-legend" id="inferenceLeftRot6dLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right Rot6D / rotation error</b><span>target / feedback</span></div><canvas id="inferenceRightRot6dCanvas" height="220"></canvas><canvas id="inferenceRightRotationErrorCanvas" height="160"></canvas><div class="curve-legend" id="inferenceRightRot6dLegend"></div></div></div></div>
+    <div class="card full"><div class="card-head"><div><h2>推理相机预览</h2><p class="mini">仅预览现有 latest frame，不重启或修改任何相机。</p></div><span class="pill">RGB</span></div><div class="preview-grid">${inferencePreviews}</div></div>
     <div class="card full"><div class="card-head"><div><h2>推理相机</h2><p class="mini">启动推理前必须同时具备 head、left_wrist、right_wrist 三路运行时相机。</p></div><span class="pill">${streams.length}/3 streams</span></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>状态</th><th>帧年龄</th><th>实际输出</th></tr></thead><tbody>${requiredNames.map((name) => { const stream = streams.find((item) => String(item.camera_name || "") === name); const actual = stream?.actual_capture || {}; return `<tr><td><b>${esc(name)}</b></td><td>${stream ? "ready" : "missing"}</td><td>${stream ? `${stream.shared_age_ms ?? "-"}ms` : "-"}</td><td>${stream ? esc(`${actual.frame_width || "?"}x${actual.frame_height || "?"} @ ${Number(actual.measured_fps || 0).toFixed(1)}fps`) : "-"}</td></tr>`; }).join("")}</tbody></table></div></div>
   </div>`;
 }
@@ -631,17 +649,25 @@ function pushLiveCurveSample(snapshot) {
 function pushInferenceTrajectorySample(snapshot) {
   const runtimeDebug = snapshot?.provider?.online_inference?.runtime_debug || {};
   const trajectory = runtimeDebug.trajectory || {};
-  const sampleNs = Number(runtimeDebug.updated_monotonic_ns || 0);
+  const sampleNs = Number(trajectory.sample_monotonic_ns || runtimeDebug.updated_monotonic_ns || 0);
   if (!Number.isFinite(sampleNs) || sampleNs <= 0 || sampleNs === state.lastInferenceTrajectorySampleNs) return;
-  const fields = ["left_target_xyz", "left_feedback_xyz", "right_target_xyz", "right_feedback_xyz"];
-  if (!fields.every((key) => Array.isArray(trajectory[key]) && trajectory[key].length === 3 && trajectory[key].every((value) => Number.isFinite(Number(value))))) return;
+  const poseKeys = ["left_target", "left_feedback", "right_target", "right_feedback"];
+  if (!poseKeys.every((key) => {
+    const pose = trajectory[key] || {};
+    return Array.isArray(pose.xyz) && pose.xyz.length === 3 && pose.xyz.every((value) => Number.isFinite(Number(value)))
+      && Array.isArray(pose.rot6d) && pose.rot6d.length === 6 && pose.rot6d.every((value) => Number.isFinite(Number(value)));
+  })) return;
   const hist = Array.isArray(state.inferenceTrajectoryHistory) ? state.inferenceTrajectoryHistory : [];
   hist.push({
     t: sampleNs,
-    leftTarget: trajectory.left_target_xyz.map(Number),
-    leftFeedback: trajectory.left_feedback_xyz.map(Number),
-    rightTarget: trajectory.right_target_xyz.map(Number),
-    rightFeedback: trajectory.right_feedback_xyz.map(Number),
+    leftTarget: trajectory.left_target.xyz.map(Number),
+    leftFeedback: trajectory.left_feedback.xyz.map(Number),
+    rightTarget: trajectory.right_target.xyz.map(Number),
+    rightFeedback: trajectory.right_feedback.xyz.map(Number),
+    leftTargetRot6d: trajectory.left_target.rot6d.map(Number),
+    leftFeedbackRot6d: trajectory.left_feedback.rot6d.map(Number),
+    rightTargetRot6d: trajectory.right_target.rot6d.map(Number),
+    rightFeedbackRot6d: trajectory.right_feedback.rot6d.map(Number),
   });
   while (hist.length > 180) hist.shift();
   state.inferenceTrajectoryHistory = hist;
@@ -654,6 +680,7 @@ const JOINT_COLORS = ["#007aff","#5856d6","#34c759","#ff9f0a","#ff3b30","#00c7be
 const GRIPPER_COLORS = { left: "#007aff", right: "#ff3b30" };
 const INFERENCE_AXIS_COLORS = ["#007aff", "#34c759", "#ff9f0a"];
 const INFERENCE_FEEDBACK_COLORS = ["#6baeff", "#70d78b", "#ffc163"];
+const ROT6D_COLORS = ["#ff3b30", "#ff9f0a", "#ffd60a", "#34c759", "#007aff", "#af52de"];
 const DEFAULT_URDF = "/home/luopengcheng/Programs/xr_teleoperate/assets/g1_d/g1_d.urdf";
 
 function readExportConfig() {
@@ -716,12 +743,14 @@ function renderCurveLegends() {
   const leftGripHtml = `<span><i style="background:${GRIPPER_COLORS.left}"></i>left gripper</span>`;
   const rightGripHtml = `<span><i style="background:${GRIPPER_COLORS.right}"></i>right gripper</span>`;
   const wristHtml = ["X", "Y", "Z"].map((axis, index) => `<span><i style="background:${INFERENCE_AXIS_COLORS[index]}"></i>${axis} target</span><span><i style="background:${INFERENCE_FEEDBACK_COLORS[index]}"></i>${axis} feedback</span>`).join("");
+  const rot6dHtml = ROT6D_COLORS.map((color, index) => `<span><i style="background:${color}"></i>r${index + 1}</span>`).join("") + `<span><i style="background:#111827"></i>rotation error</span>`;
   const items = [
     ["liveLeftJointLegend", jointHtml], ["liveRightJointLegend", jointHtml],
     ["playbackLeftJointLegend", jointHtml], ["playbackRightJointLegend", jointHtml],
     ["liveLeftGripperLegend", leftGripHtml], ["playbackLeftGripperLegend", leftGripHtml],
     ["liveRightGripperLegend", rightGripHtml], ["playbackRightGripperLegend", rightGripHtml],
     ["inferenceLeftWristLegend", wristHtml], ["inferenceRightWristLegend", wristHtml],
+    ["inferenceLeftRot6dLegend", rot6dHtml], ["inferenceRightRot6dLegend", rot6dHtml],
   ];
   for (const [id, html] of items) {
     const node = document.getElementById(id);
@@ -739,6 +768,7 @@ function scheduleCurveDraw(force = false) {
     if (state.active === "record") drawLiveCurvesDual();
     if (state.active === "playback") drawPlaybackCurves(state.snapshot?.playback || {});
     if (state.active === "inference") drawInferenceTrajectoryCurves();
+    if (state.active === "inference") drawInferenceDualTcp3D();
   });
 }
 
@@ -845,18 +875,206 @@ function drawInferenceTrajectoryCurves() {
   ]);
   drawSeriesCanvas("inferenceLeftWristCurveCanvas", "Left wrist position (m)", buildSeries("leftTarget", "leftFeedback"));
   drawSeriesCanvas("inferenceRightWristCurveCanvas", "Right wrist position (m)", buildSeries("rightTarget", "rightFeedback"));
+  const buildRot6d = (targetKey, feedbackKey) => ROT6D_COLORS.map((color, index) => ({
+    name: `r${index + 1}`,
+    color,
+    values: hist.map((sample) => sample[targetKey]?.[index] ?? null),
+  })).concat(ROT6D_COLORS.map((color, index) => ({
+    name: `r${index + 1} feedback`,
+    color: `${color}88`,
+    values: hist.map((sample) => sample[feedbackKey]?.[index] ?? null),
+  })));
+  const rotationErrors = (targetKey, feedbackKey) => hist.map((sample) => rotationErrorDegrees(sample[targetKey], sample[feedbackKey]));
+  drawSeriesCanvas("inferenceLeftRot6dCanvas", "Left Rot6D target / feedback", buildRot6d("leftTargetRot6d", "leftFeedbackRot6d"));
+  drawSeriesCanvas("inferenceRightRot6dCanvas", "Right Rot6D target / feedback", buildRot6d("rightTargetRot6d", "rightFeedbackRot6d"));
+  drawSeriesCanvas("inferenceLeftRotationErrorCanvas", "Left target-feedback rotation error (deg)", [{ name: "rotation error", color: "#111827", values: rotationErrors("leftTargetRot6d", "leftFeedbackRot6d") }]);
+  drawSeriesCanvas("inferenceRightRotationErrorCanvas", "Right target-feedback rotation error (deg)", [{ name: "rotation error", color: "#111827", values: rotationErrors("rightTargetRot6d", "rightFeedbackRot6d") }]);
+}
+
+function normalizeVector3(values) {
+  if (!Array.isArray(values) || values.length !== 3) return null;
+  const vector = values.map(Number);
+  const norm = Math.hypot(...vector);
+  if (!Number.isFinite(norm) || norm < 1e-8) return null;
+  return vector.map((value) => value / norm);
+}
+
+function crossVector3(a, b) {
+  return [
+    a[1] * b[2] - a[2] * b[1],
+    a[2] * b[0] - a[0] * b[2],
+    a[0] * b[1] - a[1] * b[0],
+  ];
+}
+
+function rot6dBasis(rot6d) {
+  if (!Array.isArray(rot6d) || rot6d.length !== 6) return null;
+  const c1 = normalizeVector3(rot6d.slice(0, 3));
+  if (!c1) return null;
+  const c2Raw = rot6d.slice(3, 6).map(Number);
+  const projection = c1.reduce((sum, value, index) => sum + value * c2Raw[index], 0);
+  const c2 = normalizeVector3(c2Raw.map((value, index) => value - c1[index] * projection));
+  if (!c2) return null;
+  const c3 = normalizeVector3(crossVector3(c1, c2));
+  return c3 ? [c1, c2, c3] : null;
+}
+
+function rotationErrorDegrees(targetRot6d, feedbackRot6d) {
+  const target = rot6dBasis(targetRot6d);
+  const feedback = rot6dBasis(feedbackRot6d);
+  if (!target || !feedback) return null;
+  let trace = 0;
+  for (let row = 0; row < 3; row += 1) {
+    for (let col = 0; col < 3; col += 1) trace += target[col][row] * feedback[col][row];
+  }
+  const cosine = Math.max(-1, Math.min(1, (trace - 1) / 2));
+  return Math.acos(cosine) * 180 / Math.PI;
+}
+
+function attachInferenceThreeControls(canvas, threeState) {
+  if (threeState.controlsAttached) return;
+  threeState.controlsAttached = true;
+  canvas.addEventListener("pointerdown", (event) => {
+    threeState.dragging = true;
+    threeState.lastX = event.clientX;
+    threeState.lastY = event.clientY;
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointerup", (event) => {
+    threeState.dragging = false;
+    canvas.releasePointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointercancel", () => { threeState.dragging = false; });
+  canvas.addEventListener("pointermove", (event) => {
+    if (!threeState.dragging) return;
+    threeState.yaw += (event.clientX - threeState.lastX) * 0.008;
+    threeState.pitch = Math.max(-1.35, Math.min(1.15, threeState.pitch + (event.clientY - threeState.lastY) * 0.008));
+    threeState.lastX = event.clientX;
+    threeState.lastY = event.clientY;
+    drawInferenceDualTcp3D();
+  });
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    threeState.zoom = Math.max(0.45, Math.min(2.6, threeState.zoom * (event.deltaY > 0 ? 1.1 : 0.9)));
+    drawInferenceDualTcp3D();
+  }, { passive: false });
+}
+
+function disposeInferenceThreeRoot(root) {
+  while (root.children.length) {
+    const child = root.children.pop();
+    child.traverse((item) => {
+      item.geometry?.dispose?.();
+      if (Array.isArray(item.material)) item.material.forEach((material) => material.dispose?.());
+      else item.material?.dispose?.();
+    });
+  }
+}
+
+function drawInferenceDualTcp3D() {
+  const canvas = document.getElementById("inferenceDualTcpCanvas");
+  const error = document.getElementById("inferenceWebglError");
+  if (!canvas) return;
+  const probe = document.createElement("canvas").getContext("webgl2") || document.createElement("canvas").getContext("webgl");
+  if (!probe) {
+    if (error) error.classList.remove("hidden");
+    return;
+  }
+  if (error) error.classList.add("hidden");
+  let threeState = state.inferenceThreeState.get(canvas);
+  if (!threeState) {
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.001, 100);
+    const root = new THREE.Group();
+    scene.add(new THREE.AmbientLight(0xffffff, 1));
+    scene.add(root);
+    threeState = { renderer, scene, camera, root, yaw: 2.3, pitch: -0.55, zoom: 1, dragging: false, lastX: 0, lastY: 0, controlsAttached: false };
+    state.inferenceThreeState.set(canvas, threeState);
+    attachInferenceThreeControls(canvas, threeState);
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(360, Math.floor(rect.width));
+  const height = Math.max(300, Math.floor(rect.height));
+  threeState.renderer.setSize(width, height, false);
+  threeState.camera.aspect = width / height;
+  disposeInferenceThreeRoot(threeState.root);
+
+  const history = state.inferenceTrajectoryHistory || [];
+  const paths = [
+    { key: "leftTarget", rotKey: "leftTargetRot6d", color: 0x007aff, opacity: 1, dashed: false },
+    { key: "leftFeedback", rotKey: "leftFeedbackRot6d", color: 0x6baeff, opacity: 0.72, dashed: true },
+    { key: "rightTarget", rotKey: "rightTargetRot6d", color: 0xff3b30, opacity: 1, dashed: false },
+    { key: "rightFeedback", rotKey: "rightFeedbackRot6d", color: 0xffa09b, opacity: 0.72, dashed: true },
+  ].map((entry) => ({ ...entry, points: history.map((sample) => sample[entry.key]).filter((point) => Array.isArray(point) && point.length === 3) }));
+  const allPoints = paths.flatMap((entry) => entry.points).map((point) => new THREE.Vector3(point[0], point[1], point[2]));
+  if (!allPoints.length) {
+    threeState.renderer.render(threeState.scene, threeState.camera);
+    return;
+  }
+  const box = new THREE.Box3().setFromPoints(allPoints);
+  const center = box.getCenter(new THREE.Vector3());
+  const size = box.getSize(new THREE.Vector3());
+  const span = Math.max(size.x, size.y, size.z, 0.05);
+  const distance = span * 3.1 * threeState.zoom;
+  const cosPitch = Math.cos(threeState.pitch);
+  threeState.camera.position.set(
+    center.x + distance * cosPitch * Math.cos(threeState.yaw),
+    center.y + distance * cosPitch * Math.sin(threeState.yaw),
+    center.z + distance * Math.sin(threeState.pitch),
+  );
+  threeState.camera.lookAt(center);
+  threeState.camera.updateProjectionMatrix();
+
+  const grid = new THREE.GridHelper(Math.max(span * 1.5, 0.2), 8, 0x94a3b8, 0xd1d5db);
+  grid.rotation.x = Math.PI / 2;
+  grid.position.set(center.x, center.y, box.min.z);
+  threeState.root.add(grid);
+  paths.forEach((entry) => {
+    const points = entry.points.map((point) => new THREE.Vector3(point[0], point[1], point[2]));
+    if (points.length < 2) return;
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    const material = entry.dashed
+      ? new THREE.LineDashedMaterial({ color: entry.color, transparent: true, opacity: entry.opacity, dashSize: span * 0.035, gapSize: span * 0.02 })
+      : new THREE.LineBasicMaterial({ color: entry.color, transparent: true, opacity: entry.opacity });
+    const line = new THREE.Line(geometry, material);
+    if (entry.dashed) line.computeLineDistances();
+    threeState.root.add(line);
+    const latest = points[points.length - 1];
+    const marker = new THREE.Mesh(new THREE.SphereGeometry(span * 0.018, 14, 10), new THREE.MeshBasicMaterial({ color: entry.color }));
+    marker.position.copy(latest);
+    threeState.root.add(marker);
+  });
+  const latest = history[history.length - 1];
+  [
+    [latest?.leftTarget, latest?.leftTargetRot6d],
+    [latest?.rightTarget, latest?.rightTargetRot6d],
+  ].forEach(([position, rotation]) => {
+    const basis = rot6dBasis(rotation);
+    if (!Array.isArray(position) || !basis) return;
+    const axes = new THREE.AxesHelper(Math.max(span * 0.1, 0.025));
+    axes.position.set(position[0], position[1], position[2]);
+    axes.setRotationFromMatrix(new THREE.Matrix4().makeBasis(
+      new THREE.Vector3(...basis[0]), new THREE.Vector3(...basis[1]), new THREE.Vector3(...basis[2]),
+    ));
+    threeState.root.add(axes);
+  });
+  threeState.renderer.render(threeState.scene, threeState.camera);
 }
 
 function updatePreviewLoop() {
-  if (state.active !== "record") return;
-  document.querySelectorAll("img[data-live-camera]").forEach((img) => {
-    const base = img.dataset.frameSrc || `/camera/frame?camera_id=${img.dataset.liveCamera || 0}`;
+  if (state.active !== "record" && state.active !== "inference") return;
+  document.querySelectorAll("img[data-live-camera], img[data-inference-camera]").forEach((img) => {
+    const cameraId = img.dataset.liveCamera ?? img.dataset.inferenceCamera ?? "0";
+    const base = img.dataset.frameSrc || `/camera/frame?camera_id=${cameraId}`;
     const sep = base.includes("?") ? "&" : "?";
     const url = `${base}${sep}_=${Math.floor(performance.now() / 200)}`;
     const hint = img.parentElement?.querySelector(".hint") || null;
     img.onload = () => { img.style.display = "block"; if (hint) hint.textContent = ""; };
-    img.onerror = () => { img.style.display = "none"; if (hint) hint.textContent = `cam${img.dataset.liveCamera || ""} 暂无图像`; };
-    if (hint && !img.getAttribute("src")) hint.textContent = `等待 cam${img.dataset.liveCamera || ""}...`;
+    img.onerror = () => { img.style.display = "none"; if (hint) hint.textContent = `cam${cameraId} 暂无图像`; };
+    if (hint && !img.getAttribute("src")) hint.textContent = `等待 cam${cameraId}...`;
     if (img.getAttribute("src") !== url) img.src = url;
   });
 }

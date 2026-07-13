@@ -214,6 +214,24 @@ class ProviderSwitchTest(unittest.TestCase):
             },
         )
 
+    def test_runtime_keeps_execution_trace_when_action_debug_is_refreshed(self):
+        runtime = TeleopProviderRuntime(
+            live_provider=object(),
+            online_provider_factory=lambda **_kwargs: type("Provider", (), {"close": lambda self: None})(),
+        )
+
+        runtime.set_hold(reason="ui_inference_start")
+        runtime.start_online_inference(prompt="pick up the cube")
+        runtime.note_online_inference_runtime_debug({"latency": {"ik_ms": 4.0}})
+        runtime.note_online_inference_execution_trace(
+            {"current": None, "latest": {"seq": 7, "status": "completed", "pub_to_exec_thread_ms": 18.0}}
+        )
+        runtime.note_online_inference_runtime_debug({"latency": {"ik_ms": 5.0}})
+
+        debug = runtime.status()["online_inference"]["runtime_debug"]
+        self.assertEqual(debug["latency"], {"ik_ms": 5.0})
+        self.assertEqual(debug["execution_trace"]["latest"]["seq"], 7)
+
 
 class UiStateStoreTest(unittest.TestCase):
     def test_snapshot_returns_copy_with_incrementing_version(self):
