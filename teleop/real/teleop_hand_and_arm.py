@@ -1014,6 +1014,34 @@ if __name__ == '__main__':
             ctrl_dual_arm_call_ms = (time.perf_counter() - ctrl_dual_arm_start) * 1000.0
             if trace_seq is not None:
                 latency_tracker.set_fields(trace_seq, ctrl_dual_arm_call_ms=ctrl_dual_arm_call_ms)
+            if active_input_provider == "online_inference":
+                metadata = getattr(motion_intent, "metadata", {}) or {}
+                provider_runtime.note_online_inference_runtime_debug(
+                    {
+                        "updated_monotonic_ns": int(time.monotonic_ns()),
+                        "latency": {
+                            "http_roundtrip_ms": metadata.get("online_obs_send_to_action_recv_ms"),
+                            "tele_fetch_ms": float(tele_fetch_ms),
+                            "ik_ms": float(ik_ms),
+                            "safety_ms": float(safety_ms),
+                            "gravity_ms": float(gravity_ms),
+                            "provider_feedback_ms": float(provider_feedback_ms),
+                            "target_submit_ms": float(ctrl_dual_arm_call_ms),
+                        },
+                        "safety": {
+                            "provider_feedback": provider_feedback,
+                            "command_delta_max_abs": float(np.max(np.abs(sol_q - current_lr_arm_q))),
+                            "command_delta_l2": float(np.linalg.norm(sol_q - current_lr_arm_q)),
+                            "target_submitted": True,
+                        },
+                        "trajectory": {
+                            "left_target_xyz": np.asarray(motion_intent.left_wrist_pose, dtype=float)[:3, 3].tolist(),
+                            "right_target_xyz": np.asarray(motion_intent.right_wrist_pose, dtype=float)[:3, 3].tolist(),
+                            "left_feedback_xyz": np.asarray(current_left_wrist_pose, dtype=float)[:3, 3].tolist(),
+                            "right_feedback_xyz": np.asarray(current_right_wrist_pose, dtype=float)[:3, 3].tolist(),
+                        },
+                    }
+                )
             if is_ui_raw_replay and bool(getattr(sample, "done", False)):
                 current_hold_q = sol_q.copy()
                 current_hold_tauff = sol_tauff.copy()

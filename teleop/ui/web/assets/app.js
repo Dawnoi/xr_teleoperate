@@ -46,6 +46,9 @@ const state = {
   cameraFpsHistory: {},
   lastCameraStatusRefreshMs: 0,
   cameraStatusError: "",
+  inferenceTrajectoryHistory: [],
+  lastInferenceTrajectorySampleNs: 0,
+  lastInferenceRenderMs: 0,
   shuttingDown: false,
   drawRaf: 0,
   lastCurveDrawMs: 0,
@@ -306,8 +309,14 @@ function renderInference() {
   const latestObservation = debug.last_observation || {};
   const latestAction = debug.last_action || {};
   const postActionDelay = debug.post_action_delay || {};
+  const runtimeDebug = inference.runtime_debug || {};
+  const latency = runtimeDebug.latency || {};
+  const safety = runtimeDebug.safety || {};
+  const feedback = safety.provider_feedback || {};
+  const feedbackText = feedback.reason || feedback.error || (Object.keys(feedback).length ? JSON.stringify(feedback) : "-");
   const chunkIndex = Number(latestAction.chunk_index ?? latestAction.online_chunk_index ?? -1);
   const chunkSize = Number(latestAction.chunk_size ?? latestAction.online_chunk_size ?? 0);
+  const ms = (value) => Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)} ms` : "-";
   return `<div class="grid">
     <div class="card hero full"><div class="card-head"><div><div class="eyebrow">HTTP pi0.5</div><div class="headline">真机推理</div><div class="subline">当前 provider=${esc(provider.active_provider || "hold")} · ${esc(phase)}</div></div>${badge(active ? "running" : inference.state || "idle", active ? "RUNNING" : inference.state || "IDLE")}</div>
       <div class="form"><label class="full">任务描述 / prompt<input id="inferencePrompt" value="${esc(prompt)}" placeholder="例如：pick up the cube" oninput="localStorage.inferencePrompt=this.value"></label></div>
@@ -316,6 +325,9 @@ function renderInference() {
       ${inference.error ? `<p class="err-text">${esc(inference.error)}</p>` : ""}</div>
     <div class="card"><div class="card-head"><h2>会话状态</h2>${badge(phase)}</div><div class="kv"><span class="muted">阶段</span><span>${esc(phase)}</span><span class="muted">协议</span><span>${esc(debug.protocol_profile || "pi05_dual_arm_20d")}</span><span class="muted">手臂</span><span>${esc(debug.arm_side || "both")}</span><span class="muted">动作块</span><span>${chunkIndex >= 0 ? `${chunkIndex + 1}/${chunkSize || "?"}` : "-"}</span>${phase === "post_action_delay" ? `<span class="muted">延迟剩余</span><span>${Number(postActionDelay.remaining_ms ?? 0).toFixed(1)} ms</span>` : ""}</div></div>
     <div class="card"><div class="card-head"><h2>最近推理数据</h2><span class="mini">HTTP 18027</span></div><div class="kv"><span class="muted">观测序号</span><span>${esc(latestObservation.observation_seq ?? "-")}</span><span class="muted">动作块序号</span><span>${esc(latestAction.chunk_seq ?? "-")}</span><span class="muted">实际发送 prompt</span><span>${esc(latestObservation.prompt || "-")}</span><span class="muted">错误</span><span class="${inference.error ? "err-text" : ""}">${esc(inference.error || debug.error || "-")}</span></div></div>
+    <div class="card full"><div class="card-head"><div><h2>推理闭环延迟</h2><p class="mini">HTTP 从 observation 发出到 action 收到；其余是同一轮主控制循环的实测耗时。</p></div><span class="pill">${esc(runtimeDebug.updated_monotonic_ns ? "live" : "waiting")}</span></div><div class="metric-grid"><div class="metric"><span>HTTP 往返</span><b>${ms(latency.http_roundtrip_ms)}</b></div><div class="metric"><span>读取输入</span><b>${ms(latency.tele_fetch_ms)}</b></div><div class="metric"><span>IK</span><b>${ms(latency.ik_ms)}</b></div><div class="metric"><span>安全限幅</span><b>${ms(latency.safety_ms)}</b></div><div class="metric"><span>重力补偿</span><b>${ms(latency.gravity_ms)}</b></div><div class="metric"><span>反馈上报</span><b>${ms(latency.provider_feedback_ms)}</b></div><div class="metric"><span>目标下发</span><b>${ms(latency.target_submit_ms)}</b><small class="mini">仅表示 ctrl_dual_arm 调用完成</small></div></div></div>
+    <div class="card full"><div class="card-head"><div><h2>安全与下发</h2><p class="mini">出现 workspace、速度或 IK 拒绝时，控制链会反馈 provider 并保持当前姿态。</p></div>${badge(feedback.fatal ? "error" : "ok", feedback.fatal ? "REJECTED" : "CLEAR")}</div><div class="metric-grid three"><div class="metric"><span>安全反馈</span><b class="${feedback.fatal ? "err-text" : ""}">${esc(feedbackText)}</b></div><div class="metric"><span>目标关节最大差</span><b>${Number(safety.command_delta_max_abs || 0).toFixed(4)} rad</b><small class="mini">L2 ${Number(safety.command_delta_l2 || 0).toFixed(4)} rad</small></div><div class="metric"><span>目标提交</span><b>${safety.target_submitted ? "已调用" : "未提交"}</b><small class="mini">不是 DDS 执行确认</small></div></div></div>
+    <div class="card full"><div class="card-head"><div><h2>双臂腕部目标与反馈轨迹</h2><p class="mini">目标来自模型 action pose；反馈来自当前机械臂关节 FK。仅保留最近 180 个主循环样本。</p></div><span class="pill">XYZ · m</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left wrist XYZ</b><span>target / feedback</span></div><canvas id="inferenceLeftWristCurveCanvas" height="220"></canvas><div class="curve-legend" id="inferenceLeftWristLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right wrist XYZ</b><span>target / feedback</span></div><canvas id="inferenceRightWristCurveCanvas" height="220"></canvas><div class="curve-legend" id="inferenceRightWristLegend"></div></div></div></div>
     <div class="card full"><div class="card-head"><div><h2>推理相机</h2><p class="mini">启动推理前必须同时具备 head、left_wrist、right_wrist 三路运行时相机。</p></div><span class="pill">${streams.length}/3 streams</span></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>状态</th><th>帧年龄</th><th>实际输出</th></tr></thead><tbody>${requiredNames.map((name) => { const stream = streams.find((item) => String(item.camera_name || "") === name); const actual = stream?.actual_capture || {}; return `<tr><td><b>${esc(name)}</b></td><td>${stream ? "ready" : "missing"}</td><td>${stream ? `${stream.shared_age_ms ?? "-"}ms` : "-"}</td><td>${stream ? esc(`${actual.frame_width || "?"}x${actual.frame_height || "?"} @ ${Number(actual.measured_fps || 0).toFixed(1)}fps`) : "-"}</td></tr>`; }).join("")}</tbody></table></div></div>
   </div>`;
 }
@@ -430,6 +442,7 @@ function render() {
     : state.active === "playback" ? renderPlayback()
     : state.active === "inference" ? renderInference()
     : renderExport();
+  if (state.active === "inference") state.lastInferenceRenderMs = performance.now();
   updatePreviewLoop();
   renderCurveLegends();
   scheduleCurveDraw(true);
@@ -439,6 +452,10 @@ function render() {
 
 function setTab(id) {
   if (state.active === "export") syncExportConfigFromDom();
+  if (state.snapshot?.provider?.active_provider === "online_inference" && id !== "inference") {
+    showBanner("推理运行中，请先停止并 HOLD", "error");
+    return;
+  }
   const recording = state.snapshot?.recording || {};
   const alignment = recording.last_alignment || {};
   if (id === "playback" && (recording.active || recording.phase === "armed" || alignment.waiting_for_first_frame)) {
@@ -485,6 +502,7 @@ function applySnapshot(payload) {
   const r = state.snapshot.recording || {};
   const prevR = prev.recording || {};
   pushLiveCurveSample(state.snapshot);
+  pushInferenceTrajectorySample(state.snapshot);
   el("connDot").className = "dot ok";
   el("connText").textContent = "connected";
   el("recDot").className = "dot " + (r.active ? "ok" : "");
@@ -509,6 +527,8 @@ function applySnapshot(payload) {
   const prevInference = prev.provider?.online_inference || {};
   const inferenceDebug = inference.debug || {};
   const prevInferenceDebug = prevInference.debug || {};
+  const inferenceRuntimeDebug = inference.runtime_debug || {};
+  const prevInferenceRuntimeDebug = prevInference.runtime_debug || {};
   const inferenceAction = inferenceDebug.last_action || {};
   const prevInferenceAction = prevInferenceDebug.last_action || {};
   const inferenceObservation = inferenceDebug.last_observation || {};
@@ -523,7 +543,10 @@ function applySnapshot(payload) {
     inferenceAction.chunk_index !== prevInferenceAction.chunk_index ||
     inferenceAction.chunk_size !== prevInferenceAction.chunk_size
   );
-  const shouldRenderInference = state.active === "inference" && changedInference;
+  const changedInferenceRuntime = inferenceRuntimeDebug.updated_monotonic_ns !== prevInferenceRuntimeDebug.updated_monotonic_ns;
+  const shouldRenderInference = state.active === "inference" && (
+    changedInference || (changedInferenceRuntime && performance.now() - Number(state.lastInferenceRenderMs || 0) >= 150)
+  );
   if ((changedRecording || changedValidation || changedTeleop || shouldRenderInference) && document.activeElement?.tagName !== "INPUT") render();
   if (state.active === "playback") syncPlaybackPanel(state.snapshot.playback || {});
   scheduleCurveDraw(false);
@@ -605,10 +628,32 @@ function pushLiveCurveSample(snapshot) {
   state.liveCurveHistory = hist;
 }
 
+function pushInferenceTrajectorySample(snapshot) {
+  const runtimeDebug = snapshot?.provider?.online_inference?.runtime_debug || {};
+  const trajectory = runtimeDebug.trajectory || {};
+  const sampleNs = Number(runtimeDebug.updated_monotonic_ns || 0);
+  if (!Number.isFinite(sampleNs) || sampleNs <= 0 || sampleNs === state.lastInferenceTrajectorySampleNs) return;
+  const fields = ["left_target_xyz", "left_feedback_xyz", "right_target_xyz", "right_feedback_xyz"];
+  if (!fields.every((key) => Array.isArray(trajectory[key]) && trajectory[key].length === 3 && trajectory[key].every((value) => Number.isFinite(Number(value))))) return;
+  const hist = Array.isArray(state.inferenceTrajectoryHistory) ? state.inferenceTrajectoryHistory : [];
+  hist.push({
+    t: sampleNs,
+    leftTarget: trajectory.left_target_xyz.map(Number),
+    leftFeedback: trajectory.left_feedback_xyz.map(Number),
+    rightTarget: trajectory.right_target_xyz.map(Number),
+    rightFeedback: trajectory.right_feedback_xyz.map(Number),
+  });
+  while (hist.length > 180) hist.shift();
+  state.inferenceTrajectoryHistory = hist;
+  state.lastInferenceTrajectorySampleNs = sampleNs;
+}
+
 const JOINT_NAMES = ["j1","j2","j3","j4","j5","j6","j7"];
 const JOINT_KEYS = ["joint1","joint2","joint3","joint4","joint5","joint6","joint7"];
 const JOINT_COLORS = ["#007aff","#5856d6","#34c759","#ff9f0a","#ff3b30","#00c7be","#af52de"];
 const GRIPPER_COLORS = { left: "#007aff", right: "#ff3b30" };
+const INFERENCE_AXIS_COLORS = ["#007aff", "#34c759", "#ff9f0a"];
+const INFERENCE_FEEDBACK_COLORS = ["#6baeff", "#70d78b", "#ffc163"];
 const DEFAULT_URDF = "/home/luopengcheng/Programs/xr_teleoperate/assets/g1_d/g1_d.urdf";
 
 function readExportConfig() {
@@ -670,11 +715,13 @@ function renderCurveLegends() {
   const jointHtml = JOINT_NAMES.map((n, i) => `<span><i style="background:${JOINT_COLORS[i]}"></i>${n}</span>`).join("");
   const leftGripHtml = `<span><i style="background:${GRIPPER_COLORS.left}"></i>left gripper</span>`;
   const rightGripHtml = `<span><i style="background:${GRIPPER_COLORS.right}"></i>right gripper</span>`;
+  const wristHtml = ["X", "Y", "Z"].map((axis, index) => `<span><i style="background:${INFERENCE_AXIS_COLORS[index]}"></i>${axis} target</span><span><i style="background:${INFERENCE_FEEDBACK_COLORS[index]}"></i>${axis} feedback</span>`).join("");
   const items = [
     ["liveLeftJointLegend", jointHtml], ["liveRightJointLegend", jointHtml],
     ["playbackLeftJointLegend", jointHtml], ["playbackRightJointLegend", jointHtml],
     ["liveLeftGripperLegend", leftGripHtml], ["playbackLeftGripperLegend", leftGripHtml],
     ["liveRightGripperLegend", rightGripHtml], ["playbackRightGripperLegend", rightGripHtml],
+    ["inferenceLeftWristLegend", wristHtml], ["inferenceRightWristLegend", wristHtml],
   ];
   for (const [id, html] of items) {
     const node = document.getElementById(id);
@@ -691,6 +738,7 @@ function scheduleCurveDraw(force = false) {
     state.lastCurveDrawMs = performance.now();
     if (state.active === "record") drawLiveCurvesDual();
     if (state.active === "playback") drawPlaybackCurves(state.snapshot?.playback || {});
+    if (state.active === "inference") drawInferenceTrajectoryCurves();
   });
 }
 
@@ -787,6 +835,16 @@ function drawLiveCurvesDual() {
   drawSeriesCanvas("liveRightJointCurveCanvas", "Right J1-J7 feedback", rightJointSeries);
   drawSeriesCanvas("liveLeftGripperCurveCanvas", "Left gripper feedback", [{ name:"left gripper", color:GRIPPER_COLORS.left, values:hist.map((x) =>x?.left?.[7] ?? null) }]);
   drawSeriesCanvas("liveRightGripperCurveCanvas", "Right gripper feedback", [{ name:"right gripper", color:GRIPPER_COLORS.right, values:hist.map((x) =>x?.right?.[7] ?? null) }]);
+}
+
+function drawInferenceTrajectoryCurves() {
+  const hist = state.inferenceTrajectoryHistory || [];
+  const buildSeries = (targetKey, feedbackKey) => [0, 1, 2].flatMap((index) => [
+    { name: `XYZ`.charAt(index) + " target", color: INFERENCE_AXIS_COLORS[index], values: hist.map((sample) => sample[targetKey]?.[index] ?? null) },
+    { name: `XYZ`.charAt(index) + " feedback", color: INFERENCE_FEEDBACK_COLORS[index], values: hist.map((sample) => sample[feedbackKey]?.[index] ?? null) },
+  ]);
+  drawSeriesCanvas("inferenceLeftWristCurveCanvas", "Left wrist position (m)", buildSeries("leftTarget", "leftFeedback"));
+  drawSeriesCanvas("inferenceRightWristCurveCanvas", "Right wrist position (m)", buildSeries("rightTarget", "rightFeedback"));
 }
 
 function updatePreviewLoop() {

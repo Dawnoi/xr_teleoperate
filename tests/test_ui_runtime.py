@@ -183,6 +183,37 @@ class ProviderSwitchTest(unittest.TestCase):
         self.assertEqual(runtime.status()["online_inference"]["state"], "error")
         self.assertEqual(runtime.status()["online_inference"]["error"], "action response timeout")
 
+    def test_runtime_exposes_latest_online_inference_execution_debug(self):
+        runtime = TeleopProviderRuntime(
+            live_provider=object(),
+            online_provider_factory=lambda **_kwargs: type("Provider", (), {"close": lambda self: None})(),
+        )
+
+        runtime.set_hold(reason="ui_inference_start")
+        runtime.start_online_inference(prompt="pick up the cube")
+        runtime.note_online_inference_runtime_debug(
+            {
+                "http_roundtrip_ms": 112.5,
+                "ik_ms": 4.0,
+                "trajectory": {
+                    "left_target_xyz": [0.1, 0.2, 0.3],
+                    "right_feedback_xyz": [0.4, 0.5, 0.6],
+                },
+            }
+        )
+
+        self.assertEqual(
+            runtime.status()["online_inference"]["runtime_debug"],
+            {
+                "http_roundtrip_ms": 112.5,
+                "ik_ms": 4.0,
+                "trajectory": {
+                    "left_target_xyz": [0.1, 0.2, 0.3],
+                    "right_feedback_xyz": [0.4, 0.5, 0.6],
+                },
+            },
+        )
+
 
 class UiStateStoreTest(unittest.TestCase):
     def test_snapshot_returns_copy_with_incrementing_version(self):

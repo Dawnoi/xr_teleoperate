@@ -46,6 +46,7 @@ class OnlineInferenceStatus:
     prompt: str = ""
     error: str = ""
     reason: str = ""
+    runtime_debug: dict[str, Any] | None = None
 
     def as_dict(self, provider: Any = None) -> dict[str, Any]:
         debug = {}
@@ -59,6 +60,7 @@ class OnlineInferenceStatus:
             "error": self.error,
             "reason": self.reason,
             "debug": debug,
+            "runtime_debug": dict(self.runtime_debug or {}),
         }
 
 
@@ -219,6 +221,11 @@ class TeleopProviderRuntime:
         self._online_inference.reason = "online_inference_error"
         self._last_error = self._online_inference.error
         self._last_reason = self._online_inference.reason
+
+    def note_online_inference_runtime_debug(self, debug: dict[str, Any]) -> None:
+        if self._active_provider_kind != ActiveProviderKind.ONLINE_INFERENCE:
+            return
+        self._online_inference.runtime_debug = dict(debug)
 
     def _close_online_provider(self) -> None:
         provider = self._online_provider
