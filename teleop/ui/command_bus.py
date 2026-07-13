@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from threading import Lock
 from dataclasses import dataclass
 from enum import Enum
 from queue import Queue
@@ -18,6 +19,8 @@ class UiCommandName(str, Enum):
     SET_PROVIDER_XR = "set_provider_xr"
     START_RAW_REPLAY = "start_raw_replay"
     STOP_RAW_REPLAY = "stop_raw_replay"
+    START_ONLINE_INFERENCE = "start_online_inference"
+    STOP_ONLINE_INFERENCE = "stop_online_inference"
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,8 @@ class UiCommandBus:
 
     def __init__(self) -> None:
         self._queue: Queue[UiCommand] = Queue()
+        self._online_inference_stop_lock = Lock()
+        self._online_inference_stop_count = 0
 
     def submit(
         self,
@@ -50,6 +55,9 @@ class UiCommandBus:
             source=str(source or "web"),
             payload=dict(payload) if payload is not None else None,
         )
+        if command.name == UiCommandName.STOP_ONLINE_INFERENCE:
+            with self._online_inference_stop_lock:
+                self._online_inference_stop_count += 1
         self._queue.put(command)
         return command
 
@@ -61,5 +69,13 @@ class UiCommandBus:
         commands: list[UiCommand] = []
         drain_count = min(limit, int(self._queue.qsize()))
         for _ in range(drain_count):
-            commands.append(self._queue.get_nowait())
+            command = self._queue.get_nowait()
+            commands.append(command)
+            if command.name == UiCommandName.STOP_ONLINE_INFERENCE:
+                with self._online_inference_stop_lock:
+                    self._online_inference_stop_count -= 1
         return commands
+
+    def online_inference_stop_requested(self) -> bool:
+        with self._online_inference_stop_lock:
+            return self._online_inference_stop_count > 0

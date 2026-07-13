@@ -3,9 +3,12 @@ from __future__ import annotations
 from typing import Any, Mapping
 import time
 
+import logging_mp
 import numpy as np
 
-from inference.online_session import CameraSample, OnlineInferenceSession, RobotStateSample
+from inference.online_session import CameraSample, OnlineInferenceConfig, OnlineInferenceSession, RobotStateSample
+from inference.pose_transform import load_pose_transformer
+from inference.transport import HttpJsonInferenceTransport, TcpJsonTransport
 from core.input.base import (
     BaseTeleopInputProvider,
     MotionIntent,
@@ -16,6 +19,98 @@ from core.input.base import (
     dex1_q_to_trigger_value,
 )
 from core.input.xr_input_types import TeleData
+
+
+logger_mp = logging_mp.getLogger(__name__)
+
+
+def _http_handshake_payload(protocol_profile: str) -> dict[str, Any]:
+    profile = str(protocol_profile or "pika_pose7").strip()
+    if profile == "pi05_dual_arm_20d":
+        return {
+            "action_dim": 20,
+            "action_space": "pose20",
+            "robot": "nero_dual_arm",
+            "transport": "http",
+        }
+    return {"transport": "http"}
+
+
+def _create_online_inference_transport(args, protocol_profile: str, transport_kind: str):
+    if transport_kind in {"http", "http_json"}:
+        base_url = str(getattr(args, "online_inference_base_url", "") or "").strip()
+        if not base_url:
+            base_url = f"http://{getattr(args, 'online_inference_host', '127.0.0.1')}:{getattr(args, 'online_inference_port', 5555)}"
+        transport = HttpJsonInferenceTransport.connect(
+            base_url=base_url,
+            handshake_path=getattr(args, "online_inference_http_handshake_path", "/handshake"),
+            infer_path=getattr(args, "online_inference_http_infer_path", "/infer"),
+            timeout_sec=getattr(args, "online_inference_response_timeout_sec", 2.0),
+            handshake_payload=_http_handshake_payload(protocol_profile),
+        )
+        transport.reset()
+        return transport, True
+    if transport_kind in {"tcp", "tcp_jsonl", "jsonl"}:
+        return (
+            TcpJsonTransport.connect(
+                host=getattr(args, "online_inference_host", "127.0.0.1"),
+                port=getattr(args, "online_inference_port", 5555),
+                connect_timeout_sec=getattr(args, "online_inference_response_timeout_sec", 2.0),
+            ),
+            False,
+        )
+    raise ValueError(f"unsupported online_inference_transport: {transport_kind}")
+
+
+def create_online_inference_provider(args) -> "OnlineInferenceInputProvider":
+    enable_motion = bool(getattr(args, "online_inference_enable_motion", False))
+    dry_run = bool(getattr(args, "online_inference_dry_run", False))
+    protocol_profile = str(getattr(args, "online_inference_protocol_profile", "pika_pose7") or "pika_pose7").strip()
+    transport_kind = str(getattr(args, "online_inference_transport", "tcp_jsonl") or "tcp_jsonl").strip()
+    transform_arm_side = "both" if protocol_profile == "pi05_dual_arm_20d" else getattr(args, "online_inference_arm_side", "both")
+    transformer = load_pose_transformer(
+        enable_motion=enable_motion and not dry_run,
+        transform_config_path=getattr(args, "online_inference_transform_config", None),
+        arm_side=transform_arm_side,
+    )
+    config = OnlineInferenceConfig(
+        arm_side=getattr(args, "online_inference_arm_side", "both"),
+        protocol_profile=protocol_profile,
+        task_prompt=getattr(args, "online_inference_prompt", ""),
+        n_obs_steps=getattr(args, "online_inference_n_obs_steps", 2),
+        camera_freq=getattr(args, "online_inference_camera_freq", 30.0),
+        action_step_sec=getattr(args, "online_inference_action_step_sec", 0.10),
+        chunk_step_mode=getattr(args, "online_inference_chunk_step_mode", "per_tick"),
+        interpolation_interval_sec=getattr(args, "online_inference_interp_sec", 0.01),
+        post_action_delay_ms=getattr(args, "online_inference_post_action_delay_ms", 75),
+        response_timeout_sec=getattr(args, "online_inference_response_timeout_sec", 2.0),
+        jpeg_quality=getattr(args, "online_inference_jpeg_quality", 85),
+        enable_motion=enable_motion,
+        dry_run=dry_run,
+    )
+    transport, handshake_complete = _create_online_inference_transport(args, protocol_profile, transport_kind)
+    session = OnlineInferenceSession(
+        config=config,
+        transport=transport,
+        pose_transformer=transformer,
+        transport_reset_done=handshake_complete,
+    )
+    logger_mp.info(
+        "Using online inference input provider: transport=%s protocol_profile=%s host=%s port=%s arm_side=%s enable_motion=%s dry_run=%s.",
+        transport_kind,
+        config.protocol_profile,
+        getattr(args, "online_inference_host", "127.0.0.1"),
+        getattr(args, "online_inference_port", 5555),
+        config.arm_side,
+        config.enable_motion,
+        config.dry_run,
+    )
+    return OnlineInferenceInputProvider(
+        session=session,
+        arm_side=config.arm_side,
+        ee=getattr(args, "ee", None),
+        no_gripper=getattr(args, "no_gripper", False),
+    )
 
 
 class OnlineInferenceInputProvider(BaseTeleopInputProvider):
@@ -165,10 +260,6 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
         return {}
 
     def close(self) -> None:
-        close_fn = getattr(self.session, "close", None)
-        if callable(close_fn):
-            close_fn()
-            return
         transport = getattr(self.session, "transport", None)
         close_transport = getattr(transport, "close", None)
         if callable(close_transport):
@@ -180,3 +271,6 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
     @property
     def done(self) -> bool:
         return False
+
+
+__all__ = ["OnlineInferenceInputProvider", "create_online_inference_provider"]

@@ -40,6 +40,15 @@ class UiCommandBusTest(unittest.TestCase):
         self.assertLess(first.created_monotonic_ns, second.created_monotonic_ns)
         self.assertEqual(bus.drain(), [])
 
+    def test_online_inference_stop_request_stays_visible_until_drained(self):
+        bus = UiCommandBus()
+
+        bus.submit(UiCommandName.STOP_ONLINE_INFERENCE)
+
+        self.assertTrue(bus.online_inference_stop_requested())
+        self.assertEqual(bus.drain()[0].name, UiCommandName.STOP_ONLINE_INFERENCE)
+        self.assertFalse(bus.online_inference_stop_requested())
+
 
 class ProviderSwitchTest(unittest.TestCase):
     def test_runtime_switches_xr_hold_raw_replay_hold(self):
@@ -113,6 +122,66 @@ class ProviderSwitchTest(unittest.TestCase):
                 arm_source="action",
                 speed_scale=1.0,
             )
+
+    def test_runtime_switches_hold_online_inference_hold(self):
+        class FakeOnlineProvider:
+            def __init__(self):
+                self.closed = False
+
+            def get_debug_snapshot(self):
+                return {"status": "collecting_observation", "error": None}
+
+            def close(self):
+                self.closed = True
+
+        created = []
+
+        def create_online_provider(*, prompt):
+            self.assertEqual(prompt, "pick up the cube")
+            provider = FakeOnlineProvider()
+            created.append(provider)
+            return provider
+
+        runtime = TeleopProviderRuntime(
+            live_provider=object(),
+            online_provider_factory=create_online_provider,
+        )
+
+        runtime.set_hold(reason="ui_inference_start")
+        runtime.start_online_inference(prompt="pick up the cube")
+
+        self.assertEqual(runtime.active_provider_kind, ActiveProviderKind.ONLINE_INFERENCE)
+        self.assertIs(runtime.active_provider(), created[0])
+        self.assertEqual(runtime.active_input_provider_name(), "online_inference")
+        self.assertEqual(runtime.status()["online_inference"]["state"], "running")
+        self.assertEqual(runtime.status()["online_inference"]["prompt"], "pick up the cube")
+        self.assertEqual(
+            runtime.status()["online_inference"]["debug"],
+            {"status": "collecting_observation", "error": None},
+        )
+
+        runtime.stop_online_inference(reason="ui_inference_stop")
+
+        self.assertEqual(runtime.active_provider_kind, ActiveProviderKind.HOLD)
+        self.assertTrue(created[0].closed)
+        self.assertEqual(runtime.status()["online_inference"]["state"], "stopped")
+
+    def test_runtime_fails_online_inference_closed_to_hold(self):
+        provider = type("Provider", (), {"close": lambda self: setattr(self, "closed", True)})()
+        provider.closed = False
+        runtime = TeleopProviderRuntime(
+            live_provider=object(),
+            online_provider_factory=lambda **_kwargs: provider,
+        )
+
+        runtime.set_hold(reason="ui_inference_start")
+        runtime.start_online_inference(prompt="pick up the cube")
+        runtime.fail_online_inference("action response timeout")
+
+        self.assertEqual(runtime.active_provider_kind, ActiveProviderKind.HOLD)
+        self.assertTrue(provider.closed)
+        self.assertEqual(runtime.status()["online_inference"]["state"], "error")
+        self.assertEqual(runtime.status()["online_inference"]["error"], "action response timeout")
 
 
 class UiStateStoreTest(unittest.TestCase):

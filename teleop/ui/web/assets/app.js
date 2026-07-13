@@ -29,6 +29,7 @@ const state = {
   realsenseDevices: [],
   episodes: [],
   convertStatus: {},
+  inferenceStatus: {},
   exportConfig: {},
   exportSelected: new Set(),
   exportRangeInput: "",
@@ -291,6 +292,34 @@ function renderPlayback() {
   </div>`;
 }
 
+function renderInference() {
+  const provider = state.snapshot?.provider || {};
+  const inference = provider.online_inference || state.inferenceStatus?.online_inference || {};
+  const debug = inference.debug || {};
+  const active = provider.active_provider === "online_inference";
+  const streams = state.cameraStatus?.streams || [];
+  const requiredNames = ["head", "left_wrist", "right_wrist"];
+  const availableNames = new Set(streams.map((stream) => String(stream.camera_name || "")));
+  const missingNames = requiredNames.filter((name) => !availableNames.has(name));
+  const prompt = String(localStorage.inferencePrompt || inference.prompt || "");
+  const phase = String(debug.status || inference.state || "idle");
+  const latestObservation = debug.last_observation || {};
+  const latestAction = debug.last_action || {};
+  const postActionDelay = debug.post_action_delay || {};
+  const chunkIndex = Number(latestAction.chunk_index ?? latestAction.online_chunk_index ?? -1);
+  const chunkSize = Number(latestAction.chunk_size ?? latestAction.online_chunk_size ?? 0);
+  return `<div class="grid">
+    <div class="card hero full"><div class="card-head"><div><div class="eyebrow">HTTP pi0.5</div><div class="headline">真机推理</div><div class="subline">当前 provider=${esc(provider.active_provider || "hold")} · ${esc(phase)}</div></div>${badge(active ? "running" : inference.state || "idle", active ? "RUNNING" : inference.state || "IDLE")}</div>
+      <div class="form"><label class="full">任务描述 / prompt<input id="inferencePrompt" value="${esc(prompt)}" placeholder="例如：pick up the cube" oninput="localStorage.inferencePrompt=this.value"></label></div>
+      <p class="row"><button class="danger" onclick="startInference()" ${active || missingNames.length ? "disabled" : ""}>启动真机推理</button><button class="secondary" onclick="stopInference()" ${active ? "" : "disabled"}>停止并 HOLD</button><button class="secondary" onclick="restoreXrInput()" ${active ? "disabled" : ""}>恢复 XR</button></p>
+      ${missingNames.length ? `<p class="err-text">缺少推理相机：${esc(missingNames.join(", "))}</p>` : ""}
+      ${inference.error ? `<p class="err-text">${esc(inference.error)}</p>` : ""}</div>
+    <div class="card"><div class="card-head"><h2>会话状态</h2>${badge(phase)}</div><div class="kv"><span class="muted">阶段</span><span>${esc(phase)}</span><span class="muted">协议</span><span>${esc(debug.protocol_profile || "pi05_dual_arm_20d")}</span><span class="muted">手臂</span><span>${esc(debug.arm_side || "both")}</span><span class="muted">动作块</span><span>${chunkIndex >= 0 ? `${chunkIndex + 1}/${chunkSize || "?"}` : "-"}</span>${phase === "post_action_delay" ? `<span class="muted">延迟剩余</span><span>${Number(postActionDelay.remaining_ms ?? 0).toFixed(1)} ms</span>` : ""}</div></div>
+    <div class="card"><div class="card-head"><h2>最近推理数据</h2><span class="mini">HTTP 18027</span></div><div class="kv"><span class="muted">观测序号</span><span>${esc(latestObservation.observation_seq ?? "-")}</span><span class="muted">动作块序号</span><span>${esc(latestAction.chunk_seq ?? "-")}</span><span class="muted">实际发送 prompt</span><span>${esc(latestObservation.prompt || "-")}</span><span class="muted">错误</span><span class="${inference.error ? "err-text" : ""}">${esc(inference.error || debug.error || "-")}</span></div></div>
+    <div class="card full"><div class="card-head"><div><h2>推理相机</h2><p class="mini">启动推理前必须同时具备 head、left_wrist、right_wrist 三路运行时相机。</p></div><span class="pill">${streams.length}/3 streams</span></div><div class="table-wrap"><table><thead><tr><th>名称</th><th>状态</th><th>帧年龄</th><th>实际输出</th></tr></thead><tbody>${requiredNames.map((name) => { const stream = streams.find((item) => String(item.camera_name || "") === name); const actual = stream?.actual_capture || {}; return `<tr><td><b>${esc(name)}</b></td><td>${stream ? "ready" : "missing"}</td><td>${stream ? `${stream.shared_age_ms ?? "-"}ms` : "-"}</td><td>${stream ? esc(`${actual.frame_width || "?"}x${actual.frame_height || "?"} @ ${Number(actual.measured_fps || 0).toFixed(1)}fps`) : "-"}</td></tr>`; }).join("")}</tbody></table></div></div>
+  </div>`;
+}
+
 function renderExport() {
   const DEFAULT_URDF = "/home/luopengcheng/Programs/xr_teleoperate/assets/g1/g1_body29_hand14.urdf";
   const c = state.convertStatus || {};
@@ -343,11 +372,13 @@ function renderExport() {
 const tabs = [
   ["record", "录制", "实时预览 / Episode", "●"],
   ["playback", "回放", "本地 episode 检查", "▶"],
+  ["inference", "推理", "HTTP pi0.5 真机执行", "⌁"],
   ["export", "导出", "LeRobot 可选", "↗"],
 ];
 const titles = {
   record: ["遥操录制工作台", "网页只发控制意图；相机、录制和对齐仍由当前 teleop 主循环负责。"],
   playback: ["回放检查", "网页只做本地 episode 图片和曲线检查；不会向真机下发回放动作。"],
+  inference: ["真机推理", "HTTP pi0.5 动作经现有安全链和 DDS 下发；页面不直接控制真机。"],
   export: ["LeRobot 导出", "UI 已接入 raw_to_lerobot_v2；选择 episode 后导出为 LeRobot v2 数据集。"],
 };
 const root = document.getElementById("app");
@@ -397,6 +428,7 @@ function render() {
   const content = el("content");
   content.innerHTML = state.active === "record" ? renderRecord()
     : state.active === "playback" ? renderPlayback()
+    : state.active === "inference" ? renderInference()
     : renderExport();
   updatePreviewLoop();
   renderCurveLegends();
@@ -419,7 +451,7 @@ function setTab(id) {
     api("/ui/provider/hold")
       .then(() => refreshAll())
       .catch((e) => showBanner(`切换 HOLD 失败：${e?.message || e}`, "error"));
-  } else if (id === "record") {
+  } else if (id === "record" && state.snapshot?.provider?.active_provider !== "online_inference") {
     api("/ui/provider/xr")
       .then(() => refreshAll())
       .catch((e) => showBanner(`恢复 XR 输入失败：${e?.message || e}`, "error"));
@@ -473,7 +505,26 @@ function applySnapshot(payload) {
     !!teleop.ready !== !!prevTeleop.ready ||
     !!teleop.stopping !== !!prevTeleop.stopping
   );
-  if ((changedRecording || changedValidation || changedTeleop) && document.activeElement?.tagName !== "INPUT") render();
+  const inference = state.snapshot.provider?.online_inference || {};
+  const prevInference = prev.provider?.online_inference || {};
+  const inferenceDebug = inference.debug || {};
+  const prevInferenceDebug = prevInference.debug || {};
+  const inferenceAction = inferenceDebug.last_action || {};
+  const prevInferenceAction = prevInferenceDebug.last_action || {};
+  const inferenceObservation = inferenceDebug.last_observation || {};
+  const prevInferenceObservation = prevInferenceDebug.last_observation || {};
+  const changedInference = (
+    state.snapshot.provider?.active_provider !== prev.provider?.active_provider ||
+    inference.state !== prevInference.state ||
+    inference.error !== prevInference.error ||
+    inferenceDebug.status !== prevInferenceDebug.status ||
+    inferenceObservation.observation_seq !== prevInferenceObservation.observation_seq ||
+    inferenceAction.chunk_seq !== prevInferenceAction.chunk_seq ||
+    inferenceAction.chunk_index !== prevInferenceAction.chunk_index ||
+    inferenceAction.chunk_size !== prevInferenceAction.chunk_size
+  );
+  const shouldRenderInference = state.active === "inference" && changedInference;
+  if ((changedRecording || changedValidation || changedTeleop || shouldRenderInference) && document.activeElement?.tagName !== "INPUT") render();
   if (state.active === "playback") syncPlaybackPanel(state.snapshot.playback || {});
   scheduleCurveDraw(false);
 }
@@ -527,6 +578,7 @@ async function refreshAll() {
   state.snapshot = { ...(state.snapshot || {}), recording: recordingStatus };
   await refreshEpisodes();
   try { state.convertStatus = await api("/convert/status"); } catch (_) {}
+  state.inferenceStatus = await api("/inference/status");
   render();
 }
 
@@ -784,6 +836,30 @@ async function homeTeleop() {
 }
 async function recenterTeleop() {
   try { await queueCommand("/command/recenter", "重置头参考指令已进入控制循环"); } catch (e) { showBanner(`重置头参考失败：${e?.message || e}`, "error"); }
+}
+function startInference() {
+  const prompt = String(input("inferencePrompt") || "").trim();
+  if (!prompt) {
+    showBanner("请填写任务描述。", "error");
+    return;
+  }
+  localStorage.inferencePrompt = prompt;
+  api("/inference/start?" + qs({ prompt })).then(() => refreshAll()).then(() => {
+    showBanner("真机推理启动指令已进入控制循环", "warning");
+    render();
+  });
+}
+function stopInference() {
+  api("/inference/stop").then(() => refreshAll()).then(() => {
+    showBanner("停止推理指令已进入控制循环，机器人将保持当前姿态。", "warning");
+    render();
+  });
+}
+function restoreXrInput() {
+  api("/ui/provider/xr").then(() => refreshAll()).then(() => {
+    showBanner("XR 输入恢复指令已进入控制循环", "warning");
+    render();
+  });
 }
 
 async function startCam(id) {
@@ -1208,7 +1284,7 @@ function drawPlaybackCurves(playback) {
   drawSeriesCanvas("playbackRightGripperCurveCanvas", "Right gripper playback", [{ name:"right gripper", color:GRIPPER_COLORS.right, values:data.right?.gripper || [] }], cursorRatio);
 }
 
-Object.assign(window, { refreshAll, refreshEpisodes, render, setRecordFps, setGlobalRecordRoot, loadGlobalRecordRoot, startTeleop, stopTeleop, homeTeleop, recenterTeleop, startCam, startRsCam, stopCam, selectPreviewCamera, openCameraConfig, closeCameraConfig, setPlaybackSearch, setExportConfig, setExportRangeInput, startRec, stopRec, cancelRec, startExport, toggleExportEpisode, selectExportRange, selectAllExportEpisodes, clearExportSelection, invertExportSelection, loadPlayback, deleteEpisodes, deleteSelectedEpisodes, playbackStart, playbackPause, playbackStop, startRealReplay, stopRealReplay, seekPlayback, previewPlaybackSeek, setPlaybackCamera, previewPlaybackImage, loadPlaybackCurves });
+Object.assign(window, { refreshAll, refreshEpisodes, render, setRecordFps, setGlobalRecordRoot, loadGlobalRecordRoot, startTeleop, stopTeleop, homeTeleop, recenterTeleop, startInference, stopInference, restoreXrInput, startCam, startRsCam, stopCam, selectPreviewCamera, openCameraConfig, closeCameraConfig, setPlaybackSearch, setExportConfig, setExportRangeInput, startRec, stopRec, cancelRec, startExport, toggleExportEpisode, selectExportRange, selectAllExportEpisodes, clearExportSelection, invertExportSelection, loadPlayback, deleteEpisodes, deleteSelectedEpisodes, playbackStart, playbackPause, playbackStop, startRealReplay, stopRealReplay, seekPlayback, previewPlaybackSeek, setPlaybackCamera, previewPlaybackImage, loadPlaybackCurves });
 el("refreshBtn").addEventListener("click", refreshAll);
 state.active = "record"; render(); connectSse(); refreshAll();
 window.setInterval(() => {

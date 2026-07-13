@@ -2,6 +2,7 @@
 
 import time
 import threading
+from copy import copy
 from collections import deque
 import numpy as np
 import logging_mp
@@ -32,6 +33,7 @@ import pinocchio as pin
 
 from teleop.real.args import parse_args
 from data_pipeline.recording.alignment import append_timed_sample
+from core.input.online_inference_provider import create_online_inference_provider
 from core.input.teleop_input_provider import validate_lerobot_offline_episode
 from teleop.debug.timing_debugger import TimingDebugger
 from teleop.real.setup import (
@@ -113,6 +115,8 @@ PROVIDER_UI_COMMANDS = {
     UiCommandName.SET_PROVIDER_XR,
     UiCommandName.START_RAW_REPLAY,
     UiCommandName.STOP_RAW_REPLAY,
+    UiCommandName.START_ONLINE_INFERENCE,
+    UiCommandName.STOP_ONLINE_INFERENCE,
 }
 
 
@@ -200,6 +204,17 @@ def get_camera_frame_by_id(cameras, camera_id: int):
     if source is None:
         return None, None
     return source.get_latest(copy=True)
+
+
+def missing_online_inference_camera_names(cameras) -> list[str]:
+    sources = cameras.sources() if cameras is not None else {}
+    required = ("head", "left_wrist", "right_wrist")
+    return [name for name in required if sources.get(name) is None]
+
+
+def set_online_inference_gripper_mode(gripper_ctrl, enabled: bool) -> None:
+    if gripper_ctrl is not None:
+        gripper_ctrl.force_hold_extra_close_enabled = bool(enabled)
 
 
 def cleanup_real_teleop_resources(
@@ -349,7 +364,29 @@ if __name__ == '__main__':
         arm_ik = components.arm_ik
         arm_ctrl = components.arm_ctrl
         tv_wrapper = components.tv_wrapper
-        provider_runtime = TeleopProviderRuntime(live_provider=tv_wrapper, live_provider_name=args.input_provider)
+        def create_ui_online_provider(*, prompt: str):
+            inference_args = copy(args)
+            inference_args.input_provider = "online_inference"
+            inference_args.online_inference_transport = "http"
+            inference_args.online_inference_base_url = (
+                str(getattr(args, "online_inference_base_url", "") or "").strip() or "http://127.0.0.1:18027"
+            )
+            inference_args.online_inference_protocol_profile = "pi05_dual_arm_20d"
+            inference_args.online_inference_arm_side = "both"
+            inference_args.online_inference_prompt = str(prompt)
+            inference_args.online_inference_enable_motion = True
+            inference_args.online_inference_dry_run = False
+            inference_args.online_inference_transform_config = (
+                str(getattr(args, "online_inference_transform_config", "") or "").strip()
+                or "configs/inference/unitree_dual_arm_identity_transform.json"
+            )
+            return create_online_inference_provider(inference_args)
+
+        provider_runtime = TeleopProviderRuntime(
+            live_provider=tv_wrapper,
+            live_provider_name=args.input_provider,
+            online_provider_factory=create_ui_online_provider,
+        )
         gripper_ctrl = components.ee.gripper_ctrl
         loco_wrapper = components.loco_wrapper
         agv_bridge = components.agv_bridge
@@ -571,12 +608,16 @@ if __name__ == '__main__':
                     current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
                     home_return_active = False
                     post_home_takeover_armed = False
+                    was_online_inference = provider_runtime.active_provider_kind == ActiveProviderKind.ONLINE_INFERENCE
                     provider_runtime.set_hold(reason=str(payload.get("reason", "ui_hold")))
+                    if was_online_inference:
+                        set_online_inference_gripper_mode(gripper_ctrl, False)
                     logger_mp.info("[UI_PROVIDER] switched to HOLD.")
                 elif command.name == UiCommandName.SET_PROVIDER_XR:
                     home_return_active = False
                     post_home_takeover_armed = False
                     provider_runtime.set_live(reason=str(payload.get("reason", "ui_xr")))
+                    set_online_inference_gripper_mode(gripper_ctrl, False)
                     operator_state_flow = OperatorStateFlow(
                         takeover_settle_frames=TAKEOVER_SETTLE_FRAMES,
                         log=logger_mp,
@@ -593,6 +634,7 @@ if __name__ == '__main__':
                         post_home_takeover_armed = False
                         if provider_runtime.active_provider_kind != ActiveProviderKind.HOLD:
                             provider_runtime.set_hold(reason="raw_replay_start_sync_hold")
+                            set_online_inference_gripper_mode(gripper_ctrl, False)
                         provider_runtime.start_raw_replay(
                             dataset_root=str(payload.get("dataset_root", "")),
                             episode_index=int(payload.get("episode_index", -1)),
@@ -618,6 +660,42 @@ if __name__ == '__main__':
                     post_home_takeover_armed = False
                     provider_runtime.stop_raw_replay(reason=str(payload.get("reason", "ui_stop")))
                     logger_mp.info("[UI_REPLAY] stopped raw replay -> HOLD.")
+                elif command.name == UiCommandName.START_ONLINE_INFERENCE:
+                    if recording_is_active_or_armed(RECORD_RUNNING, recording_flow):
+                        provider_runtime.fail_online_inference(
+                            "recording is active or armed; stop/cancel recording before starting online inference"
+                        )
+                        logger_mp.error("[UI_INFERENCE] rejected: recording is active or armed.")
+                    elif provider_runtime.active_provider_kind == ActiveProviderKind.RAW_REPLAY:
+                        provider_runtime.fail_online_inference("raw replay is active; stop replay before starting online inference")
+                        logger_mp.error("[UI_INFERENCE] rejected: raw replay is active.")
+                    else:
+                        missing_cameras = missing_online_inference_camera_names(components.cameras)
+                        if missing_cameras:
+                            provider_runtime.fail_online_inference(
+                                "missing required online inference cameras: " + ", ".join(missing_cameras)
+                            )
+                            logger_mp.error("[UI_INFERENCE] rejected: missing cameras=%s", missing_cameras)
+                        else:
+                            current_hold_q = current_lr_arm_q.copy()
+                            current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
+                            home_return_active = False
+                            post_home_takeover_armed = False
+                            if provider_runtime.active_provider_kind != ActiveProviderKind.HOLD:
+                                provider_runtime.set_hold(reason="online_inference_start_sync_hold")
+                            provider_runtime.start_online_inference(prompt=str(payload.get("prompt", "")))
+                            set_online_inference_gripper_mode(gripper_ctrl, True)
+                            START = True
+                            operator_state_flow = OperatorStateFlow(takeover_settle_frames=0, log=logger_mp)
+                            logger_mp.info("[UI_INFERENCE] started HTTP pi0.5 online inference.")
+                elif command.name == UiCommandName.STOP_ONLINE_INFERENCE:
+                    current_hold_q = current_lr_arm_q.copy()
+                    current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
+                    home_return_active = False
+                    post_home_takeover_armed = False
+                    provider_runtime.stop_online_inference(reason=str(payload.get("reason", "ui_stop")))
+                    set_online_inference_gripper_mode(gripper_ctrl, False)
+                    logger_mp.info("[UI_INFERENCE] stopped -> HOLD.")
 
             if provider_runtime.active_provider_kind == ActiveProviderKind.HOLD:
                 arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
@@ -630,6 +708,7 @@ if __name__ == '__main__':
             active_provider = provider_runtime.active_provider()
             active_input_provider = provider_runtime.active_input_provider_name()
             is_ui_raw_replay = provider_runtime.active_provider_kind == ActiveProviderKind.RAW_REPLAY
+            is_ui_online_inference = provider_runtime.active_provider_kind == ActiveProviderKind.ONLINE_INFERENCE
 
             # get active provider tele data
             tele_fetch_start = time.perf_counter()
@@ -646,6 +725,14 @@ if __name__ == '__main__':
             )
             tele_fetch_dt = time.perf_counter() - tele_fetch_start
             timing_debugger.add_tele_fetch(tele_fetch_dt, sample is not None)
+            if is_ui_online_inference and ui_command_bus is not None and ui_command_bus.online_inference_stop_requested():
+                current_hold_q = current_lr_arm_q.copy()
+                current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
+                provider_runtime.stop_online_inference(reason="ui_stop_pending_after_inference_fetch")
+                set_online_inference_gripper_mode(gripper_ctrl, False)
+                arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
+                logger_mp.info("[UI_INFERENCE] discarded fetched action because stop is pending -> HOLD.")
+                continue
             if sample is None:
                 if is_ui_raw_replay:
                     provider_runtime.finish_raw_replay(reason="provider_done")
@@ -681,8 +768,11 @@ if __name__ == '__main__':
                     metadata.get("online_inference_status"),
                     metadata.get("error"),
                 )
-                START = False
-                STOP = True
+                provider_runtime.fail_online_inference(str(metadata.get("error", "online inference provider failed")))
+                set_online_inference_gripper_mode(gripper_ctrl, False)
+                current_hold_q = current_lr_arm_q.copy()
+                current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
+                arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
                 continue
             tele_data_recv_ts_ns = time.perf_counter_ns()
             tele_fetch_ms = tele_fetch_dt * 1000.0
@@ -840,7 +930,7 @@ if __name__ == '__main__':
             provider_feedback_ms = 0.0
             if active_input_provider == "online_inference" and provider_feedback is not None:
                 provider_feedback_start = time.perf_counter()
-                report_feedback = getattr(tv_wrapper, "report_control_feedback", None)
+                report_feedback = getattr(active_provider, "report_control_feedback", None)
                 if callable(report_feedback):
                     report_feedback(provider_feedback)
                 provider_feedback_ms = (time.perf_counter() - provider_feedback_start) * 1000.0

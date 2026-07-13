@@ -131,6 +131,7 @@ class OnlineInferenceSession:
         pose_transformer: Optional[Any] = None,
         clock_ns: Optional[Callable[[], int]] = None,
         trace_clock_ns: Optional[Callable[[], int]] = None,
+        transport_reset_done: bool = False,
     ) -> None:
         self.config = config
         self.transport = transport
@@ -178,16 +179,44 @@ class OnlineInferenceSession:
         self._max_history_count = max(16, self.config.n_obs_steps * 8)
         self._observation_ready_timeout_ns = int(max(5.0, self.config.response_timeout_sec * 2.0) * 1_000_000_000)
 
-        self._transport_reset_done = False
+        self._transport_reset_done = bool(transport_reset_done)
 
     def get_debug_snapshot(self) -> Dict[str, Any]:
+        last_observation = dict(self._last_observation_debug)
+        if last_observation:
+            last_observation.setdefault("observation_seq", int(self._current_observation_seq))
+            if self._current_observation_send_ns is not None:
+                last_observation.setdefault("sent_monotonic_ns", int(self._current_observation_send_ns))
+
+        last_action = dict(self._last_action_debug)
+        if self._current_chunk_seq > 0:
+            last_action.setdefault("chunk_seq", int(self._current_chunk_seq))
+            last_action.setdefault("chunk_index", int(self._current_chunk_index))
+            last_action.setdefault("chunk_size", int(self._current_chunk_size))
+        if self.status == "executing_chunk":
+            last_action.update(
+                {
+                    "chunk_seq": int(self._current_chunk_seq),
+                    "chunk_index": int(self._current_chunk_index),
+                    "chunk_size": int(self._current_chunk_size),
+                }
+            )
+
+        post_action_delay = {}
+        if self.status == "post_action_delay" and self._post_action_ready_after_ns is not None:
+            remaining_ns = max(0, int(self._post_action_ready_after_ns) - int(self.clock_ns()))
+            post_action_delay = {
+                "ready_after_monotonic_ns": int(self._post_action_ready_after_ns),
+                "remaining_ms": remaining_ns / 1e6,
+            }
         return {
             "arm_side": self.config.arm_side,
             "protocol_profile": self.config.protocol_profile,
             "status": self.status,
             "error": self.error,
-            "last_observation": dict(self._last_observation_debug),
-            "last_action": dict(self._last_action_debug),
+            "last_observation": last_observation,
+            "last_action": last_action,
+            "post_action_delay": post_action_delay,
         }
 
     def set_required_camera_names(self, names: Sequence[str]) -> None:
@@ -251,7 +280,7 @@ class OnlineInferenceSession:
             self._ensure_transport_reset()
             observation = self._build_observation_message()
             self._log_current_observation_point(observation)
-            self._last_observation_debug = self._make_observation_debug(observation)
+            observation_debug = self._make_observation_debug(observation)
             observation_send_ns = int(self.clock_ns())
             observation_send_perf_ns = int(self.trace_clock_ns())
             self.transport.send_json(observation)
@@ -260,6 +289,13 @@ class OnlineInferenceSession:
             self._observation_seq += 1
             self._current_observation_seq = self._observation_seq
             self._current_observation_send_ns = int(self._waiting_since_ns)
+            observation_debug.update(
+                {
+                    "observation_seq": int(self._current_observation_seq),
+                    "sent_monotonic_ns": int(self._current_observation_send_ns),
+                }
+            )
+            self._last_observation_debug = observation_debug
             self._collecting_since_ns = None
             self.status = "waiting_action"
         except Exception as exc:
@@ -671,7 +707,16 @@ class OnlineInferenceSession:
         if delay_ms_value > self.config.max_post_action_delay_ms:
             raise ValueError("post_action_delay_ms exceeds max_post_action_delay_ms")
 
+        self._chunk_seq += 1
+        self._current_chunk_seq = self._chunk_seq
         self._last_action_debug = self._make_action_debug(left_steps, right_steps, chunk_size)
+        self._last_action_debug.update(
+            {
+                "chunk_seq": int(self._current_chunk_seq),
+                "chunk_index": 0,
+                "chunk_size": int(chunk_size),
+            }
+        )
         self._log_action_chunk(left_steps, right_steps, chunk_size)
         self._current_chunk_left = left_steps
         self._current_chunk_right = right_steps
@@ -685,8 +730,6 @@ class OnlineInferenceSession:
         self._current_step_start_ns = int(self._current_action_recv_ns)
         self._current_chunk_started_ns = int(self._current_step_start_ns)
         self._current_step_duration_ns = max(1, int(self.config.action_step_sec * 1_000_000_000))
-        self._chunk_seq += 1
-        self._current_chunk_seq = self._chunk_seq
 
         self._waiting_since_ns = None
         self.status = "executing_chunk"

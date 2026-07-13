@@ -138,7 +138,7 @@ python teleop/real/teleop_hand_and_arm.py \
 UI 的边界：
 
 - UI 不新建 ROS 节点，不另开机器人控制链路。
-- UI 按钮只投递 `start / stop / home / recenter / recording` 意图，真正执行仍在 `teleop/real/teleop_hand_and_arm.py` 主循环里复用原有按键逻辑。
+- UI 按钮只投递 `start / stop / home / recenter / recording / inference` 意图，真正执行仍在 `teleop/real/teleop_hand_and_arm.py` 主循环里复用原有控制链路。
 - UI 不启动、不停止相机；相机仍由 `--head-camera-id` / `--head-zmq-endpoint` 等启动参数决定。
 - UI 预览只读取当前相机 source 的 latest frame，不参与 episode 写盘，不改变录制对齐。
 
@@ -219,6 +219,36 @@ python teleop/real/teleop_hand_and_arm.py \
 ```text
 http://<robot-host-ip>:8085
 ```
+
+UI 动态 HTTP 推理示例：进程仍以 XR 作为常驻输入启动；在网页“推理”页点击“启动真机推理”后，主循环先 HOLD，再切换到 HTTP pi0.5 provider。推理停止后保持 HOLD，可在页面显式恢复 XR。
+
+```bash
+cd ~/unitree_ws/src/xr_teleoperate
+
+export SENDER_IP=192.168.123.164
+
+python teleop/real/teleop_hand_and_arm.py \
+    --input-provider xr \
+    --input-mode controller \
+    --arm G1_29 \
+    --ee dex1 \
+    --network-interface eno1 \
+    --base-controller g1d_agv \
+    --controller-deadman grip \
+    --head-reference-mode fixed_per_grip \
+    --controller-mapping-mode anchored_safe \
+    --controller-orientation-mode relative \
+    --head-zmq-endpoint "tcp://${SENDER_IP}:5556" \
+    --left-zmq-endpoint "tcp://${SENDER_IP}:5557" \
+    --right-zmq-endpoint "tcp://${SENDER_IP}:5558" \
+    --ui \
+    --ui-host 0.0.0.0 \
+    --ui-port 8085 \
+    --online-inference-base-url http://127.0.0.1:18027 \
+    --online-inference-transform-config configs/inference/unitree_dual_arm_identity_transform.json
+```
+
+动态推理固定使用 HTTP、`pi05_dual_arm_20d`、双臂和真机运动模式；网页只填写 prompt。启动前必须确认 `18027` 推理服务和 head、left_wrist、right_wrist 三路相机已经可用。录制 active/armed 或 raw 真机回放期间，网页会拒绝启动推理。
 
 ### 1.0.1 远端单路 ZED 数采（推荐：取 LEFT 作为 RGB）
 

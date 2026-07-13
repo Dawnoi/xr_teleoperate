@@ -374,13 +374,13 @@ class TeleopUiServer:
             self._json_ok(handler, {"ok": False, "error": rejection}, status=400)
             return
         params = parse_qs(query)
-        prompt = self._first_query_value(params, "prompt")
+        prompt = str(self._first_query_value(params, "prompt") or "").strip()
         if not prompt:
             self._json_ok(handler, {"ok": False, "error": "inference prompt is required"}, status=400)
             return
         command = self.command_bus.submit(
             UiCommandName.START_ONLINE_INFERENCE,
-            payload={"prompt": str(prompt)},
+            payload={"prompt": prompt},
         )
         self._json_ok(handler, {"ok": True, "queued": True, "command": command.name.value})
 
@@ -449,8 +449,14 @@ class TeleopUiServer:
             return recording_rejection
         _, snapshot = self.state_store.snapshot()
         provider = snapshot.get("provider", {})
-        if isinstance(provider, dict) and str(provider.get("active_provider", "")) != "hold":
-            return "online inference requires active provider hold"
+        if isinstance(provider, dict):
+            active_provider = str(provider.get("active_provider", ""))
+            if active_provider == "raw_replay":
+                return "online inference cannot start while raw_replay is active"
+            if active_provider == "online_inference":
+                return "online inference is already active"
+            if active_provider not in {"hold", "xr_live"}:
+                return f"online inference cannot start from provider={active_provider or 'unknown'}"
         return ""
 
     def _provider_hold_rejection(self) -> str:

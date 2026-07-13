@@ -11,6 +11,7 @@ class ActiveProviderKind(str, Enum):
     XR_LIVE = "xr_live"
     HOLD = "hold"
     RAW_REPLAY = "raw_replay"
+    ONLINE_INFERENCE = "online_inference"
 
 
 @dataclass
@@ -39,6 +40,28 @@ class RealReplayStatus:
         }
 
 
+@dataclass
+class OnlineInferenceStatus:
+    state: str = "idle"
+    prompt: str = ""
+    error: str = ""
+    reason: str = ""
+
+    def as_dict(self, provider: Any = None) -> dict[str, Any]:
+        debug = {}
+        if provider is not None:
+            get_debug_snapshot = getattr(provider, "get_debug_snapshot", None)
+            if callable(get_debug_snapshot):
+                debug = get_debug_snapshot()
+        return {
+            "state": self.state,
+            "prompt": self.prompt,
+            "error": self.error,
+            "reason": self.reason,
+            "debug": debug,
+        }
+
+
 def _default_replay_provider_factory(**kwargs):
     from core.input.raw_offline import RawEpisodeInputProvider
 
@@ -46,7 +69,7 @@ def _default_replay_provider_factory(**kwargs):
 
 
 class TeleopProviderRuntime:
-    """Runtime provider switch for UI-driven live/hold/raw-replay control."""
+    """Runtime provider switch for UI-driven XR, hold, replay, and inference control."""
 
     def __init__(
         self,
@@ -54,13 +77,17 @@ class TeleopProviderRuntime:
         live_provider: Any,
         live_provider_name: str = "xr",
         replay_provider_factory: Callable[..., Any] | None = None,
+        online_provider_factory: Callable[..., Any] | None = None,
     ) -> None:
         self._live_provider = live_provider
         self._live_provider_name = str(live_provider_name or "xr")
         self._replay_provider_factory = replay_provider_factory or _default_replay_provider_factory
+        self._online_provider_factory = online_provider_factory
         self._raw_provider = None
+        self._online_provider = None
         self._active_provider_kind = ActiveProviderKind.XR_LIVE
         self._real_replay = RealReplayStatus()
+        self._online_inference = OnlineInferenceStatus()
         self._last_error = ""
         self._last_reason = "startup"
 
@@ -73,6 +100,8 @@ class TeleopProviderRuntime:
             return self._live_provider
         if self._active_provider_kind == ActiveProviderKind.RAW_REPLAY:
             return self._raw_provider
+        if self._active_provider_kind == ActiveProviderKind.ONLINE_INFERENCE:
+            return self._online_provider
         return None
 
     def active_input_provider_name(self) -> str:
@@ -80,9 +109,15 @@ class TeleopProviderRuntime:
             return "lerobot_offline"
         if self._active_provider_kind == ActiveProviderKind.XR_LIVE:
             return self._live_provider_name
+        if self._active_provider_kind == ActiveProviderKind.ONLINE_INFERENCE:
+            return "online_inference"
         return "hold"
 
     def set_hold(self, *, reason: str = "") -> None:
+        if self._active_provider_kind == ActiveProviderKind.ONLINE_INFERENCE:
+            self._close_online_provider()
+            self._online_inference.state = "stopped"
+            self._online_inference.reason = str(reason or "hold")
         self._active_provider_kind = ActiveProviderKind.HOLD
         self._last_reason = str(reason or "hold")
         if self._real_replay.state == "running":
@@ -91,6 +126,10 @@ class TeleopProviderRuntime:
 
     def set_live(self, *, reason: str = "") -> None:
         self._raw_provider = None
+        if self._active_provider_kind == ActiveProviderKind.ONLINE_INFERENCE:
+            self._close_online_provider()
+            self._online_inference.state = "stopped"
+            self._online_inference.reason = str(reason or "xr_live")
         self._active_provider_kind = ActiveProviderKind.XR_LIVE
         self._last_reason = str(reason or "xr_live")
         if self._real_replay.state == "running":
@@ -145,6 +184,49 @@ class TeleopProviderRuntime:
             self._real_replay.state = "stopped"
         self._real_replay.reason = self._last_reason
 
+    def start_online_inference(self, *, prompt: str) -> None:
+        if self._active_provider_kind != ActiveProviderKind.HOLD:
+            raise RuntimeError("online inference can only start while active provider is hold")
+        if self._online_provider_factory is None:
+            raise RuntimeError("online inference provider factory is not configured")
+
+        text = str(prompt or "").strip()
+        if not text:
+            raise ValueError("online inference prompt is required")
+        provider = self._online_provider_factory(prompt=text)
+        self._online_provider = provider
+        self._active_provider_kind = ActiveProviderKind.ONLINE_INFERENCE
+        self._online_inference = OnlineInferenceStatus(
+            state="running",
+            prompt=text,
+            reason="online_inference_start",
+        )
+        self._last_error = ""
+        self._last_reason = "online_inference_start"
+
+    def stop_online_inference(self, *, reason: str = "") -> None:
+        self._close_online_provider()
+        self._active_provider_kind = ActiveProviderKind.HOLD
+        self._online_inference.state = "stopped"
+        self._online_inference.reason = str(reason or "online_inference_stop")
+        self._last_reason = self._online_inference.reason
+
+    def fail_online_inference(self, message: str) -> None:
+        self._close_online_provider()
+        self._active_provider_kind = ActiveProviderKind.HOLD
+        self._online_inference.state = "error"
+        self._online_inference.error = str(message)
+        self._online_inference.reason = "online_inference_error"
+        self._last_error = self._online_inference.error
+        self._last_reason = self._online_inference.reason
+
+    def _close_online_provider(self) -> None:
+        provider = self._online_provider
+        self._online_provider = None
+        close = getattr(provider, "close", None)
+        if callable(close):
+            close()
+
     def finish_raw_replay(self, *, reason: str = "") -> None:
         self._raw_provider = None
         self._active_provider_kind = ActiveProviderKind.HOLD
@@ -176,4 +258,5 @@ class TeleopProviderRuntime:
             "last_error": self._last_error,
             "last_reason": self._last_reason,
             "real_replay": self._real_replay.as_dict(),
+            "online_inference": self._online_inference.as_dict(self._online_provider),
         }

@@ -59,6 +59,13 @@ class TeleopUiServerTest(unittest.TestCase):
         self.assertIn(":root", css_body)
         self.assertEqual(js_status, 200)
         self.assertIn("function renderRecord", js_body)
+        self.assertIn("renderInference", js_body)
+        self.assertIn("/inference/start", js_body)
+        self.assertIn("/inference/stop", js_body)
+        self.assertIn("/inference/status", js_body)
+        self.assertIn("实际发送 prompt", js_body)
+        self.assertIn("latestObservation.prompt", js_body)
+        self.assertIn("changedInference", js_body)
         self.assertIn(DEFAULT_UI_URDF_PATH, js_body)
         self.assertIn("/assets/g1_d/g1_d.urdf", DEFAULT_UI_URDF_PATH)
         self.assertNotIn("/home/luodongxu/agx_arm_ws/src/nero-dual-arm", js_body)
@@ -89,7 +96,7 @@ class TeleopUiServerTest(unittest.TestCase):
                 {
                     "recording": {"active": False, "phase": "idle"},
                     "provider": {
-                        "active_provider": "hold",
+                        "active_provider": "xr_live",
                         "online_inference": {"state": "idle", "prompt": "", "error": ""},
                     },
                 }
@@ -134,6 +141,50 @@ class TeleopUiServerTest(unittest.TestCase):
 
         self.assertEqual(status, 400)
         self.assertIn("recording", result)
+        self.assertEqual(command_bus.drain(), [])
+
+    def test_inference_start_rejects_active_raw_replay(self):
+        command_bus = UiCommandBus()
+        server = TeleopUiServer(
+            command_bus=command_bus,
+            state_store=UiStateStore(
+                {
+                    "recording": {"active": False, "phase": "idle"},
+                    "provider": {"active_provider": "raw_replay"},
+                }
+            ),
+            host="127.0.0.1",
+            port=0,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+
+        status, result = self._get(server, "/inference/start?prompt=pick%20up%20the%20cube")
+
+        self.assertEqual(status, 400)
+        self.assertIn("raw_replay", result)
+        self.assertEqual(command_bus.drain(), [])
+
+    def test_inference_start_rejects_blank_prompt(self):
+        command_bus = UiCommandBus()
+        server = TeleopUiServer(
+            command_bus=command_bus,
+            state_store=UiStateStore(
+                {
+                    "recording": {"active": False, "phase": "idle"},
+                    "provider": {"active_provider": "xr_live"},
+                }
+            ),
+            host="127.0.0.1",
+            port=0,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+
+        status, result = self._get(server, "/inference/start?prompt=%20%20")
+
+        self.assertEqual(status, 400)
+        self.assertIn("prompt", result)
         self.assertEqual(command_bus.drain(), [])
 
     def test_convert_start_route_passes_reference_query_to_manager(self):

@@ -338,7 +338,7 @@ def setup_recorder(args):
 
 def setup_cameras(args, log) -> CameraRuntime:
     cameras = CameraRuntime()
-    if not bool(args.record or args.input_provider == "online_inference"):
+    if not bool(args.record or args.ui or args.input_provider == "online_inference"):
         return cameras
     cameras.head_remote = maybe_open_remote_camera("head", args.head_zmq_endpoint, log)
     cameras.left_remote = maybe_open_remote_camera("left_wrist", args.left_zmq_endpoint, log)
