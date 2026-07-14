@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import cv2
 import numpy as np
@@ -22,6 +22,7 @@ from core.input.base import (
 
 ARM_SIZE = 14
 GRIPPER_SIZE = 2
+RAW_REPLAY_WAIT_POLL_SEC = 0.01
 
 
 def raw_gripper_source_key(arm_source: str) -> str:
@@ -217,19 +218,27 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
         self._done = len(self._items) == 0
         self._first_sample_ns = _sample_monotonic_ns(self._items[0], 0)
         self._start_wall_time = None
+        self._stop_interrupted = False
 
-    def _sleep_until_current_frame(self) -> None:
+    def _sleep_until_current_frame(self, *, stop_requested: Callable[[], bool] | None = None) -> bool:
+        if stop_requested is not None and not callable(stop_requested):
+            raise TypeError("raw replay stop_requested must be callable")
         if self.speed_scale <= 0.0 or self._cursor >= len(self._items):
-            return
+            return True
         if self._start_wall_time is None:
             self._start_wall_time = time.time()
         if self._cursor == 0:
-            return
+            return True
         frame_sample_ns = _sample_monotonic_ns(self._items[self._cursor], self._cursor)
         target_elapsed = (frame_sample_ns - self._first_sample_ns) / 1e9 / self.speed_scale
-        sleep_s = self._start_wall_time + target_elapsed - time.time()
-        if sleep_s > 0.0:
-            time.sleep(sleep_s)
+        while True:
+            if stop_requested is not None and stop_requested():
+                self._stop_interrupted = True
+                return False
+            sleep_s = self._start_wall_time + target_elapsed - time.time()
+            if sleep_s <= 0.0:
+                return True
+            time.sleep(min(sleep_s, RAW_REPLAY_WAIT_POLL_SEC))
 
     def _gripper_q(self, item: Mapping[str, Any], frame_index: int) -> np.ndarray:
         source_key = raw_gripper_source_key(self.arm_source)
@@ -294,11 +303,14 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
         )
 
     def get_sample(self, *args, **kwargs) -> TeleopInputSample | None:
+        stop_requested = kwargs.pop("raw_replay_stop_requested", None)
         del args, kwargs
         if self._done:
             return None
 
-        self._sleep_until_current_frame()
+        self._stop_interrupted = False
+        if not self._sleep_until_current_frame(stop_requested=stop_requested):
+            return None
         frame_index = self._cursor
         item = self._items[frame_index]
         if self.motion_repr == "qpos":
@@ -329,3 +341,7 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
     @property
     def done(self) -> bool:
         return self._done
+
+    @property
+    def stop_interrupted(self) -> bool:
+        return self._stop_interrupted

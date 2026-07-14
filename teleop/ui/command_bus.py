@@ -38,6 +38,8 @@ class UiCommandBus:
         self._queue: Queue[UiCommand] = Queue()
         self._online_inference_stop_lock = Lock()
         self._online_inference_stop_count = 0
+        self._raw_replay_stop_lock = Lock()
+        self._raw_replay_stop_count = 0
 
     def submit(
         self,
@@ -58,6 +60,9 @@ class UiCommandBus:
         if command.name == UiCommandName.STOP_ONLINE_INFERENCE:
             with self._online_inference_stop_lock:
                 self._online_inference_stop_count += 1
+        if command.name == UiCommandName.STOP_RAW_REPLAY:
+            with self._raw_replay_stop_lock:
+                self._raw_replay_stop_count += 1
         self._queue.put(command)
         return command
 
@@ -74,8 +79,15 @@ class UiCommandBus:
             if command.name == UiCommandName.STOP_ONLINE_INFERENCE:
                 with self._online_inference_stop_lock:
                     self._online_inference_stop_count -= 1
+            if command.name == UiCommandName.STOP_RAW_REPLAY:
+                with self._raw_replay_stop_lock:
+                    self._raw_replay_stop_count -= 1
         return commands
 
     def online_inference_stop_requested(self) -> bool:
         with self._online_inference_stop_lock:
             return self._online_inference_stop_count > 0
+
+    def raw_replay_stop_requested(self) -> bool:
+        with self._raw_replay_stop_lock:
+            return self._raw_replay_stop_count > 0

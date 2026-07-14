@@ -735,16 +735,21 @@ if __name__ == '__main__':
 
             # get active provider tele data
             tele_fetch_start = time.perf_counter()
+            provider_get_sample_kwargs = {
+                "current_left_robot_wrist_pose": current_left_wrist_pose,
+                "current_right_robot_wrist_pose": current_right_wrist_pose,
+                "current_state_host_monotonic_ns": current_state_sample_ns,
+                "current_arm_q": current_lr_arm_q,
+                "current_arm_dq": current_lr_arm_dq,
+                "current_left_gripper_width": online_left_gripper_q,
+                "current_right_gripper_width": online_right_gripper_q,
+                "camera_sources": camera_sources,
+                "dt": control_dt,
+            }
+            if is_ui_raw_replay and ui_command_bus is not None:
+                provider_get_sample_kwargs["raw_replay_stop_requested"] = ui_command_bus.raw_replay_stop_requested
             sample = active_provider.get_sample(
-                current_left_robot_wrist_pose=current_left_wrist_pose,
-                current_right_robot_wrist_pose=current_right_wrist_pose,
-                current_state_host_monotonic_ns=current_state_sample_ns,
-                current_arm_q=current_lr_arm_q,
-                current_arm_dq=current_lr_arm_dq,
-                current_left_gripper_width=online_left_gripper_q,
-                current_right_gripper_width=online_right_gripper_q,
-                camera_sources=camera_sources,
-                dt=control_dt,
+                **provider_get_sample_kwargs,
             )
             tele_fetch_dt = time.perf_counter() - tele_fetch_start
             timing_debugger.add_tele_fetch(tele_fetch_dt, sample is not None)
@@ -758,7 +763,11 @@ if __name__ == '__main__':
                 continue
             if sample is None:
                 if is_ui_raw_replay:
-                    provider_runtime.finish_raw_replay(reason="provider_done")
+                    if bool(getattr(active_provider, "stop_interrupted", False)):
+                        provider_runtime.stop_raw_replay(reason="ui_stop_interrupt")
+                        logger_mp.info("[UI_REPLAY] stop request interrupted raw replay frame wait -> HOLD.")
+                    else:
+                        provider_runtime.finish_raw_replay(reason="provider_done")
                     current_hold_q = current_lr_arm_q.copy()
                     current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
                     arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())

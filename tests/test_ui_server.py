@@ -99,6 +99,13 @@ class TeleopUiServerTest(unittest.TestCase):
         self.assertIn("function refreshRealReplayStatus()", js_body)
         self.assertIn("function reconcileRealReplayStatus", js_body)
         self.assertIn("realReplayCommandPending", js_body)
+        self.assertIn("changedPlaybackProviderState", js_body)
+        self.assertIn("function syncPlaybackTrace()", js_body)
+        self.assertIn("playbackTraceBadge", js_body)
+        self.assertLess(
+            js_body.index('["export", "导出"'),
+            js_body.index('["playback", "回放"'),
+        )
         self.assertIn(DEFAULT_UI_URDF_PATH, js_body)
         self.assertIn("/assets/g1_d/g1_d.urdf", DEFAULT_UI_URDF_PATH)
         self.assertNotIn("/home/luodongxu/agx_arm_ws/src/nero-dual-arm", js_body)

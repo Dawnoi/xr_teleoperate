@@ -1,6 +1,7 @@
 import pathlib
 import sys
-from threading import Lock
+import time
+from threading import Event, Lock, Timer
 import unittest
 from types import SimpleNamespace
 
@@ -51,6 +52,42 @@ class UiCommandBusTest(unittest.TestCase):
         self.assertTrue(bus.online_inference_stop_requested())
         self.assertEqual(bus.drain()[0].name, UiCommandName.STOP_ONLINE_INFERENCE)
         self.assertFalse(bus.online_inference_stop_requested())
+
+    def test_raw_replay_stop_request_stays_visible_until_drained(self):
+        bus = UiCommandBus()
+
+        bus.submit(UiCommandName.STOP_RAW_REPLAY)
+
+        self.assertTrue(bus.raw_replay_stop_requested())
+        self.assertEqual(bus.drain()[0].name, UiCommandName.STOP_RAW_REPLAY)
+        self.assertFalse(bus.raw_replay_stop_requested())
+
+
+class RawReplayStopInterruptTest(unittest.TestCase):
+    def test_raw_replay_frame_wait_is_interrupted_by_stop_request(self):
+        from core.input.raw_offline import RawEpisodeInputProvider
+
+        provider = object.__new__(RawEpisodeInputProvider)
+        provider.speed_scale = 1.0
+        provider._items = [
+            {"timestamps": {"sample_monotonic_ns": 0}},
+            {"timestamps": {"sample_monotonic_ns": 500_000_000}},
+        ]
+        provider._cursor = 1
+        provider._first_sample_ns = 0
+        provider._start_wall_time = time.time()
+        provider._done = False
+        provider._stop_interrupted = False
+        stop_requested = Event()
+        Timer(0.02, stop_requested.set).start()
+
+        started = time.monotonic()
+        sample = provider.get_sample(raw_replay_stop_requested=stop_requested.is_set)
+        elapsed = time.monotonic() - started
+
+        self.assertIsNone(sample)
+        self.assertTrue(provider.stop_interrupted)
+        self.assertLess(elapsed, 0.15)
 
 
 class DualGripperSnapshotTest(unittest.TestCase):

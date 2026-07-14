@@ -418,7 +418,7 @@ function renderPlayback() {
       <p class="row"><button onclick="playbackStart()" ${realReplayRunning ? "disabled" : ""}>播放画面</button><button class="secondary" onclick="playbackPause()" ${realReplayRunning ? "disabled" : ""}>暂停画面</button><button class="secondary" onclick="playbackStop()" ${realReplayRunning ? "disabled" : ""}>停止画面</button><button class="secondary" onclick="loadPlaybackCurves()">重载曲线</button></p>
       <div class="form compact-form real-replay-controls"><label>arm_source<select id="realReplayArmSource" onchange="localStorage.realReplayArmSource=this.value"><option value="action" ${realReplayArmSource === "action" ? "selected" : ""}>action</option><option value="state" ${realReplayArmSource === "state" ? "selected" : ""}>state</option><option value="fk_cmd_pose" ${realReplayArmSource === "fk_cmd_pose" ? "selected" : ""}>fk_cmd_pose</option></select></label><label>speed_scale<input id="realReplaySpeed" value="${esc(realReplaySpeed)}" onchange="localStorage.realReplaySpeedScale=this.value"></label><div><p class="mini">切到回放页后 provider 会进入 HOLD；开始真机回放前必须未录制、已启动 teleop、且已加载 episode。</p><p class="row"><button class="danger" onclick="startRealReplay()" ${canStartRealReplay ? "" : "disabled"}>开始真机回放</button><button class="secondary" onclick="stopRealReplay()" ${realReplayRunning && realReplayCommandPending !== "stop" ? "" : "disabled"}>停止真机回放</button>${realReplayCommandPending ? `<span class="pill"><span class="dot warn"></span>${esc(realReplayCommandPending === "start" ? "启动指令待确认" : "停止指令待确认")}</span>` : ""}${realReplay.error ? `<span class="pill"><span class="dot err"></span>${esc(realReplay.error)}</span>` : ""}</p></div></div>
       <div class="playback-controls"><input id="playbackSeek" type="range" min="0" max="${maxFrame}" value="${Number(p.frame_index || 0)}" oninput="previewPlaybackSeek(this.value)" onchange="seekPlayback(this.value)" ${realReplayRunning ? "disabled" : ""}><span id="playbackTimeLabel" class="mini">frame ${Number(p.frame_index || 0)} / ${Number(p.total_frames || 0)}</span></div></div>
-    <div class="card playback-trace-card"><div class="card-head"><div><h2>真机回放执行 trace</h2><p class="mini">以 raw episode 当前帧进入控制循环为起点，测量 DDS 发布和状态线程首次检测到关节运动；不包含网页图片传输。</p></div>${badge(pendingReplayTrace ? "running" : trace.status || "idle", traceState)}</div><div class="metric-grid"><div class="metric"><span>帧到 DDS 发布</span><b>${traceMs("recv_to_pub_ms")}</b></div><div class="metric"><span>DDS 到线程反馈运动</span><b>${traceMs("pub_to_exec_thread_ms")}</b></div><div class="metric"><span>帧到线程反馈运动</span><b>${traceMs("recv_to_exec_thread_ms")}</b></div><div class="metric"><span>控制线程排队</span><b>${traceMs("enqueue_to_publish_ms")}</b></div><div class="metric"><span>DDS 写入</span><b>${traceMs("dds_write_ms")}</b></div><div class="metric"><span>触发关节差</span><b>${Number(trace.q_delta_thread_trigger || 0).toFixed(4)} rad</b><small class="mini">episode frame ${Number(trace.raw_replay_frame_index ?? -1)}</small></div></div></div></div>
+    <div class="card playback-trace-card"><div class="card-head"><div><h2>真机回放执行 trace</h2><p class="mini">以 raw episode 当前帧进入控制循环为起点，测量 DDS 发布和状态线程首次检测到关节运动；不包含网页图片传输。</p></div><span id="playbackTraceBadge">${badge(pendingReplayTrace ? "running" : trace.status || "idle", traceState)}</span></div><div class="metric-grid"><div class="metric"><span>帧到 DDS 发布</span><b id="playbackTraceRecvToPub">${traceMs("recv_to_pub_ms")}</b></div><div class="metric"><span>DDS 到线程反馈运动</span><b id="playbackTracePubToThread">${traceMs("pub_to_exec_thread_ms")}</b></div><div class="metric"><span>帧到线程反馈运动</span><b id="playbackTraceRecvToThread">${traceMs("recv_to_exec_thread_ms")}</b></div><div class="metric"><span>控制线程排队</span><b id="playbackTraceEnqueueToPublish">${traceMs("enqueue_to_publish_ms")}</b></div><div class="metric"><span>DDS 写入</span><b id="playbackTraceDdsWrite">${traceMs("dds_write_ms")}</b></div><div class="metric"><span>触发关节差</span><b id="playbackTraceJointDelta">${Number(trace.q_delta_thread_trigger || 0).toFixed(4)} rad</b><small class="mini" id="playbackTraceFrame">episode frame ${Number(trace.raw_replay_frame_index ?? -1)}</small></div></div></div></div>
     <div class="card full"><div class="card-head"><div><h2>全部相机同步回放</h2><p class="mini" id="playbackFrameMeta">真机回放运行时，图像和曲线游标跟随真机实际进入控制循环的 episode frame。</p></div><span class="pill">${(p.cameras || []).length} cameras</span></div><div class="preview-grid playback-camera-grid layout-placeholder">${cameraCards || empty("当前 episode 没有相机图像；加载 episode 后这里保留相机回放占位")}</div></div>
     <div class="card full"><div class="card-head"><div><h2>夹爪状态复现对比</h2><p class="mini">蓝线为 raw replay 当前 frame 进入控制循环前读到的真机 DDS 反馈 state；橙线为该 frame 的 episode recorded state。两者比较回放状态是否复现采集时真机状态。</p></div><span class="pill">2 charts</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left Gripper</b><span>raw replay</span></div><canvas id="liveLeftGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveLeftGripperLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right Gripper</b><span>raw replay</span></div><canvas id="liveRightGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveRightGripperLegend"></div></div></div></div>
     <div class="card full"><div class="card-head"><div><h2>机械臂轨迹同步回放</h2><p class="mini" id="playbackCurveMeta">左右臂 J1-J7 来自 episode 回放数据，游标与历史图像同步。</p></div><span class="pill">2 charts</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left J1-J7</b><span>playback</span></div><canvas id="playbackLeftJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="playbackLeftJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right J1-J7</b><span>playback</span></div><canvas id="playbackRightJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="playbackRightJointLegend"></div></div></div></div>
@@ -533,9 +533,9 @@ function renderExport() {
 
 const tabs = [
   ["record", "录制", "实时预览 / Episode", "●"],
-  ["playback", "回放", "本地 episode 检查", "▶"],
   ["inference", "推理", "HTTP pi0.5 真机执行", "⌁"],
   ["export", "导出", "LeRobot 可选", "↗"],
+  ["playback", "回放", "本地 episode 检查", "▶"],
 ];
 const titles = {
   record: ["遥操录制工作台", "网页只发控制意图；相机、录制和对齐仍由当前 teleop 主循环负责。"],
@@ -680,9 +680,14 @@ function applySnapshot(payload) {
   const prevReplay = prev.provider?.real_replay || {};
   const replayTrace = replay.runtime_debug?.execution_trace || {};
   const prevReplayTrace = prevReplay.runtime_debug?.execution_trace || {};
-  const changedPlaybackRuntime = (
+  const changedPlaybackProviderState = (
     state.snapshot.provider?.active_provider !== prev.provider?.active_provider ||
     replay.state !== prevReplay.state ||
+    replay.error !== prevReplay.error ||
+    replay.reason !== prevReplay.reason
+  );
+  const changedPlaybackRuntime = (
+    changedPlaybackProviderState ||
     replay.frame_index !== prevReplay.frame_index ||
     replayTrace.current?.seq !== prevReplayTrace.current?.seq ||
     replayTrace.latest?.seq !== prevReplayTrace.latest?.seq ||
@@ -712,9 +717,12 @@ function applySnapshot(payload) {
   const shouldRenderInference = state.active === "inference" && (
     changedInference || (changedInferenceRuntime && performance.now() - Number(state.lastInferenceRenderMs || 0) >= 150)
   );
-  const shouldRenderPlayback = state.active === "playback" && changedPlaybackRuntime;
+  const shouldRenderPlayback = state.active === "playback" && changedPlaybackProviderState;
   if ((changedRecording || changedValidation || changedTeleop || shouldRenderInference || shouldRenderPlayback) && document.activeElement?.tagName !== "INPUT") render();
-  if (state.active === "playback") syncPlaybackPanel(displayedPlayback());
+  if (state.active === "playback") {
+    syncPlaybackPanel(displayedPlayback());
+    syncPlaybackTrace();
+  }
   scheduleCurveDraw(false);
 }
 
@@ -1717,6 +1725,35 @@ function syncPlaybackPanel(playback, options= {}) {
   if (meta) meta.textContent = total > 0 ? `frame ${Math.round(idx) + 1}/${total}` : "single frame";
   if (!options.skipImage) syncPlaybackImages(p, Math.round(idx));
   scheduleCurveDraw(false);
+}
+
+function syncPlaybackTrace() {
+  if (state.active !== "playback") return;
+  const replay = state.snapshot?.provider?.real_replay || {};
+  const executionTrace = replay.runtime_debug?.execution_trace || {};
+  const pending = executionTrace.current || null;
+  const latest = executionTrace.latest || null;
+  const trace = latest || pending || {};
+  const traceState = pending
+    ? `pending #${pending.seq ?? "-"} · showing #${latest?.seq ?? "-"}`
+    : latest ? `${latest.status || "completed"} #${latest.seq ?? "-"}` : "waiting";
+  const badgeNode = el("playbackTraceBadge");
+  if (badgeNode) badgeNode.innerHTML = badge(pending ? "running" : trace.status || "idle", traceState);
+  const traceMetricIds = {
+    playbackTraceRecvToPub: "recv_to_pub_ms",
+    playbackTracePubToThread: "pub_to_exec_thread_ms",
+    playbackTraceRecvToThread: "recv_to_exec_thread_ms",
+    playbackTraceEnqueueToPublish: "enqueue_to_publish_ms",
+    playbackTraceDdsWrite: "dds_write_ms",
+  };
+  for (const [id, key] of Object.entries(traceMetricIds)) {
+    const node = el(id);
+    if (node) node.textContent = Number.isFinite(Number(trace[key])) ? `${Number(trace[key]).toFixed(1)} ms` : "-";
+  }
+  const jointDelta = el("playbackTraceJointDelta");
+  if (jointDelta) jointDelta.textContent = `${Number(trace.q_delta_thread_trigger || 0).toFixed(4)} rad`;
+  const frame = el("playbackTraceFrame");
+  if (frame) frame.textContent = `episode frame ${Number(trace.raw_replay_frame_index ?? -1)}`;
 }
 
 function syncPlaybackImages(playback, frameIndex) {
