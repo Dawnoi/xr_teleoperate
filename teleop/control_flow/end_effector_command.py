@@ -6,14 +6,37 @@ End-effector command mapping for teleop.
 import numpy as np
 
 
-def read_online_gripper_widths(*, args, dual_gripper_data_lock, dual_gripper_state_array):
+def read_dual_gripper_snapshot(
+    *,
+    args,
+    dual_gripper_data_lock,
+    dual_gripper_state_array,
+    dual_gripper_action_array,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Read Dex1 feedback and the control thread's processed command atomically.
+
+    The action array is written by the gripper control thread after trigger mapping,
+    rate limiting, force-hold handling, and smoothing.  It is therefore the only
+    command suitable for comparing against the measured state in the UI.
+    """
+
     if args.no_gripper or args.ee != "dex1":
-        return 0.0, 0.0
-    try:
-        with dual_gripper_data_lock:
-            return float(dual_gripper_state_array[0]), float(dual_gripper_state_array[1])
-    except Exception:
-        return 0.0, 0.0
+        return None, None, None, None
+    if dual_gripper_data_lock is None:
+        raise RuntimeError("Dex1 gripper data lock is unavailable")
+    if dual_gripper_state_array is None or dual_gripper_action_array is None:
+        raise RuntimeError("Dex1 gripper state/action arrays are unavailable")
+
+    with dual_gripper_data_lock:
+        left_feedback = float(dual_gripper_state_array[0])
+        right_feedback = float(dual_gripper_state_array[1])
+        left_command = float(dual_gripper_action_array[0])
+        right_command = float(dual_gripper_action_array[1])
+
+    values = np.asarray([left_feedback, right_feedback, left_command, right_command], dtype=float)
+    if not np.isfinite(values).all():
+        raise ValueError(f"Dex1 gripper snapshot contains non-finite values: {values.tolist()}")
+    return left_feedback, right_feedback, left_command, right_command
 
 
 def apply_end_effector_command(

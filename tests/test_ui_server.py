@@ -81,6 +81,24 @@ class TeleopUiServerTest(unittest.TestCase):
         self.assertIn("inferenceDualTcpCanvas", js_body)
         self.assertIn("inferenceLeftRot6dCanvas", js_body)
         self.assertIn("WebGL", js_body)
+        self.assertIn("allowApplicationError", js_body)
+        self.assertIn('api("/convert/status", { allowApplicationError: true })', js_body)
+        self.assertIn("episode_length_warnings", js_body)
+        self.assertIn("displayedPlayback", js_body)
+        self.assertIn("真机回放执行 trace", js_body)
+        self.assertIn("gripper_q_cmd", js_body)
+        self.assertIn("已下发目标", js_body)
+        self.assertIn("playback-top-grid", js_body)
+        self.assertIn("quickPlaybackToggle", js_body)
+        self.assertIn("quickPlaybackFilter", js_body)
+        self.assertIn("selectQuickPlaybackEpisode", js_body)
+        self.assertIn("changedPlaybackRuntime", js_body)
+        self.assertIn("recorded state q", js_body)
+        self.assertIn("playback-top-grid", css_body)
+        self.assertIn("const trace = latestReplayTrace || pendingReplayTrace || {};", js_body)
+        self.assertIn("function refreshRealReplayStatus()", js_body)
+        self.assertIn("function reconcileRealReplayStatus", js_body)
+        self.assertIn("realReplayCommandPending", js_body)
         self.assertIn(DEFAULT_UI_URDF_PATH, js_body)
         self.assertIn("/assets/g1_d/g1_d.urdf", DEFAULT_UI_URDF_PATH)
         self.assertNotIn("/home/luodongxu/agx_arm_ws/src/nero-dual-arm", js_body)
@@ -338,6 +356,76 @@ class TeleopUiServerTest(unittest.TestCase):
         self.assertEqual(result["state"], "error")
         self.assertIn("urdf_path", result["error"])
 
+    def test_ui_export_manager_rejects_selected_empty_episode_before_starting_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            source_root = root / "raw_task"
+            output_root = root / "exports"
+            self._write_raw_episode_stub(source_root / "episode_0001", frame_count=2)
+            self._write_raw_episode_stub(source_root / "episode_0002", frame_count=0)
+            calls = []
+            manager = UiExportManager(export_raw_task_dir=lambda **kwargs: calls.append(kwargs) or {})
+
+            result = manager.start(
+                UiExportRequest(
+                    source_root=source_root,
+                    output_root=output_root,
+                    dataset_name="nero_dataset",
+                    task="pick cube",
+                    fps=30.0,
+                    selected_episodes=("episode_0001", "episode_0002"),
+                    urdf_path=DEFAULT_UI_URDF_PATH,
+                )
+            )
+
+            self.assertEqual(result["ok"], False)
+            self.assertEqual(result["state"], "error")
+            self.assertIn("episode_0002", result["error"])
+            self.assertIn("no samples", result["error"])
+            self.assertEqual(calls, [])
+
+    def test_ui_export_manager_warns_for_selected_episode_length_outliers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            source_root = root / "raw_task"
+            output_root = root / "exports"
+            frame_counts = {
+                "episode_0001": 100,
+                "episode_0002": 100,
+                "episode_0003": 100,
+                "episode_0004": 1000,
+            }
+            for episode_name, frame_count in frame_counts.items():
+                self._write_raw_episode_stub(source_root / episode_name, frame_count=frame_count)
+            release_export = threading.Event()
+
+            def slow_export_raw_task_dir(**_kwargs):
+                release_export.wait(timeout=2.0)
+                return {"episodes_exported": 4, "frames_total": sum(frame_counts.values())}
+
+            manager = UiExportManager(export_raw_task_dir=slow_export_raw_task_dir)
+            result = manager.start(
+                UiExportRequest(
+                    source_root=source_root,
+                    output_root=output_root,
+                    dataset_name="nero_dataset",
+                    task="pick cube",
+                    fps=30.0,
+                    selected_episodes=tuple(frame_counts),
+                    urdf_path=DEFAULT_UI_URDF_PATH,
+                )
+            )
+            release_export.set()
+            self._wait_convert_done(manager)
+
+            self.assertEqual(result["ok"], True)
+            self.assertEqual(result["episode_length_reference"]["method"], "iqr")
+            self.assertEqual(result["episode_length_reference"]["sample_count"], 4)
+            self.assertEqual(
+                result["episode_length_warnings"],
+                [{"kind": "long", "episode": "episode_0004", "frame_count": 1000}],
+            )
+
     def test_ui_export_manager_reports_bad_source_root_as_status_error(self):
         manager = UiExportManager(export_raw_task_dir=lambda **_kwargs: {})
 
@@ -539,14 +627,14 @@ class TeleopUiServerTest(unittest.TestCase):
                             {
                                 "idx": 0,
                                 "colors": {"head": "colors/head/000001_head_34334333.jpg"},
-                                "states": {"left": {"qpos": [1, 2, 3, 4, 5, 6, 7]}, "right": {"qpos": [8, 9, 10, 11, 12, 13, 14]}},
+                                "states": {"left": {"qpos": [1, 2, 3, 4, 5, 6, 7]}, "right": {"qpos": [8, 9, 10, 11, 12, 13, 14]}, "left_ee": {"qpos": [0.2]}, "right_ee": {"qpos": [0.3]}},
                                 "actions": {"left": {"qpos": [1, 2, 3, 4, 5, 6, 7]}, "right": {"qpos": [8, 9, 10, 11, 12, 13, 14]}},
                                 "timestamps": {"sample_monotonic_ns": 1000},
                             },
                             {
                                 "idx": 1,
                                 "colors": {"head": "colors/head/000000_head_1000.jpg"},
-                                "states": {"left": {"qpos": [1, 2, 3, 4, 5, 6, 7]}, "right": {"qpos": [8, 9, 10, 11, 12, 13, 14]}},
+                                "states": {"left": {"qpos": [1, 2, 3, 4, 5, 6, 7]}, "right": {"qpos": [8, 9, 10, 11, 12, 13, 14]}, "left_ee": {"qpos": [0.4]}, "right_ee": {"qpos": [0.5]}},
                                 "actions": {"left": {"qpos": [1, 2, 3, 4, 5, 6, 7]}, "right": {"qpos": [8, 9, 10, 11, 12, 13, 14]}},
                                 "timestamps": {"sample_monotonic_ns": 34_334_333},
                             },
@@ -576,10 +664,40 @@ class TeleopUiServerTest(unittest.TestCase):
             self.assertEqual(status["total_frames"], 2)
             self.assertEqual(status["cameras"][0]["camera_name"], "head")
 
+            curves = self._get_json(server, "/playback/curves?max_points=900")
+            self.assertEqual(curves["left"]["gripper_state"], [0.2, 0.4])
+            self.assertEqual(curves["right"]["gripper_state"], [0.3, 0.5])
+
             image_status, headers, body = self._get_bytes(server, "/playback/image?camera_id=0&frame=0")
             self.assertEqual(image_status, 200)
             self.assertEqual(headers["content-type"], "image/jpeg")
             self.assertEqual(body, b"\xff\xd8\xff\xd9")
+
+    def test_recording_episodes_returns_all_episodes_unless_limit_is_explicit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            for episode_index in range(81):
+                self._write_raw_episode_stub(root / f"episode_{episode_index:04d}", frame_count=1)
+
+            server = TeleopUiServer(
+                command_bus=UiCommandBus(),
+                state_store=UiStateStore({"recording": {"active": False}}),
+                host="127.0.0.1",
+                port=0,
+            )
+            server.start()
+            self.addCleanup(server.stop)
+
+            all_episodes = self._get_json(server, f"/recording/episodes?root_dir={root}")
+            limited_episodes = self._get_json(server, f"/recording/episodes?root_dir={root}&limit=7")
+            invalid_status, invalid_body = self._get(server, f"/recording/episodes?root_dir={root}&limit=all")
+
+            self.assertEqual(len(all_episodes["episodes"]), 81)
+            self.assertEqual(all_episodes["episodes"][0]["name"], "episode_0080")
+            self.assertEqual(all_episodes["episodes"][-1]["name"], "episode_0000")
+            self.assertEqual(len(limited_episodes["episodes"]), 7)
+            self.assertEqual(invalid_status, 400)
+            self.assertIn("episode limit must be a non-negative integer", invalid_body)
 
     def test_recording_status_reports_incomplete_latest_episode_without_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:

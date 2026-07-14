@@ -13,6 +13,8 @@ from typing import Any, Callable
 
 
 DEFAULT_UI_URDF_PATH = str(Path(__file__).resolve().parents[2] / "assets/g1_d/g1_d.urdf")
+EPISODE_LENGTH_WARNING_MIN_SAMPLES = 4
+EPISODE_LENGTH_WARNING_IQR_SCALE = 1.5
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,14 @@ class UiExportManager:
                 self._status = self._error_status(str(exc))
                 self._status["traceback"] = traceback.format_exc()
                 return copy.deepcopy(self._status)
+        empty_episode_names = [name for name, frame_count in frame_counts.items() if frame_count <= 0]
+        if empty_episode_names:
+            with self._lock:
+                self._status = self._error_status(
+                    "selected episodes have no samples: " + ", ".join(empty_episode_names)
+                )
+                return copy.deepcopy(self._status)
+        episode_length_reference, episode_length_warnings = _episode_length_warnings(frame_counts)
         total_frames = int(sum(frame_counts.values()))
         if total_frames <= 0:
             with self._lock:
@@ -117,6 +127,8 @@ class UiExportManager:
                 "dataset_name": dataset_name,
                 "selected_episodes": list(episode_names),
                 "episode_frame_counts": dict(frame_counts),
+                "episode_length_reference": episode_length_reference,
+                "episode_length_warnings": episode_length_warnings,
                 "format_version": normalized.format_version,
                 "export_mode": normalized.export_mode,
                 "export_video": normalized.export_video,
@@ -396,3 +408,52 @@ def _path_contains(parent: Path, child: Path) -> bool:
 
 def _paths_overlap(left: Path, right: Path) -> bool:
     return _path_contains(left, right) or _path_contains(right, left)
+
+
+def _episode_length_warnings(frame_counts: dict[str, int]) -> tuple[dict[str, object], list[dict[str, object]]]:
+    values = sorted(int(frame_count) for frame_count in frame_counts.values() if frame_count > 0)
+    reference: dict[str, object] = {
+        "method": "iqr",
+        "sample_count": len(values),
+        "minimum_sample_count": EPISODE_LENGTH_WARNING_MIN_SAMPLES,
+    }
+    if len(values) < EPISODE_LENGTH_WARNING_MIN_SAMPLES:
+        return reference, []
+
+    q1 = _percentile(values, 0.25)
+    median = _percentile(values, 0.50)
+    q3 = _percentile(values, 0.75)
+    iqr = q3 - q1
+    lower_bound = q1 - EPISODE_LENGTH_WARNING_IQR_SCALE * iqr
+    upper_bound = q3 + EPISODE_LENGTH_WARNING_IQR_SCALE * iqr
+    reference.update(
+        {
+            "median_frame_count": median,
+            "iqr_lower_bound": lower_bound,
+            "iqr_upper_bound": upper_bound,
+        }
+    )
+    warnings: list[dict[str, object]] = []
+    for episode_name, frame_count in frame_counts.items():
+        if frame_count < lower_bound:
+            warnings.append({"kind": "short", "episode": episode_name, "frame_count": int(frame_count)})
+        elif frame_count > upper_bound:
+            warnings.append({"kind": "long", "episode": episode_name, "frame_count": int(frame_count)})
+    return reference, warnings
+
+
+def _percentile(sorted_values: list[int], pct: float) -> float:
+    if not sorted_values:
+        raise ValueError("percentile requires at least one value")
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    position = (len(sorted_values) - 1) * float(pct)
+    lower_index = math.floor(position)
+    upper_index = math.ceil(position)
+    if lower_index == upper_index:
+        return float(sorted_values[lower_index])
+    upper_weight = position - lower_index
+    return float(
+        sorted_values[lower_index] * (1.0 - upper_weight)
+        + sorted_values[upper_index] * upper_weight
+    )

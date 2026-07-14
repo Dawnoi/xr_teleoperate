@@ -1,11 +1,11 @@
 import * as THREE from "./vendor/three.module.js";
 
-async function api(path) {
+async function api(path, options = {}) {
   const resp = await fetch(path, { cache: "no-store" });
   const text = await resp.text();
   let data = {};
   try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { error: text }; }
-  if (!resp.ok || data?.ok === false) throw new Error(data?.error || "request failed");
+  if (!resp.ok || (data?.ok === false && !options.allowApplicationError)) throw new Error(data?.error || "request failed");
   return data;
 }
 
@@ -43,6 +43,10 @@ const state = {
   playbackLastImageKey: "",
   playbackStatusTimer: 0,
   playbackEpisodeSearch: "",
+  quickPlaybackQuery: "",
+  quickPlaybackOpen: false,
+  quickPlaybackActiveIndex: 0,
+  realReplayCommandPending: "",
   lastConvertNoticeKey: "",
   cameraConfigOpen: false,
   cameraFpsHistory: {},
@@ -259,16 +263,132 @@ function renderRecord() {
   </div>`;
 }
 
+function displayedPlayback() {
+  const playback = state.snapshot?.playback || {};
+  const provider = state.snapshot?.provider || {};
+  const realReplay = provider.real_replay || {};
+  const frameIndex = Number(realReplay.frame_index);
+  if (
+    provider.active_provider === "raw_replay"
+    && String(realReplay.episode_name || "") === String(playback.episode_name || "")
+    && Number.isFinite(frameIndex)
+    && frameIndex >= 0
+  ) {
+    return { ...playback, frame_index: frameIndex, state: "real_replay" };
+  }
+  return playback;
+}
+
+function quickPlaybackMatches() {
+  const query = String(state.quickPlaybackQuery || "").trim().toLowerCase();
+  return (state.episodes || []).filter((episode) => {
+    const name = String(episode?.name || "");
+    return name && (!query || name.toLowerCase().includes(query));
+  });
+}
+
+function quickPlaybackOptionsHtml() {
+  const matches = quickPlaybackMatches();
+  if (!matches.length) return `<div class="quick-episode-empty">没有匹配的 episode</div>`;
+  const active = Math.max(0, Math.min(Number(state.quickPlaybackActiveIndex || 0), matches.length - 1));
+  return matches.map((episode, index) => `<button type="button" class="quick-episode-option ${index === active ? "active" : ""}" onclick='selectQuickPlaybackEpisode(${JSON.stringify(String(episode.name))})'>${esc(episode.name)}</button>`).join("");
+}
+
+function renderQuickPlaybackOptions() {
+  const menu = document.getElementById("quickPlaybackOptions");
+  const list = document.getElementById("quickPlaybackOptionList");
+  if (!menu || !list) return;
+  list.innerHTML = quickPlaybackOptionsHtml();
+  menu.classList.toggle("hidden", !state.quickPlaybackOpen);
+  const toggle = document.getElementById("quickPlaybackToggle");
+  if (toggle) toggle.setAttribute("aria-expanded", String(state.quickPlaybackOpen));
+}
+
+function updateQuickPlaybackQuery(value) {
+  state.quickPlaybackQuery = String(value || "");
+  state.quickPlaybackOpen = true;
+  state.quickPlaybackActiveIndex = 0;
+  renderQuickPlaybackOptions();
+}
+
+function openQuickPlaybackOptions() {
+  state.quickPlaybackOpen = true;
+  state.quickPlaybackActiveIndex = 0;
+  renderQuickPlaybackOptions();
+}
+
+function toggleQuickPlaybackOptions() {
+  state.quickPlaybackOpen = !state.quickPlaybackOpen;
+  state.quickPlaybackActiveIndex = 0;
+  renderQuickPlaybackOptions();
+  if (state.quickPlaybackOpen) document.getElementById("quickPlaybackFilter")?.focus();
+}
+
+function closeQuickPlaybackOptions() {
+  state.quickPlaybackOpen = false;
+  renderQuickPlaybackOptions();
+}
+
+function selectQuickPlaybackEpisode(name) {
+  const episodeName = String(name || "");
+  if (!episodeName) return;
+  state.quickPlaybackQuery = "";
+  state.quickPlaybackOpen = false;
+  state.quickPlaybackActiveIndex = 0;
+  const toggle = document.getElementById("quickPlaybackToggle");
+  if (toggle) toggle.firstChild.textContent = episodeName;
+  renderQuickPlaybackOptions();
+  loadPlayback(episodeName);
+}
+
+function handleQuickPlaybackKey(event) {
+  const matches = quickPlaybackMatches();
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeQuickPlaybackOptions();
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    event.preventDefault();
+    state.quickPlaybackOpen = true;
+    if (matches.length) {
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      state.quickPlaybackActiveIndex = (Number(state.quickPlaybackActiveIndex || 0) + delta + matches.length) % matches.length;
+    }
+    renderQuickPlaybackOptions();
+    return;
+  }
+  if (event.key === "Enter") {
+    event.preventDefault();
+    const exact = matches.find((episode) => String(episode.name) === String(state.quickPlaybackQuery || ""));
+    const selected = exact || matches[Math.max(0, Math.min(Number(state.quickPlaybackActiveIndex || 0), matches.length - 1))];
+    if (!selected) {
+      showBanner("没有可加载的 episode。", "error");
+      return;
+    }
+    selectQuickPlaybackEpisode(selected.name);
+  }
+}
+
 function renderPlayback() {
-  const p = state.snapshot?.playback || {};
+  const p = displayedPlayback();
   const r = state.snapshot?.recording || {};
   const teleop = state.snapshot?.teleop || {};
   const provider = state.snapshot?.provider || {};
   const realReplay = provider.real_replay || {};
-  const realReplayRunning = provider.active_provider === "raw_replay" || realReplay.state === "running";
-  const canStartRealReplay = !!p.episode_name && !!teleop.started && !r.active && provider.active_provider === "hold" && !realReplayRunning;
+  const realReplayCommandPending = String(state.realReplayCommandPending || "");
+  const realReplayRunning = provider.active_provider === "raw_replay" || realReplay.state === "running" || realReplayCommandPending === "start";
+  const canStartRealReplay = !!p.episode_name && !!teleop.started && !r.active && provider.active_provider === "hold" && !realReplayRunning && !realReplayCommandPending;
   const realReplaySpeed = String(localStorage.realReplaySpeedScale || realReplay.speed_scale || "1.0");
   const realReplayArmSource = String(localStorage.realReplayArmSource || realReplay.arm_source || "action");
+  const replayTrace = realReplay.runtime_debug?.execution_trace || {};
+  const pendingReplayTrace = replayTrace.current || null;
+  const latestReplayTrace = replayTrace.latest || null;
+  const trace = latestReplayTrace || pendingReplayTrace || {};
+  const traceState = pendingReplayTrace
+    ? `pending #${pendingReplayTrace.seq ?? "-"} · showing #${latestReplayTrace?.seq ?? "-"}`
+    : latestReplayTrace ? `${latestReplayTrace.status || "completed"} #${latestReplayTrace.seq ?? "-"}` : "waiting";
+  const traceMs = (key) => Number.isFinite(Number(trace[key])) ? `${Number(trace[key]).toFixed(1)} ms` : "-";
   const query = String(state.playbackEpisodeSearch || "").trim().toLowerCase();
   const filteredEpisodes = (state.episodes || []).filter((e) => {
     const name = String(e.name || "").toLowerCase();
@@ -279,21 +399,29 @@ function renderPlayback() {
   const captureTime = (e) => String(e.start_time || e.end_time || "").trim() || "-";
   const rows = filteredEpisodes.map((e) => `<tr>
     <td><input data-delete-ep type="checkbox" value="${esc(e.name)}" style="width:auto"></td><td><b>${esc(e.name)}</b></td><td>${esc(captureTime(e))}</td><td>${badge(e.validation_level)}</td><td>${e.frame_count || 0}</td><td>${Number(e.duration_sec || 0).toFixed(1)}s</td>
-    <td><button onclick='loadPlayback(${JSON.stringify(e.name)})'>加载</button><button class="secondary" onclick='deleteEpisodes([${JSON.stringify(e.name)}])'>删除</button></td>
+    <td><button onclick='loadPlayback(${JSON.stringify(e.name)})' ${realReplayRunning ? "disabled" : ""}>加载</button><button class="secondary" onclick='deleteEpisodes([${JSON.stringify(e.name)}])'>删除</button></td>
   </tr>`).join("");
   const cameraCards = (p.cameras || []).map((c) => {
     const cid = Number(c.camera_id || 0);
     return `<div class="preview-tile playback-camera-tile" data-playback-tile="${cid}"><div class="preview-title"><b>${esc(c.camera_name || `cam${cid}`)}</b><span>id=${cid}</span></div><div class="preview"><span class="hint" data-playback-hint="${cid}">等待 cam${cid}...</span><img data-playback-camera="${cid}" style="display:none"></div></div>`;
   }).join("");
   const maxFrame = Math.max(0, Number(p.total_frames || 0) - 1);
+  const selectedEpisode = (state.episodes || []).find((episode) => String(episode.name || "") === String(p.episode_name || ""));
+  const selectedEpisodeMeta = selectedEpisode
+    ? `${Number(selectedEpisode.frame_count || 0)} 帧 · ${Number(selectedEpisode.duration_sec || 0).toFixed(1)}s · 自检 ${String(selectedEpisode.validation_level || "unknown")}`
+    : "加载 episode 后显示帧数、时长和自检结果";
   return `<div class="grid">
-    <div class="card hero wide"><div class="card-head"><div><div class="eyebrow">Episode Playback</div><div class="headline">${esc(p.episode_name || "选择一个 episode")}</div><div class="subline">网页可播放图片/曲线；真机回放会切换到 raw offline provider 并下发动作。</div></div>${badge(p.state || "idle")}</div>
+    <div class="playback-top-grid">
+    <div class="card hero playback-control-card"><div class="card-head"><div><div class="eyebrow">Episode Playback</div><div class="headline">${esc(p.episode_name || "选择一个 episode")}</div><div class="subline">${esc(selectedEpisodeMeta)}</div></div>${badge(p.state || "idle")}</div>
+      <div class="quick-episode-picker"><label for="quickPlaybackToggle">快速选择 episode</label><div class="quick-episode-combobox"><button id="quickPlaybackToggle" type="button" class="secondary quick-episode-toggle" aria-expanded="${state.quickPlaybackOpen}" onclick="toggleQuickPlaybackOptions()" ${realReplayRunning ? "disabled" : ""}><span>${esc(p.episode_name || "选择 episode")}</span><span aria-hidden="true">&#9662;</span></button><div id="quickPlaybackOptions" class="quick-episode-options ${state.quickPlaybackOpen ? "" : "hidden"}"><input id="quickPlaybackFilter" type="search" autocomplete="off" value="${esc(state.quickPlaybackQuery)}" placeholder="过滤 episode" oninput="updateQuickPlaybackQuery(this.value)" onkeydown="handleQuickPlaybackKey(event)"><div id="quickPlaybackOptionList">${quickPlaybackOptionsHtml()}</div></div></div></div>
       <div class="metric-grid"><div class="metric"><span>Frame</span><b id="playbackMetricFrame">${p.frame_index || 0}/${p.total_frames || 0}</b></div><div class="metric"><span>Time</span><b id="playbackMetricTime">${Number(p.current_time_sec || 0).toFixed(2)}s</b></div><div class="metric"><span>Provider</span><b>${esc(provider.active_provider || "-")}</b></div><div class="metric"><span>Real Replay</span><b>${esc(realReplay.state || "idle")}</b><small>${esc(realReplay.episode_name || "")} ${Number(realReplay.frame_index || -1) >= 0 ? `#${Number(realReplay.frame_index)}` : ""}</small></div></div>
-      <p class="row"><button onclick="playbackStart()">播放画面</button><button class="secondary" onclick="playbackPause()">暂停画面</button><button class="secondary" onclick="playbackStop()">停止画面</button><button class="secondary" onclick="loadPlaybackCurves()">重载曲线</button></p>
-      <div class="form compact-form real-replay-controls"><label>arm_source<select id="realReplayArmSource" onchange="localStorage.realReplayArmSource=this.value"><option value="action" ${realReplayArmSource === "action" ? "selected" : ""}>action</option><option value="state" ${realReplayArmSource === "state" ? "selected" : ""}>state</option><option value="fk_cmd_pose" ${realReplayArmSource === "fk_cmd_pose" ? "selected" : ""}>fk_cmd_pose</option></select></label><label>speed_scale<input id="realReplaySpeed" value="${esc(realReplaySpeed)}" onchange="localStorage.realReplaySpeedScale=this.value"></label><div><p class="mini">切到回放页后 provider 会进入 HOLD；开始真机回放前必须未录制、已启动 teleop、且已加载 episode。</p><p class="row"><button class="danger" onclick="startRealReplay()" ${canStartRealReplay ? "" : "disabled"}>开始真机回放</button><button class="secondary" onclick="stopRealReplay()" ${realReplayRunning ? "" : "disabled"}>停止真机回放</button>${realReplay.error ? `<span class="pill"><span class="dot err"></span>${esc(realReplay.error)}</span>` : ""}</p></div></div>
-      <div class="playback-controls"><input id="playbackSeek" type="range" min="0" max="${maxFrame}" value="${Number(p.frame_index || 0)}" oninput="previewPlaybackSeek(this.value)" onchange="seekPlayback(this.value)"><span id="playbackTimeLabel" class="mini">frame ${Number(p.frame_index || 0)} / ${Number(p.total_frames || 0)}</span></div></div>
-    <div class="card full"><div class="card-head"><div><h2>全部相机同步回放</h2><p class="mini" id="playbackFrameMeta">加载 episode 后默认显示当前帧的全部相机；这不是机器人运动回放。</p></div><span class="pill">${(p.cameras || []).length} cameras</span></div><div class="preview-grid playback-camera-grid layout-placeholder">${cameraCards || empty("当前 episode 没有相机图像；加载 episode 后这里保留相机回放占位")}</div></div>
-    <div class="card full"><div class="card-head"><div><h2>轨迹曲线同步回放</h2><p class="mini" id="playbackCurveMeta">四图布局：左/右臂 J1-J7 与左/右夹爪分别显示，游标与图像同步。</p></div><span class="pill">4 charts</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left J1-J7</b><span>playback</span></div><canvas id="playbackLeftJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="playbackLeftJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right J1-J7</b><span>playback</span></div><canvas id="playbackRightJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="playbackRightJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Left Gripper</b><span>playback</span></div><canvas id="playbackLeftGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="playbackLeftGripperLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right Gripper</b><span>playback</span></div><canvas id="playbackRightGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="playbackRightGripperLegend"></div></div></div></div>
+      <p class="row"><button onclick="playbackStart()" ${realReplayRunning ? "disabled" : ""}>播放画面</button><button class="secondary" onclick="playbackPause()" ${realReplayRunning ? "disabled" : ""}>暂停画面</button><button class="secondary" onclick="playbackStop()" ${realReplayRunning ? "disabled" : ""}>停止画面</button><button class="secondary" onclick="loadPlaybackCurves()">重载曲线</button></p>
+      <div class="form compact-form real-replay-controls"><label>arm_source<select id="realReplayArmSource" onchange="localStorage.realReplayArmSource=this.value"><option value="action" ${realReplayArmSource === "action" ? "selected" : ""}>action</option><option value="state" ${realReplayArmSource === "state" ? "selected" : ""}>state</option><option value="fk_cmd_pose" ${realReplayArmSource === "fk_cmd_pose" ? "selected" : ""}>fk_cmd_pose</option></select></label><label>speed_scale<input id="realReplaySpeed" value="${esc(realReplaySpeed)}" onchange="localStorage.realReplaySpeedScale=this.value"></label><div><p class="mini">切到回放页后 provider 会进入 HOLD；开始真机回放前必须未录制、已启动 teleop、且已加载 episode。</p><p class="row"><button class="danger" onclick="startRealReplay()" ${canStartRealReplay ? "" : "disabled"}>开始真机回放</button><button class="secondary" onclick="stopRealReplay()" ${realReplayRunning && realReplayCommandPending !== "stop" ? "" : "disabled"}>停止真机回放</button>${realReplayCommandPending ? `<span class="pill"><span class="dot warn"></span>${esc(realReplayCommandPending === "start" ? "启动指令待确认" : "停止指令待确认")}</span>` : ""}${realReplay.error ? `<span class="pill"><span class="dot err"></span>${esc(realReplay.error)}</span>` : ""}</p></div></div>
+      <div class="playback-controls"><input id="playbackSeek" type="range" min="0" max="${maxFrame}" value="${Number(p.frame_index || 0)}" oninput="previewPlaybackSeek(this.value)" onchange="seekPlayback(this.value)" ${realReplayRunning ? "disabled" : ""}><span id="playbackTimeLabel" class="mini">frame ${Number(p.frame_index || 0)} / ${Number(p.total_frames || 0)}</span></div></div>
+    <div class="card playback-trace-card"><div class="card-head"><div><h2>真机回放执行 trace</h2><p class="mini">以 raw episode 当前帧进入控制循环为起点，测量 DDS 发布和状态线程首次检测到关节运动；不包含网页图片传输。</p></div>${badge(pendingReplayTrace ? "running" : trace.status || "idle", traceState)}</div><div class="metric-grid"><div class="metric"><span>帧到 DDS 发布</span><b>${traceMs("recv_to_pub_ms")}</b></div><div class="metric"><span>DDS 到线程反馈运动</span><b>${traceMs("pub_to_exec_thread_ms")}</b></div><div class="metric"><span>帧到线程反馈运动</span><b>${traceMs("recv_to_exec_thread_ms")}</b></div><div class="metric"><span>控制线程排队</span><b>${traceMs("enqueue_to_publish_ms")}</b></div><div class="metric"><span>DDS 写入</span><b>${traceMs("dds_write_ms")}</b></div><div class="metric"><span>触发关节差</span><b>${Number(trace.q_delta_thread_trigger || 0).toFixed(4)} rad</b><small class="mini">episode frame ${Number(trace.raw_replay_frame_index ?? -1)}</small></div></div></div></div>
+    <div class="card full"><div class="card-head"><div><h2>全部相机同步回放</h2><p class="mini" id="playbackFrameMeta">真机回放运行时，图像和曲线游标跟随真机实际进入控制循环的 episode frame。</p></div><span class="pill">${(p.cameras || []).length} cameras</span></div><div class="preview-grid playback-camera-grid layout-placeholder">${cameraCards || empty("当前 episode 没有相机图像；加载 episode 后这里保留相机回放占位")}</div></div>
+    <div class="card full"><div class="card-head"><div><h2>夹爪状态复现对比</h2><p class="mini">蓝线为 raw replay 当前 frame 进入控制循环前读到的真机 DDS 反馈 state；橙线为该 frame 的 episode recorded state。两者比较回放状态是否复现采集时真机状态。</p></div><span class="pill">2 charts</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left Gripper</b><span>raw replay</span></div><canvas id="liveLeftGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveLeftGripperLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right Gripper</b><span>raw replay</span></div><canvas id="liveRightGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveRightGripperLegend"></div></div></div></div>
+    <div class="card full"><div class="card-head"><div><h2>机械臂轨迹同步回放</h2><p class="mini" id="playbackCurveMeta">左右臂 J1-J7 来自 episode 回放数据，游标与历史图像同步。</p></div><span class="pill">2 charts</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left J1-J7</b><span>playback</span></div><canvas id="playbackLeftJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="playbackLeftJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right J1-J7</b><span>playback</span></div><canvas id="playbackRightJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="playbackRightJointLegend"></div></div></div></div>
     <div class="card full episodes-card"><div class="toolbar"><div><h2>Episodes</h2><p class="mini">来自当前 Root：${esc(effectiveRecordRoot())} · ${filteredEpisodes.length}/${(state.episodes || []).length}</p></div><div class="row episode-search"><input id="playbackEpisodeSearch" placeholder="搜索 episode / 时间 / validation" value="${esc(state.playbackEpisodeSearch || "")}" oninput="setPlaybackSearch(this.value)"><button class="secondary" onclick="refreshEpisodes().then(render)">刷新</button><button class="danger" onclick="deleteSelectedEpisodes()">删除所选</button></div></div><div class="table-wrap episode-table-wrap"><table><thead><tr><th></th><th>Name</th><th>采集时间</th><th>Validation</th><th>Frames</th><th>Duration</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="7">${empty(query ? "没有匹配的 episode" : "暂无 episode")}</td></tr>`}</tbody></table></div></div>
   </div>`;
 }
@@ -320,7 +448,7 @@ function renderInference() {
   const executionTrace = runtimeDebug.execution_trace || {};
   const pendingTrace = executionTrace.current || null;
   const latestTrace = executionTrace.latest || null;
-  const trace = latestTrace || pendingTrace || {};
+  const trace = pendingTrace || latestTrace || {};
   const traceState = pendingTrace ? `pending #${pendingTrace.seq ?? "-"}` : latestTrace ? `${latestTrace.status || "completed"} #${latestTrace.seq ?? "-"}` : "waiting";
   const chunkIndex = Number(latestAction.chunk_index ?? latestAction.online_chunk_index ?? -1);
   const chunkSize = Number(latestAction.chunk_size ?? latestAction.online_chunk_size ?? 0);
@@ -379,6 +507,9 @@ function renderExport() {
   const verifyErrors = Array.isArray(verify.errors) ? verify.errors : [];
   const showVerifyCard = !!exportVerify || !!c.export_verify;
   const verifyHtml = showVerifyCard ? `<div class="card full"><div class="card-head"><div><h2>导出抽样验证</h2><p class="mini">默认关闭。开启后导出完成自动抽查最多 2 帧：原始 frames.jsonl 的 q_fb 是否等于 parquet 的 observation.state/action。</p></div><span class="pill ${verify.ok === false ? "err" : verify.ok ? "ok" : ""}">${verify.ok === undefined ? "等待导出" : verify.ok ? "验证通过" : "验证失败"}</span></div>${verifyRows ? `<div class="table-wrap"><table><thead><tr><th>Episode</th><th>Frame</th><th>State</th><th>Action</th><th>MaxDiff</th><th>Raw head</th><th>Export head</th></tr></thead><tbody>${verifyRows}</tbody></table></div>` : empty("开启验证后，导出结束会自动显示抽样明细。")}${verifyErrors.length ? `<ul>${verifyErrors.map((e) => `<li class="err-text">${esc(e)}</li>`).join("")}</ul>` : ""}</div>` : "";
+  const episodeLengthWarnings = Array.isArray(c.episode_length_warnings) ? c.episode_length_warnings : [];
+  const episodeLengthReference = c.episode_length_reference || {};
+  const episodeLengthWarningHtml = episodeLengthWarnings.length ? `<div class="card full"><div class="card-head"><div><h2>Episode 时长预警</h2><p class="mini">同一批次按帧数 IQR 检测；仅提示，不阻断导出。</p></div>${badge("warning", `${episodeLengthWarnings.length} 个异常`)}</div><p class="mini">中位数 ${Number(episodeLengthReference.median_frame_count || 0).toFixed(0)} 帧 · 异常短 &lt; ${Number(episodeLengthReference.iqr_lower_bound || 0).toFixed(1)} · 异常长 &gt; ${Number(episodeLengthReference.iqr_upper_bound || 0).toFixed(1)}</p><ul>${episodeLengthWarnings.map((item) => `<li class="warn-text">${item.kind === "short" ? "异常短" : "异常长"}：${esc(item.episode)}（${Number(item.frame_count || 0)} 帧）</li>`).join("")}</ul></div>` : "";
   const episodeChecks = (state.episodes || []).map((e) => {
     const name = String(e.name || "");
     const checked = selected.has(name) ? "checked" : "";
@@ -390,6 +521,7 @@ function renderExport() {
       <div class="form"><label>output_root<input id="exportOut" value="${esc(outputRoot)}" oninput="setExportConfig('outputRoot', this.value)" onchange="setExportConfig('outputRoot', this.value)"></label><label>dataset_name<input id="exportName" value="${esc(datasetName)}" oninput="setExportConfig('datasetName', this.value)" onchange="setExportConfig('datasetName', this.value)"></label><label>urdf_path<input id="exportUrdf" value="${esc(urdfPath)}" placeholder=".../nero_dual_arm_with_gripper_generated.urdf" oninput="setExportConfig('urdfPath', this.value)" onchange="setExportConfig('urdfPath', this.value)"></label><label class="full">批量任务描述 / task<input id="exportTask" value="${esc(task)}" placeholder="例如：pick red block to tray" oninput="setExportConfig('task', this.value)" onchange="setExportConfig('task', this.value)"></label><label>format<select id="exportFormat" onchange="setExportConfig('formatVersion', this.value)"><option value="v2" ${formatVersion === "v2" ? "selected" : ""}>LeRobot v2</option><option value="v3" ${formatVersion === "v3" ? "selected" : ""}>LeRobot v3</option><option value="umi_zarr" ${formatVersion === "umi_zarr" ? "selected" : ""}>UMI zarr.zip</option></select></label><label>mode<select id="exportMode" onchange="setExportConfig('mode', this.value)"><option value="new" ${mode === "new" ? "selected" : ""}>新建</option><option value="append" ${mode === "append" ? "selected" : ""}>追加到已有数据集</option><option value="replace" ${mode === "replace" ? "selected" : ""}>安全替换</option></select></label><label class="row"><input id="exportVideo" type="checkbox" style="width:auto" ${exportVideo ? "checked" : ""} onchange="setExportConfig('exportVideo', this.checked)">校验 mp4 帧数</label><label class="row"><input id="exportFk" type="checkbox" style="width:auto" ${exportFk ? "checked" : ""} onchange="setExportConfig('exportFk', this.checked)">导出 FK(xyz+rpy)</label><label class="row"><input id="exportVerify" type="checkbox" style="width:auto" ${exportVerify ? "checked" : ""} onchange="setExportConfig('exportVerify', this.checked)">导出后抽样验证</label></div>
       <p class="row"><button id="exportStartBtn" onclick="startExport()">导出所选 ${selectedCount ? `(${selectedCount})` : ""}</button><span class="mini">当前实现支持 LeRobot v2 的 raw episode 导出；append、v3、UMI zarr、自定义 URDF FK 会明确报错，不做静默降级。</span></p></div>
     <div class="card"><div class="card-head"><h2>进度</h2><span class="mini">${esc(progressText)}</span></div>${progress(processedFrames, totalFrames)}<div class="kv" style="margin-top:14px"><span class="muted">状态</span><span>${esc(c.phase || "idle")}</span><span class="muted">消息</span><span>${esc(c.message || "-")}</span>${c.error ? `<span class="muted">错误</span><span class="err-text">${esc(c.error)}</span>` : ""}</div></div>
+    ${episodeLengthWarningHtml}
     ${verifyHtml}
     <div class="card full"><div class="toolbar"><div><h2>选择 Episode</h2><p class="mini">支持批量范围，例如 <code>1-50, 50-100</code>；按 episode 编号匹配 episode_000001 这种名称。</p></div><div class="row"><span class="pill" id="exportSelectedCount">${selectedCount} selected</span><button class="secondary" onclick="refreshEpisodes().then(render)">刷新</button></div></div>
       <div class="selection-tools"><label class="range-input">批量范围<input id="exportRange" value="${esc(state.exportRangeInput || "")}" oninput="setExportRangeInput(this.value)" placeholder="1-50, 50-100 或 episode_000001-episode_000050"></label><button onclick="selectExportRange('replace')">按范围选择</button><button class="secondary" onclick="selectAllExportEpisodes()">全选</button><button class="secondary" onclick="invertExportSelection()">反选</button><button class="secondary" onclick="clearExportSelection()">清空</button></div>
@@ -464,7 +596,7 @@ function render() {
   updatePreviewLoop();
   renderCurveLegends();
   scheduleCurveDraw(true);
-  syncPlaybackPanel(state.snapshot?.playback || {});
+  syncPlaybackPanel(displayedPlayback());
   managePlaybackPolling();
 }
 
@@ -517,6 +649,9 @@ function applySnapshot(payload) {
     incoming.playback = prevPlayback;
   }
   state.snapshot = incoming;
+  if (state.realReplayCommandPending && realReplayCommandResolved(incoming.provider || {}, state.realReplayCommandPending)) {
+    state.realReplayCommandPending = "";
+  }
   const r = state.snapshot.recording || {};
   const prevR = prev.recording || {};
   pushLiveCurveSample(state.snapshot);
@@ -540,6 +675,18 @@ function applySnapshot(payload) {
     !!teleop.started !== !!prevTeleop.started ||
     !!teleop.ready !== !!prevTeleop.ready ||
     !!teleop.stopping !== !!prevTeleop.stopping
+  );
+  const replay = state.snapshot.provider?.real_replay || {};
+  const prevReplay = prev.provider?.real_replay || {};
+  const replayTrace = replay.runtime_debug?.execution_trace || {};
+  const prevReplayTrace = prevReplay.runtime_debug?.execution_trace || {};
+  const changedPlaybackRuntime = (
+    state.snapshot.provider?.active_provider !== prev.provider?.active_provider ||
+    replay.state !== prevReplay.state ||
+    replay.frame_index !== prevReplay.frame_index ||
+    replayTrace.current?.seq !== prevReplayTrace.current?.seq ||
+    replayTrace.latest?.seq !== prevReplayTrace.latest?.seq ||
+    replay.runtime_debug?.gripper_state_current?.frame_index !== prevReplay.runtime_debug?.gripper_state_current?.frame_index
   );
   const inference = state.snapshot.provider?.online_inference || {};
   const prevInference = prev.provider?.online_inference || {};
@@ -565,8 +712,9 @@ function applySnapshot(payload) {
   const shouldRenderInference = state.active === "inference" && (
     changedInference || (changedInferenceRuntime && performance.now() - Number(state.lastInferenceRenderMs || 0) >= 150)
   );
-  if ((changedRecording || changedValidation || changedTeleop || shouldRenderInference) && document.activeElement?.tagName !== "INPUT") render();
-  if (state.active === "playback") syncPlaybackPanel(state.snapshot.playback || {});
+  const shouldRenderPlayback = state.active === "playback" && changedPlaybackRuntime;
+  if ((changedRecording || changedValidation || changedTeleop || shouldRenderInference || shouldRenderPlayback) && document.activeElement?.tagName !== "INPUT") render();
+  if (state.active === "playback") syncPlaybackPanel(displayedPlayback());
   scheduleCurveDraw(false);
 }
 
@@ -586,7 +734,7 @@ async function refreshEpisodes() {
   const box = document.getElementById("globalRecordRoot");
   if (box && box.value !== rootDir) box.value = rootDir;
   try {
-    state.episodes = (await api("/recording/episodes?" + qs({ root_dir: rootDir }))).episodes || [];
+    state.episodes = (await api("/recording/episodes?" + qs({ root_dir: rootDir, limit: 0 }))).episodes || [];
   } catch (e) {
     if (expectedShutdownFetchError(e) || connectionIsOffline()) return;
     showBanner(`Episode 列表刷新失败：${e?.message || e}`, "error");
@@ -618,7 +766,7 @@ async function refreshAll() {
   const recordingStatus = await api("/recording/status");
   state.snapshot = { ...(state.snapshot || {}), recording: recordingStatus };
   await refreshEpisodes();
-  try { state.convertStatus = await api("/convert/status"); } catch (_) {}
+  try { state.convertStatus = await api("/convert/status", { allowApplicationError: true }); } catch (_) {}
   state.inferenceStatus = await api("/inference/status");
   render();
 }
@@ -641,9 +789,18 @@ function pushLiveCurveSample(snapshot) {
     t: now,
     left: Array.isArray(left) ? left.slice(0, 8).map(Number) : null,
     right: Array.isArray(right) ? right.slice(0, 8).map(Number) : null,
+    leftGripperFeedback: finiteOrNull(snapshot?.left?.gripper_q_fb),
+    rightGripperFeedback: finiteOrNull(snapshot?.right?.gripper_q_fb),
+    leftGripperCommand: finiteOrNull(snapshot?.left?.gripper_q_cmd),
+    rightGripperCommand: finiteOrNull(snapshot?.right?.gripper_q_cmd),
   });
   while (hist.length > 240) hist.shift();
   state.liveCurveHistory = hist;
+}
+
+function finiteOrNull(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
 }
 
 function pushInferenceTrajectorySample(snapshot) {
@@ -677,7 +834,7 @@ function pushInferenceTrajectorySample(snapshot) {
 const JOINT_NAMES = ["j1","j2","j3","j4","j5","j6","j7"];
 const JOINT_KEYS = ["joint1","joint2","joint3","joint4","joint5","joint6","joint7"];
 const JOINT_COLORS = ["#007aff","#5856d6","#34c759","#ff9f0a","#ff3b30","#00c7be","#af52de"];
-const GRIPPER_COLORS = { left: "#007aff", right: "#ff3b30" };
+const GRIPPER_COLORS = { left: "#007aff", right: "#ff3b30", feedback: "#007aff", command: "#ff9f0a" };
 const INFERENCE_AXIS_COLORS = ["#007aff", "#34c759", "#ff9f0a"];
 const INFERENCE_FEEDBACK_COLORS = ["#6baeff", "#70d78b", "#ffc163"];
 const ROT6D_COLORS = ["#ff3b30", "#ff9f0a", "#ffd60a", "#34c759", "#007aff", "#af52de"];
@@ -740,6 +897,8 @@ function syncExportConfigFromDom() {
 
 function renderCurveLegends() {
   const jointHtml = JOINT_NAMES.map((n, i) => `<span><i style="background:${JOINT_COLORS[i]}"></i>${n}</span>`).join("");
+  const liveGripHtml = `<span><i style="background:${GRIPPER_COLORS.feedback}"></i>当前反馈 q</span><span><i style="background:${GRIPPER_COLORS.command}"></i>已下发目标 q</span>`;
+  const replayGripHtml = `<span><i style="background:${GRIPPER_COLORS.feedback}"></i>当前真机反馈 state</span><span><i style="background:${GRIPPER_COLORS.command}"></i>episode recorded state</span>`;
   const leftGripHtml = `<span><i style="background:${GRIPPER_COLORS.left}"></i>left gripper</span>`;
   const rightGripHtml = `<span><i style="background:${GRIPPER_COLORS.right}"></i>right gripper</span>`;
   const wristHtml = ["X", "Y", "Z"].map((axis, index) => `<span><i style="background:${INFERENCE_AXIS_COLORS[index]}"></i>${axis} target</span><span><i style="background:${INFERENCE_FEEDBACK_COLORS[index]}"></i>${axis} feedback</span>`).join("");
@@ -747,8 +906,8 @@ function renderCurveLegends() {
   const items = [
     ["liveLeftJointLegend", jointHtml], ["liveRightJointLegend", jointHtml],
     ["playbackLeftJointLegend", jointHtml], ["playbackRightJointLegend", jointHtml],
-    ["liveLeftGripperLegend", leftGripHtml], ["playbackLeftGripperLegend", leftGripHtml],
-    ["liveRightGripperLegend", rightGripHtml], ["playbackRightGripperLegend", rightGripHtml],
+    ["liveLeftGripperLegend", state.active === "playback" ? replayGripHtml : liveGripHtml], ["playbackLeftGripperLegend", leftGripHtml],
+    ["liveRightGripperLegend", state.active === "playback" ? replayGripHtml : liveGripHtml], ["playbackRightGripperLegend", rightGripHtml],
     ["inferenceLeftWristLegend", wristHtml], ["inferenceRightWristLegend", wristHtml],
     ["inferenceLeftRot6dLegend", rot6dHtml], ["inferenceRightRot6dLegend", rot6dHtml],
   ];
@@ -766,7 +925,7 @@ function scheduleCurveDraw(force = false) {
     state.drawRaf = 0;
     state.lastCurveDrawMs = performance.now();
     if (state.active === "record") drawLiveCurvesDual();
-    if (state.active === "playback") drawPlaybackCurves(state.snapshot?.playback || {});
+    if (state.active === "playback") drawPlaybackCurves(displayedPlayback());
     if (state.active === "inference") drawInferenceTrajectoryCurves();
     if (state.active === "inference") drawInferenceDualTcp3D();
   });
@@ -863,8 +1022,14 @@ function drawLiveCurvesDual() {
   const rightJointSeries = JOINT_NAMES.map((name, j) => ({ name, color:JOINT_COLORS[j], values:hist.map((x) =>x?.right?.[j] ?? null) }));
   drawSeriesCanvas("liveLeftJointCurveCanvas", "Left J1-J7 feedback", leftJointSeries);
   drawSeriesCanvas("liveRightJointCurveCanvas", "Right J1-J7 feedback", rightJointSeries);
-  drawSeriesCanvas("liveLeftGripperCurveCanvas", "Left gripper feedback", [{ name:"left gripper", color:GRIPPER_COLORS.left, values:hist.map((x) =>x?.left?.[7] ?? null) }]);
-  drawSeriesCanvas("liveRightGripperCurveCanvas", "Right gripper feedback", [{ name:"right gripper", color:GRIPPER_COLORS.right, values:hist.map((x) =>x?.right?.[7] ?? null) }]);
+  drawSeriesCanvas("liveLeftGripperCurveCanvas", "Left gripper q", [
+    { name:"当前反馈 q", color:GRIPPER_COLORS.feedback, values:hist.map((x) =>x?.leftGripperFeedback ?? null) },
+    { name:"已下发目标 q", color:GRIPPER_COLORS.command, values:hist.map((x) =>x?.leftGripperCommand ?? null) },
+  ]);
+  drawSeriesCanvas("liveRightGripperCurveCanvas", "Right gripper q", [
+    { name:"当前反馈 q", color:GRIPPER_COLORS.feedback, values:hist.map((x) =>x?.rightGripperFeedback ?? null) },
+    { name:"已下发目标 q", color:GRIPPER_COLORS.command, values:hist.map((x) =>x?.rightGripperCommand ?? null) },
+  ]);
 }
 
 function drawInferenceTrajectoryCurves() {
@@ -1217,13 +1382,18 @@ async function startExport() {
     setExportConfig("task", exportTask);
     showBanner(`开始导出 ${selected.length} 个 episode：${selected.slice(0, 3).join(", ")}${selected.length > 3 ? " ..." : ""}`, "warning");
     state.lastConvertNoticeKey = "";
-    await api("/convert/start?" + q.toString());
+    state.convertStatus = await api("/convert/start?" + q.toString());
+    const lengthWarnings = state.convertStatus.episode_length_warnings || [];
+    if (lengthWarnings.length) {
+      showBanner(`导出已开始，但发现 ${lengthWarnings.length} 个异常短/长 episode；请查看导出页预警卡。`, "warning");
+    }
+    render();
     pollConvert();
   } catch (e) { showBanner(`导出失败：${e?.message || e}`, "error"); }
 }
 async function pollConvert() {
   try {
-    state.convertStatus = await api("/convert/status");
+    state.convertStatus = await api("/convert/status", { allowApplicationError: true });
     render();
     const c = state.convertStatus || {};
     if (c.running) {
@@ -1353,7 +1523,7 @@ async function loadPlayback(name) {
     state.playbackLastImageKey = "";
     await pollPlaybackStatusOnce({ renderPanel: true });
     await loadPlaybackCurves();
-    syncPlaybackPanel(state.snapshot?.playback || {});
+    syncPlaybackPanel(displayedPlayback());
   } catch (e) { showBanner(`加载回放失败：${e?.message || e}`, "error"); }
 }
 async function deleteEpisodes(names) {
@@ -1381,6 +1551,53 @@ async function playbackStart() {
 }
 async function playbackPause() { await api("/playback/pause"); await pollPlaybackStatusOnce(); }
 async function playbackStop() { await api("/playback/stop"); state.playbackLastImageKey = ""; await pollPlaybackStatusOnce(); }
+function realReplayCommandResolved(provider, command) {
+  const activeProvider = String(provider?.active_provider || "");
+  const replayState = String(provider?.real_replay?.state || "");
+  if (command === "start") {
+    return activeProvider === "raw_replay" || replayState === "running" || replayState === "finished" || replayState === "error";
+  }
+  if (command === "stop") {
+    return activeProvider !== "raw_replay" && replayState !== "running";
+  }
+  return false;
+}
+
+function refreshRealReplayStatus() {
+  return api("/replay/real/status").then((result) => {
+    const provider = result?.provider;
+    if (!provider || typeof provider !== "object") throw new Error("真机回放状态响应缺少 provider");
+    state.snapshot = { ...(state.snapshot || {}), provider };
+    return provider;
+  });
+}
+
+function reconcileRealReplayStatus(command, attempt = 0) {
+  if (state.realReplayCommandPending !== command) return;
+  refreshRealReplayStatus()
+    .then((provider) => {
+      if (state.realReplayCommandPending !== command) return;
+      if (realReplayCommandResolved(provider, command)) {
+        state.realReplayCommandPending = "";
+        render();
+        return;
+      }
+      if (attempt >= 30) {
+        state.realReplayCommandPending = "";
+        render();
+        showBanner(`真机回放${command === "start" ? "启动" : "停止"}指令 3 秒内未被控制循环确认，请检查后端日志。`, "error");
+        return;
+      }
+      window.setTimeout(() => reconcileRealReplayStatus(command, attempt + 1), 100);
+    })
+    .catch((e) => {
+      if (state.realReplayCommandPending !== command) return;
+      state.realReplayCommandPending = "";
+      render();
+      showBanner(`读取真机回放状态失败：${e?.message || e}`, "error");
+    });
+}
+
 function startRealReplay() {
   const p = state.snapshot?.playback || {};
   const provider = state.snapshot?.provider || {};
@@ -1405,19 +1622,21 @@ function startRealReplay() {
     speed_scale: speedScale,
   }))
     .then(() => {
-      showBanner(`真机回放已进入控制循环：${p.episode_name}`, "warning");
-      return refreshAll();
+      state.realReplayCommandPending = "start";
+      showBanner(`真机回放启动指令已排队：${p.episode_name}`, "warning");
+      render();
+      reconcileRealReplayStatus("start");
     })
-    .then(() => render())
     .catch((e) => showBanner(`真机回放启动失败：${e?.message || e}`, "error"));
 }
 function stopRealReplay() {
   api("/replay/real/stop")
     .then(() => {
-      showBanner("停止真机回放指令已进入控制循环，机器人将保持当前姿态。", "warning");
-      return refreshAll();
+      state.realReplayCommandPending = "stop";
+      showBanner("停止真机回放指令已排队，机器人将保持当前姿态。", "warning");
+      render();
+      reconcileRealReplayStatus("stop");
     })
-    .then(() => render())
     .catch((e) => showBanner(`停止真机回放失败：${e?.message || e}`, "error"));
 }
 async function seekPlayback(frame) {
@@ -1433,7 +1652,7 @@ function previewPlaybackSeek(frame) {
 function setPlaybackCamera(cameraId) {
   // Kept for backward compatibility with older static pages; playback now shows
   // all cameras by default, so no single-camera selection is needed.
-  syncPlaybackPanel(state.snapshot?.playback || {});
+  syncPlaybackPanel(displayedPlayback());
 }
 function previewPlaybackImage(cameraId) { setPlaybackCamera(cameraId); }
 
@@ -1456,7 +1675,7 @@ async function pollPlaybackStatusOnce(options= {}) {
     const p = await api("/playback/status");
     state.snapshot = { ...(state.snapshot || {}), playback: p };
     if (options.renderPanel) render();
-    syncPlaybackPanel(p);
+    syncPlaybackPanel(displayedPlayback());
     scheduleCurveDraw(false);
   } catch (_) {}
 }
@@ -1548,19 +1767,34 @@ function drawPlaybackCurves(playback) {
   if (!data?.ok || !Array.isArray(frames) || frames.length < 2) {
     drawSeriesCanvas("playbackLeftJointCurveCanvas", "Left J1-J7 playback", [], null);
     drawSeriesCanvas("playbackRightJointCurveCanvas", "Right J1-J7 playback", [], null);
-    drawSeriesCanvas("playbackLeftGripperCurveCanvas", "Left gripper playback", [], null);
-    drawSeriesCanvas("playbackRightGripperCurveCanvas", "Right gripper playback", [], null);
+    drawRawReplayGripperStateCurves();
     return;
   }
   const leftJointSeries = JOINT_KEYS.map((key, j) => ({ name: JOINT_NAMES[j], color: JOINT_COLORS[j], values: data.left?.[key] || [] }));
   const rightJointSeries = JOINT_KEYS.map((key, j) => ({ name: JOINT_NAMES[j], color: JOINT_COLORS[j], values: data.right?.[key] || [] }));
   drawSeriesCanvas("playbackLeftJointCurveCanvas", "Left J1-J7 playback", leftJointSeries, cursorRatio);
   drawSeriesCanvas("playbackRightJointCurveCanvas", "Right J1-J7 playback", rightJointSeries, cursorRatio);
-  drawSeriesCanvas("playbackLeftGripperCurveCanvas", "Left gripper playback", [{ name:"left gripper", color:GRIPPER_COLORS.left, values:data.left?.gripper || [] }], cursorRatio);
-  drawSeriesCanvas("playbackRightGripperCurveCanvas", "Right gripper playback", [{ name:"right gripper", color:GRIPPER_COLORS.right, values:data.right?.gripper || [] }], cursorRatio);
+  drawRawReplayGripperStateCurves();
 }
 
-Object.assign(window, { refreshAll, refreshEpisodes, render, setRecordFps, setGlobalRecordRoot, loadGlobalRecordRoot, startTeleop, stopTeleop, homeTeleop, recenterTeleop, startInference, stopInference, restoreXrInput, startCam, startRsCam, stopCam, selectPreviewCamera, openCameraConfig, closeCameraConfig, setPlaybackSearch, setExportConfig, setExportRangeInput, startRec, stopRec, cancelRec, startExport, toggleExportEpisode, selectExportRange, selectAllExportEpisodes, clearExportSelection, invertExportSelection, loadPlayback, deleteEpisodes, deleteSelectedEpisodes, playbackStart, playbackPause, playbackStop, startRealReplay, stopRealReplay, seekPlayback, previewPlaybackSeek, setPlaybackCamera, previewPlaybackImage, loadPlaybackCurves });
+function drawRawReplayGripperStateCurves() {
+  const replay = state.snapshot?.provider?.real_replay || {};
+  const history = replay.runtime_debug?.gripper_state_history || [];
+  const currentFrame = Number(replay.runtime_debug?.gripper_state_current?.frame_index ?? replay.frame_index ?? -1);
+  const titleSuffix = Number.isFinite(currentFrame) && currentFrame >= 0 ? ` · frame ${currentFrame}` : "";
+  const leftSeries = [
+    { name: "当前真机反馈 state", color: GRIPPER_COLORS.feedback, values: history.map((item) => item?.left_feedback_q ?? null) },
+    { name: "recorded state q", color: GRIPPER_COLORS.command, values: history.map((item) => item?.left_recorded_state_q ?? null) },
+  ];
+  const rightSeries = [
+    { name: "当前真机反馈 state", color: GRIPPER_COLORS.feedback, values: history.map((item) => item?.right_feedback_q ?? null) },
+    { name: "recorded state q", color: GRIPPER_COLORS.command, values: history.map((item) => item?.right_recorded_state_q ?? null) },
+  ];
+  drawSeriesCanvas("liveLeftGripperCurveCanvas", `Left gripper state${titleSuffix}`, leftSeries, history.length > 1 ? 1 : null);
+  drawSeriesCanvas("liveRightGripperCurveCanvas", `Right gripper state${titleSuffix}`, rightSeries, history.length > 1 ? 1 : null);
+}
+
+Object.assign(window, { refreshAll, refreshEpisodes, render, setRecordFps, setGlobalRecordRoot, loadGlobalRecordRoot, startTeleop, stopTeleop, homeTeleop, recenterTeleop, startInference, stopInference, restoreXrInput, startCam, startRsCam, stopCam, selectPreviewCamera, openQuickPlaybackOptions, closeQuickPlaybackOptions, toggleQuickPlaybackOptions, updateQuickPlaybackQuery, selectQuickPlaybackEpisode, handleQuickPlaybackKey, openCameraConfig, closeCameraConfig, setPlaybackSearch, setExportConfig, setExportRangeInput, startRec, stopRec, cancelRec, startExport, toggleExportEpisode, selectExportRange, selectAllExportEpisodes, clearExportSelection, invertExportSelection, loadPlayback, deleteEpisodes, deleteSelectedEpisodes, playbackStart, playbackPause, playbackStop, startRealReplay, stopRealReplay, seekPlayback, previewPlaybackSeek, setPlaybackCamera, previewPlaybackImage, loadPlaybackCurves });
 el("refreshBtn").addEventListener("click", refreshAll);
 state.active = "record"; render(); connectSse(); refreshAll();
 window.setInterval(() => {

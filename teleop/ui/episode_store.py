@@ -400,8 +400,8 @@ class PlaybackSession:
         selected = self.items[::stride]
         left = {f"joint{i + 1}": [] for i in range(7)}
         right = {f"joint{i + 1}": [] for i in range(7)}
-        left["gripper"] = []
-        right["gripper"] = []
+        left["gripper_state"] = []
+        right["gripper_state"] = []
         frame_indices: list[int] = []
         for item in selected:
             frame_indices.append(int(item.get("idx", len(frame_indices))))
@@ -410,8 +410,8 @@ class PlaybackSession:
             for index in range(7):
                 left[f"joint{index + 1}"].append(float(left_q[index]) if len(left_q) > index else None)
                 right[f"joint{index + 1}"].append(float(right_q[index]) if len(right_q) > index else None)
-            left["gripper"].append(_gripper_qpos(item, "left"))
-            right["gripper"].append(_gripper_qpos(item, "right"))
+            left["gripper_state"].append(_gripper_qpos(item, "left"))
+            right["gripper_state"].append(_gripper_qpos(item, "right"))
         return {
             "ok": True,
             "total_frames": total,

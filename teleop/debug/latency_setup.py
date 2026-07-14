@@ -21,7 +21,11 @@ def setup_latency_tracker(args: Any, arm_ctrl: Any, log: Any) -> SimpleLatencyTr
         summary_every=int(args.latency_summary_every),
         log_each_trace=file_trace_enabled,
         timeout_s=float(args.latency_timeout),
-        online_inference_only=memory_trace_enabled and not file_trace_enabled,
+        ui_memory_provider_scope=(
+            {"online_inference", "lerobot_offline"}
+            if memory_trace_enabled and not file_trace_enabled
+            else None
+        ),
     )
     set_tracker(tracker)
     set_thresholds(float(args.latency_exec_q_threshold), float(args.latency_exec_dq_threshold))

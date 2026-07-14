@@ -39,12 +39,16 @@ class SimpleLatencyTracker:
         summary_every: int = 1,
         log_each_trace: bool = True,
         timeout_s: float = 2.0,
-        online_inference_only: bool = False,
+        ui_memory_provider_scope: Optional[set[str]] = None,
     ):
         self.output_path = str(output_path) if output_path else None
         self.summary_every = max(1, int(summary_every))
         self.log_each_trace = bool(log_each_trace)
-        self.online_inference_only = bool(online_inference_only)
+        self.ui_memory_provider_scope = (
+            {str(provider_name) for provider_name in ui_memory_provider_scope}
+            if ui_memory_provider_scope is not None
+            else None
+        )
         self.timeout_ns = int(float(timeout_s) * 1e9)
         self._lock = threading.Lock()
         self._next_seq = 0
@@ -61,6 +65,11 @@ class SimpleLatencyTracker:
     def can_start_new_trace(self) -> bool:
         with self._lock:
             return self._active is None
+
+    def tracks_input_provider(self, input_provider: str) -> bool:
+        if self.ui_memory_provider_scope is None:
+            return True
+        return str(input_provider) in self.ui_memory_provider_scope
 
     def begin_trace(self, recv_ts_ns: int, recv_q, extra: Optional[Dict[str, object]] = None) -> Optional[int]:
         recv_q = np.asarray(recv_q, dtype=float).copy()

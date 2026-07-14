@@ -38,7 +38,10 @@ class LatencySetupTest(unittest.TestCase):
 
         self.assertIs(controller.tracker, tracker)
         self.assertIsNone(tracker.output_path)
-        self.assertTrue(tracker.online_inference_only)
+        self.assertEqual(tracker.ui_memory_provider_scope, {"online_inference", "lerobot_offline"})
+        self.assertTrue(tracker.tracks_input_provider("online_inference"))
+        self.assertTrue(tracker.tracks_input_provider("lerobot_offline"))
+        self.assertFalse(tracker.tracks_input_provider("xr"))
         self.assertEqual(controller.thresholds, (0.01, 0.05))
 
     def test_file_trace_keeps_existing_all_provider_scope(self):
@@ -56,7 +59,8 @@ class LatencySetupTest(unittest.TestCase):
             log=SimpleNamespace(info=lambda *_args: None),
         )
 
-        self.assertFalse(tracker.online_inference_only)
+        self.assertIsNone(tracker.ui_memory_provider_scope)
+        self.assertTrue(tracker.tracks_input_provider("xr"))
 
     def test_ui_mode_rejects_controller_without_latency_hooks(self):
         with self.assertRaisesRegex(RuntimeError, "latency trace hooks"):

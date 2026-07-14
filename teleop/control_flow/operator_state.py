@@ -7,6 +7,19 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 
+def rebase_xr_takeover_after_provider_switch(
+    *,
+    tv_wrapper,
+    arm_ik,
+    current_arm_q,
+    reset_arm_ik_state: Callable[[Any, Any], None],
+) -> None:
+    """Make the next XR grip takeover relative to the robot's current pose."""
+
+    tv_wrapper.sync_reference_to_current_live_pose(require_live=False)
+    reset_arm_ik_state(arm_ik, current_arm_q)
+
+
 @dataclass
 class OperatorStateResult:
     tele_data: Any

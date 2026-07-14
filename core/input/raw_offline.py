@@ -237,6 +237,15 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
         right_q = _qpos_from_item(item, frame_index, source_key, "right_ee", 1)
         return finite_vector([left_q[0], right_q[0]], GRIPPER_SIZE, f"frame {frame_index} gripper_q")
 
+    def _recorded_gripper_state_q(self, item: Mapping[str, Any], frame_index: int) -> np.ndarray:
+        left_q = _qpos_from_item(item, frame_index, "states", "left_ee", 1)
+        right_q = _qpos_from_item(item, frame_index, "states", "right_ee", 1)
+        return finite_vector(
+            [left_q[0], right_q[0]],
+            GRIPPER_SIZE,
+            f"frame {frame_index} recorded_gripper_state_q",
+        )
+
     def _joint_position_motion_intent(self, item: Mapping[str, Any], frame_index: int) -> MotionIntent:
         source_key = "actions" if self.arm_source == "action" else "states"
         left_arm_q = _qpos_from_item(item, frame_index, source_key, "left_arm", 7)
@@ -247,6 +256,7 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
             f"frame {frame_index} {source_key}_arm_q",
         )
         sample_ns = _sample_monotonic_ns(item, frame_index)
+        recorded_gripper_state_q = self._recorded_gripper_state_q(item, frame_index)
         return MotionIntent(
             kind="joint_position",
             arm_q=arm_q,
@@ -258,6 +268,7 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
                 "episode_index": self.episode_index,
                 "arm_source": self.arm_source,
                 "motion_repr": self.motion_repr,
+                "raw_replay_recorded_gripper_state_q": recorded_gripper_state_q.tolist(),
             },
         )
 
@@ -265,6 +276,7 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
         left_pose = _pose_from_item(item, frame_index, "actions", "left_arm")
         right_pose = _pose_from_item(item, frame_index, "actions", "right_arm")
         sample_ns = _sample_monotonic_ns(item, frame_index)
+        recorded_gripper_state_q = self._recorded_gripper_state_q(item, frame_index)
         return MotionIntent(
             kind="pose",
             left_wrist_pose=left_pose,
@@ -277,6 +289,7 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
                 "episode_index": self.episode_index,
                 "arm_source": self.arm_source,
                 "motion_repr": self.motion_repr,
+                "raw_replay_recorded_gripper_state_q": recorded_gripper_state_q.tolist(),
             },
         )
 

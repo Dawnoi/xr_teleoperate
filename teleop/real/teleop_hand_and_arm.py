@@ -46,10 +46,10 @@ from teleop.real.setup import (
 from teleop.runtime.operator_runtime import OperatorRuntime
 from teleop.control_flow.base_command import apply_base_command
 from teleop.control_flow.arm_command_pipeline import build_arm_command
-from teleop.control_flow.operator_state import OperatorStateFlow
+from teleop.control_flow.operator_state import OperatorStateFlow, rebase_xr_takeover_after_provider_switch
 from teleop.control_flow.end_effector_command import (
     apply_end_effector_command,
-    read_online_gripper_widths,
+    read_dual_gripper_snapshot,
 )
 from teleop.runtime.provider_switch import ActiveProviderKind, TeleopProviderRuntime
 from teleop.ui.command_bus import UiCommandBus, UiCommandName
@@ -570,6 +570,19 @@ if __name__ == '__main__':
                 q=current_lr_arm_q.copy(),
                 dq=current_lr_arm_dq.copy(),
             )
+            (
+                left_gripper_feedback_q,
+                right_gripper_feedback_q,
+                left_gripper_command_q,
+                right_gripper_command_q,
+            ) = read_dual_gripper_snapshot(
+                args=args,
+                dual_gripper_data_lock=components.ee.dual_gripper_data_lock,
+                dual_gripper_state_array=components.ee.dual_gripper_state_array,
+                dual_gripper_action_array=components.ee.dual_gripper_action_array,
+            )
+            online_left_gripper_q = 0.0 if left_gripper_feedback_q is None else left_gripper_feedback_q
+            online_right_gripper_q = 0.0 if right_gripper_feedback_q is None else right_gripper_feedback_q
             if latency_tracker is not None:
                 latency_tracker.maybe_timeout()
                 latency_tracker.maybe_mark_execute(
@@ -580,6 +593,8 @@ if __name__ == '__main__':
                 )
                 if provider_runtime.active_provider_kind == ActiveProviderKind.ONLINE_INFERENCE:
                     provider_runtime.note_online_inference_execution_trace(latency_tracker.get_snapshot())
+                elif provider_runtime.active_provider_kind == ActiveProviderKind.RAW_REPLAY:
+                    provider_runtime.note_raw_replay_execution_trace(latency_tracker.get_snapshot())
             if ui_state_store is not None:
                 ui_state_store.update(
                     build_runtime_web_payload(
@@ -588,6 +603,10 @@ if __name__ == '__main__':
                         recording_flow=recording_flow,
                         record_running=RECORD_RUNNING,
                         current_lr_arm_q=current_lr_arm_q,
+                        current_left_gripper_q=left_gripper_feedback_q,
+                        current_right_gripper_q=right_gripper_feedback_q,
+                        current_left_gripper_cmd=left_gripper_command_q,
+                        current_right_gripper_cmd=right_gripper_command_q,
                         current_state_sample_ns=current_state_sample_ns,
                         started=START,
                         ready=READY,
@@ -597,11 +616,6 @@ if __name__ == '__main__':
                 )
             current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, current_lr_arm_q)
 
-            online_left_gripper_q, online_right_gripper_q = read_online_gripper_widths(
-                args=args,
-                dual_gripper_data_lock=components.ee.dual_gripper_data_lock,
-                dual_gripper_state_array=components.ee.dual_gripper_state_array,
-            )
             camera_sources = components.cameras.sources()
 
             for command in ui_provider_commands:
@@ -621,6 +635,12 @@ if __name__ == '__main__':
                     post_home_takeover_armed = False
                     provider_runtime.set_live(reason=str(payload.get("reason", "ui_xr")))
                     set_online_inference_gripper_mode(gripper_ctrl, False)
+                    rebase_xr_takeover_after_provider_switch(
+                        tv_wrapper=tv_wrapper,
+                        arm_ik=arm_ik,
+                        current_arm_q=current_lr_arm_q,
+                        reset_arm_ik_state=reset_arm_ik_state,
+                    )
                     operator_state_flow = OperatorStateFlow(
                         takeover_settle_frames=TAKEOVER_SETTLE_FRAMES,
                         log=logger_mp,
@@ -764,6 +784,21 @@ if __name__ == '__main__':
             provider_runtime.note_sample(sample)
             tele_data = sample.tele_data
             motion_intent = sample.motion_intent
+            if is_ui_raw_replay and not args.no_gripper and args.ee == "dex1":
+                recorded_gripper_state_q = (getattr(motion_intent, "metadata", {}) or {}).get(
+                    "raw_replay_recorded_gripper_state_q"
+                )
+                if not isinstance(recorded_gripper_state_q, list) or len(recorded_gripper_state_q) != 2:
+                    raise ValueError("raw replay sample is missing recorded dual-gripper state")
+                if left_gripper_feedback_q is None or right_gripper_feedback_q is None:
+                    raise RuntimeError("Dex1 gripper feedback is unavailable during raw replay")
+                provider_runtime.note_raw_replay_gripper_state_pair(
+                    frame_index=int(getattr(motion_intent, "frame_index", -1)),
+                    left_feedback_q=left_gripper_feedback_q,
+                    right_feedback_q=right_gripper_feedback_q,
+                    left_recorded_state_q=float(recorded_gripper_state_q[0]),
+                    right_recorded_state_q=float(recorded_gripper_state_q[1]),
+                )
             if active_input_provider == "online_inference" and bool(getattr(sample, "done", False)):
                 metadata = getattr(motion_intent, "metadata", {}) or {}
                 logger_mp.error(
@@ -943,26 +978,30 @@ if __name__ == '__main__':
                 latency_tracker is not None
                 and latency_tracker.can_start_new_trace()
                 and (
-                    not bool(getattr(latency_tracker, "online_inference_only", False))
-                    or active_input_provider == "online_inference"
+                    latency_tracker.tracks_input_provider(active_input_provider)
                 )
             ):
                 latency_trace_prepare_start = time.perf_counter()
                 max_command_delta = float(np.max(np.abs(sol_q - current_lr_arm_q)))
                 if max_command_delta >= args.latency_command_threshold:
-                    online_trace_extra = {}
+                    provider_trace_extra = {}
                     if active_input_provider == "online_inference" and motion_intent is not None:
-                        online_trace_extra = {
+                        provider_trace_extra = {
                             key: value
                             for key, value in (getattr(motion_intent, "metadata", {}) or {}).items()
                             if str(key).startswith("online_")
                         }
-                        online_trace_extra["online_provider_output_perf_ns"] = int(tele_data_recv_ts_ns)
+                        provider_trace_extra["online_provider_output_perf_ns"] = int(tele_data_recv_ts_ns)
+                    elif is_ui_raw_replay and motion_intent is not None:
+                        provider_trace_extra = {
+                            "raw_replay_frame_index": int(getattr(motion_intent, "frame_index", -1)),
+                            "raw_replay_provider_output_perf_ns": int(tele_data_recv_ts_ns),
+                        }
                     trace_seq = latency_tracker.begin_trace(
                         recv_ts_ns=tele_data_recv_ts_ns,
                         recv_q=current_lr_arm_q,
                         extra={
-                            **online_trace_extra,
+                            **provider_trace_extra,
                             "tele_fetch_ms": tele_fetch_ms,
                             "takeover_logic_ms": takeover_logic_ms,
                             "base_control_ms": base_control_ms,
@@ -1059,6 +1098,8 @@ if __name__ == '__main__':
                 )
                 if latency_tracker is not None:
                     provider_runtime.note_online_inference_execution_trace(latency_tracker.get_snapshot())
+            elif is_ui_raw_replay and latency_tracker is not None:
+                provider_runtime.note_raw_replay_execution_trace(latency_tracker.get_snapshot())
             if is_ui_raw_replay and bool(getattr(sample, "done", False)):
                 current_hold_q = sol_q.copy()
                 current_hold_tauff = sol_tauff.copy()
@@ -1092,6 +1133,10 @@ if __name__ == '__main__':
                             recording_flow=recording_flow,
                             record_running=RECORD_RUNNING,
                             current_lr_arm_q=current_lr_arm_q,
+                            current_left_gripper_q=left_gripper_feedback_q,
+                            current_right_gripper_q=right_gripper_feedback_q,
+                            current_left_gripper_cmd=left_gripper_command_q,
+                            current_right_gripper_cmd=right_gripper_command_q,
                             current_state_sample_ns=current_state_sample_ns,
                             started=START,
                             ready=READY,

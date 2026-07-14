@@ -91,6 +91,10 @@ def build_runtime_web_payload(
     recording_flow: Any,
     record_running: bool,
     current_lr_arm_q: Any | None = None,
+    current_left_gripper_q: float | None = None,
+    current_right_gripper_q: float | None = None,
+    current_left_gripper_cmd: float | None = None,
+    current_right_gripper_cmd: float | None = None,
     current_state_sample_ns: int | None = None,
     started: bool = False,
     ready: bool = False,
@@ -99,15 +103,39 @@ def build_runtime_web_payload(
 ) -> dict[str, Any]:
     left_q_fb = None
     right_q_fb = None
+    gripper_feedback = (current_left_gripper_q, current_right_gripper_q)
+    gripper_command = (current_left_gripper_cmd, current_right_gripper_cmd)
+    if (gripper_feedback[0] is None) != (gripper_feedback[1] is None):
+        raise ValueError("UI gripper feedback must provide both left and right values")
+    if (gripper_command[0] is None) != (gripper_command[1] is None):
+        raise ValueError("UI gripper command must provide both left and right values")
+    if (gripper_feedback[0] is None) != (gripper_command[0] is None):
+        raise ValueError("UI gripper feedback and command must be provided together")
     if current_lr_arm_q is not None:
         arm_q = np.asarray(current_lr_arm_q, dtype=float).reshape(-1)
         if arm_q.shape[0] != 14:
             raise ValueError(f"UI arm state must contain 14 joints, got shape={arm_q.shape}")
-        left_q_fb = arm_q[:7].tolist()
-        right_q_fb = arm_q[-7:].tolist()
+        if gripper_feedback[0] is None:
+            left_q_fb = arm_q[:7].tolist()
+            right_q_fb = arm_q[-7:].tolist()
+        else:
+            left_gripper_q = float(gripper_feedback[0])
+            right_gripper_q = float(gripper_feedback[1])
+            left_gripper_cmd = float(gripper_command[0])
+            right_gripper_cmd = float(gripper_command[1])
+            if not np.isfinite([left_gripper_q, right_gripper_q, left_gripper_cmd, right_gripper_cmd]).all():
+                raise ValueError("UI gripper feedback and command must contain finite values")
+            left_q_fb = [*arm_q[:7].tolist(), left_gripper_q]
+            right_q_fb = [*arm_q[-7:].tolist(), right_gripper_q]
+    elif gripper_feedback[0] is not None:
+        raise ValueError("UI gripper feedback and command require current dual-arm state")
     return build_web_payload(
         left_q_fb=left_q_fb,
         right_q_fb=right_q_fb,
+        left_gripper_q_fb=None if gripper_feedback[0] is None else float(gripper_feedback[0]),
+        right_gripper_q_fb=None if gripper_feedback[1] is None else float(gripper_feedback[1]),
+        left_gripper_q_cmd=None if gripper_command[0] is None else float(gripper_command[0]),
+        right_gripper_q_cmd=None if gripper_command[1] is None else float(gripper_command[1]),
         left_stamp_fb_ns=current_state_sample_ns,
         right_stamp_fb_ns=current_state_sample_ns,
         recording_status=build_runtime_recording_status(

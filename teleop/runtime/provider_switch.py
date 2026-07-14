@@ -25,6 +25,7 @@ class RealReplayStatus:
     frame_index: int = -1
     error: str = ""
     reason: str = ""
+    runtime_debug: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -37,6 +38,7 @@ class RealReplayStatus:
             "frame_index": self.frame_index,
             "error": self.error,
             "reason": self.reason,
+            "runtime_debug": dict(self.runtime_debug or {}),
         }
 
 
@@ -267,6 +269,45 @@ class TeleopProviderRuntime:
         frame_index = getattr(motion_intent, "frame_index", None)
         if frame_index is not None:
             self._real_replay.frame_index = int(frame_index)
+
+    def note_raw_replay_execution_trace(self, trace: dict[str, Any]) -> None:
+        if self._active_provider_kind != ActiveProviderKind.RAW_REPLAY:
+            return
+        runtime_debug = dict(self._real_replay.runtime_debug or {})
+        runtime_debug["execution_trace"] = dict(trace)
+        self._real_replay.runtime_debug = runtime_debug
+
+    def note_raw_replay_gripper_state_pair(
+        self,
+        *,
+        frame_index: int,
+        left_feedback_q: float,
+        right_feedback_q: float,
+        left_recorded_state_q: float,
+        right_recorded_state_q: float,
+    ) -> None:
+        if self._active_provider_kind != ActiveProviderKind.RAW_REPLAY:
+            return
+        values = [left_feedback_q, right_feedback_q, left_recorded_state_q, right_recorded_state_q]
+        if not all(math.isfinite(float(value)) for value in values):
+            raise ValueError(f"raw replay gripper state pair contains non-finite values: {values}")
+
+        pair = {
+            "frame_index": int(frame_index),
+            "left_feedback_q": float(left_feedback_q),
+            "right_feedback_q": float(right_feedback_q),
+            "left_recorded_state_q": float(left_recorded_state_q),
+            "right_recorded_state_q": float(right_recorded_state_q),
+        }
+        runtime_debug = dict(self._real_replay.runtime_debug or {})
+        history = list(runtime_debug.get("gripper_state_history") or [])
+        if history and int(history[-1].get("frame_index", -1)) == pair["frame_index"]:
+            history[-1] = pair
+        else:
+            history.append(pair)
+        runtime_debug["gripper_state_history"] = history[-900:]
+        runtime_debug["gripper_state_current"] = pair
+        self._real_replay.runtime_debug = runtime_debug
 
     def status(self) -> dict[str, Any]:
         return {

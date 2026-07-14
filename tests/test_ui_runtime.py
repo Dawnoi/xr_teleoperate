@@ -1,5 +1,6 @@
 import pathlib
 import sys
+from threading import Lock
 import unittest
 from types import SimpleNamespace
 
@@ -10,6 +11,8 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from core.input.base import MotionIntent, TeleopInputSample, _build_offline_tele_data
+from teleop.control_flow.end_effector_command import read_dual_gripper_snapshot
+from teleop.control_flow import operator_state
 from teleop.runtime.provider_switch import ActiveProviderKind, TeleopProviderRuntime
 from teleop.ui.command_bus import UiCommandBus, UiCommandName
 from teleop.ui.integration import (
@@ -48,6 +51,55 @@ class UiCommandBusTest(unittest.TestCase):
         self.assertTrue(bus.online_inference_stop_requested())
         self.assertEqual(bus.drain()[0].name, UiCommandName.STOP_ONLINE_INFERENCE)
         self.assertFalse(bus.online_inference_stop_requested())
+
+
+class DualGripperSnapshotTest(unittest.TestCase):
+    def test_reads_feedback_and_processed_command_under_one_lock(self):
+        args = SimpleNamespace(no_gripper=False, ee="dex1")
+
+        snapshot = read_dual_gripper_snapshot(
+            args=args,
+            dual_gripper_data_lock=Lock(),
+            dual_gripper_state_array=[0.25, 0.75],
+            dual_gripper_action_array=[0.50, 1.00],
+        )
+
+        self.assertEqual(snapshot, (0.25, 0.75, 0.50, 1.00))
+
+    def test_disabled_gripper_has_no_ui_curve_values(self):
+        args = SimpleNamespace(no_gripper=True, ee="dex1")
+
+        snapshot = read_dual_gripper_snapshot(
+            args=args,
+            dual_gripper_data_lock=None,
+            dual_gripper_state_array=None,
+            dual_gripper_action_array=None,
+        )
+
+        self.assertEqual(snapshot, (None, None, None, None))
+
+
+class XrProviderResumeTest(unittest.TestCase):
+    def test_rebases_xr_and_ik_to_current_robot_pose_after_provider_switch(self):
+        calls = []
+
+        class Wrapper:
+            def sync_reference_to_current_live_pose(self, *, require_live):
+                calls.append(("xr", require_live))
+
+        def reset_ik(arm_ik, arm_q):
+            calls.append(("ik", arm_ik, arm_q))
+
+        arm_ik = object()
+        arm_q = [0.0] * 14
+        operator_state.rebase_xr_takeover_after_provider_switch(
+            tv_wrapper=Wrapper(),
+            arm_ik=arm_ik,
+            current_arm_q=arm_q,
+            reset_arm_ik_state=reset_ik,
+        )
+
+        self.assertEqual(calls, [("xr", False), ("ik", arm_ik, arm_q)])
 
 
 class ProviderSwitchTest(unittest.TestCase):
@@ -104,12 +156,72 @@ class ProviderSwitchTest(unittest.TestCase):
         )
         runtime.note_sample(sample)
         self.assertEqual(runtime.status()["real_replay"]["frame_index"], 7)
+        runtime.note_raw_replay_execution_trace(
+            {"current": None, "latest": {"seq": 3, "status": "completed", "recv_to_pub_ms": 7.5}}
+        )
+        self.assertEqual(
+            runtime.status()["real_replay"]["runtime_debug"]["execution_trace"]["latest"]["seq"],
+            3,
+        )
 
         runtime.finish_raw_replay(reason="provider_done")
         self.assertEqual(runtime.active_provider_kind, ActiveProviderKind.HOLD)
         self.assertIsNone(runtime.active_provider())
         self.assertEqual(runtime.status()["real_replay"]["state"], "finished")
         self.assertEqual(runtime.status()["real_replay"]["episode_name"], "episode_0245")
+
+    def test_raw_replay_gripper_history_pairs_feedback_with_same_frame_recorded_state(self):
+        runtime = TeleopProviderRuntime(live_provider=object(), replay_provider_factory=lambda **_: object())
+        runtime.set_hold(reason="tab:playback")
+        runtime.start_raw_replay(
+            dataset_root="/tmp/raw_root",
+            episode_index=1,
+            episode_name="episode_0001",
+            arm_source="action",
+        )
+
+        runtime.note_raw_replay_gripper_state_pair(
+            frame_index=8,
+            left_feedback_q=0.11,
+            right_feedback_q=0.22,
+            left_recorded_state_q=0.31,
+            right_recorded_state_q=0.42,
+        )
+        runtime.note_raw_replay_gripper_state_pair(
+            frame_index=8,
+            left_feedback_q=0.12,
+            right_feedback_q=0.23,
+            left_recorded_state_q=0.31,
+            right_recorded_state_q=0.42,
+        )
+        initial_debug = runtime.status()["real_replay"]["runtime_debug"]
+        self.assertEqual(
+            initial_debug["gripper_state_history"],
+            [
+                {
+                    "frame_index": 8,
+                    "left_feedback_q": 0.12,
+                    "right_feedback_q": 0.23,
+                    "left_recorded_state_q": 0.31,
+                    "right_recorded_state_q": 0.42,
+                }
+            ],
+        )
+        for frame_index in range(9, 910):
+            runtime.note_raw_replay_gripper_state_pair(
+                frame_index=frame_index,
+                left_feedback_q=float(frame_index),
+                right_feedback_q=float(frame_index) + 0.1,
+                left_recorded_state_q=float(frame_index) + 0.2,
+                right_recorded_state_q=float(frame_index) + 0.3,
+            )
+
+        debug = runtime.status()["real_replay"]["runtime_debug"]
+        history = debug["gripper_state_history"]
+        self.assertEqual(len(history), 900)
+        self.assertEqual(history[0]["frame_index"], 10)
+        self.assertEqual(history[-1]["frame_index"], 909)
+        self.assertEqual(debug["gripper_state_current"], history[-1])
 
     def test_runtime_rejects_raw_replay_start_unless_hold_is_active(self):
         runtime = TeleopProviderRuntime(live_provider=object(), replay_provider_factory=lambda **_: object())
@@ -389,7 +501,7 @@ class UiIntegrationTest(unittest.TestCase):
         self.assertEqual(status["streams"][0]["shared_seq"], 3)
         self.assertEqual(status["streams"][0]["shared_age_ms"], 10)
 
-    def test_build_runtime_web_payload_splits_current_dual_arm_state(self):
+    def test_build_runtime_web_payload_appends_gripper_feedback_to_dual_arm_state(self):
         args = SimpleNamespace(task_dir="/tmp/data", task_name="pick_cube", frequency=20.0)
         recorder = SimpleNamespace(item_id=-1, episode_dir="")
         recording_flow = SimpleNamespace(state=SimpleNamespace(waiting_for_first_frame=False, pending_samples=[]))
@@ -400,6 +512,10 @@ class UiIntegrationTest(unittest.TestCase):
             recording_flow=recording_flow,
             record_running=False,
             current_lr_arm_q=list(range(14)),
+            current_left_gripper_q=0.25,
+            current_right_gripper_q=0.75,
+            current_left_gripper_cmd=0.50,
+            current_right_gripper_cmd=1.00,
             current_state_sample_ns=111,
             started=True,
             ready=True,
@@ -407,8 +523,12 @@ class UiIntegrationTest(unittest.TestCase):
             provider_status={"active_provider": "hold", "real_replay": {"state": "idle"}},
         )
 
-        self.assertEqual(payload["left"]["q_fb"], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0])
-        self.assertEqual(payload["right"]["q_fb"], [7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0])
+        self.assertEqual(payload["left"]["q_fb"], [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 0.25])
+        self.assertEqual(payload["right"]["q_fb"], [7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 0.75])
+        self.assertEqual(payload["left"]["gripper_q_fb"], 0.25)
+        self.assertEqual(payload["right"]["gripper_q_fb"], 0.75)
+        self.assertEqual(payload["left"]["gripper_q_cmd"], 0.50)
+        self.assertEqual(payload["right"]["gripper_q_cmd"], 1.00)
         self.assertEqual(payload["left"]["stamp_fb_ns"], 111)
         self.assertEqual(payload["right"]["stamp_fb_ns"], 111)
         self.assertEqual(payload["recording"]["phase"], "idle")

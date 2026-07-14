@@ -103,8 +103,11 @@ class TeleopUiServer:
                     return
                 if path == "/recording/episodes":
                     params = parse_qs(parsed.query)
-                    limit_text = owner._first_query_value(params, "limit") or "80"
-                    limit = int(limit_text) if limit_text.isdigit() else 80
+                    limit_text = owner._first_query_value(params, "limit")
+                    if limit_text and not limit_text.isdigit():
+                        owner._json_ok(self, {"ok": False, "error": "episode limit must be a non-negative integer"}, status=400)
+                        return
+                    limit = int(limit_text) if limit_text else None
                     owner._json_ok(
                         self,
                         list_episodes(
