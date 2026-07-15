@@ -42,6 +42,7 @@ from teleop.real.setup import (
     initialize_dds,
     log_workspace_config,
     setup_real_teleop_components,
+    switch_recording_root,
 )
 from teleop.runtime.operator_runtime import OperatorRuntime
 from teleop.control_flow.base_command import apply_base_command
@@ -118,6 +119,7 @@ PROVIDER_UI_COMMANDS = {
     UiCommandName.STOP_RAW_REPLAY,
     UiCommandName.START_ONLINE_INFERENCE,
     UiCommandName.STOP_ONLINE_INFERENCE,
+    UiCommandName.SET_RECORD_ROOT,
 }
 
 
@@ -137,6 +139,17 @@ def recording_is_active_or_armed(record_running, recording_flow):
         return True
     flow_state = getattr(recording_flow, "state", None)
     return bool(getattr(flow_state, "waiting_for_first_frame", False))
+
+
+def switch_recording_root_from_ui(*, args, components, recorder, recording_flow, record_running, payload, log):
+    if recording_is_active_or_armed(record_running, recording_flow):
+        log.error("[RECORD_ROOT] rejected: recording is active or armed.")
+        return recorder, recording_flow
+    root_dir = str(payload.get("root_dir", "")).strip()
+    if not root_dir:
+        raise ValueError("UI record root command requires root_dir")
+    switch_recording_root(args, components, root_dir, log)
+    return components.recorder, components.recording_flow
 
 def reset_arm_ik_state(arm_ik, arm_q):
     arm_q = np.asarray(arm_q, dtype=float).copy()
@@ -225,6 +238,7 @@ def cleanup_real_teleop_resources(
     tv_wrapper,
     listen_keyboard_thread,
     recorder,
+    validation_manager,
     sim_state_subscriber,
     agv_bridge,
     cameras,
@@ -294,6 +308,9 @@ def cleanup_real_teleop_resources(
             recorder.close()
     except Exception as e:
         logger_mp.error(f"Failed to close recorder: {e}")
+
+    if validation_manager is not None:
+        validation_manager.close()
 
 
 if __name__ == '__main__':
@@ -463,6 +480,16 @@ if __name__ == '__main__':
                         provider_runtime.fail_raw_replay("teleop is not started; start teleop before real replay")
                     elif command.name == UiCommandName.STOP_RAW_REPLAY:
                         provider_runtime.stop_raw_replay(reason="ui_wait_stop")
+                    elif command.name == UiCommandName.SET_RECORD_ROOT:
+                        recorder, recording_flow = switch_recording_root_from_ui(
+                            args=args,
+                            components=components,
+                            recorder=recorder,
+                            recording_flow=recording_flow,
+                            record_running=RECORD_RUNNING,
+                            payload=command.payload or {},
+                            log=logger_mp,
+                        )
             if ui_state_store is not None:
                 ui_state_store.update(
                     build_runtime_web_payload(
@@ -518,6 +545,7 @@ if __name__ == '__main__':
                     record_running=RECORD_RUNNING,
                     record_toggle=RECORD_TOGGLE,
                     record_cancel=RECORD_CANCEL,
+                    camera_sources=components.cameras.sources(),
                 )
                 RECORD_RUNNING = command_recording.record_running
                 RECORD_TOGGLE = command_recording.record_toggle
@@ -630,6 +658,16 @@ if __name__ == '__main__':
                     if was_online_inference:
                         set_online_inference_gripper_mode(gripper_ctrl, False)
                     logger_mp.info("[UI_PROVIDER] switched to HOLD.")
+                elif command.name == UiCommandName.SET_RECORD_ROOT:
+                    recorder, recording_flow = switch_recording_root_from_ui(
+                        args=args,
+                        components=components,
+                        recorder=recorder,
+                        recording_flow=recording_flow,
+                        record_running=RECORD_RUNNING,
+                        payload=payload,
+                        log=logger_mp,
+                    )
                 elif command.name == UiCommandName.SET_PROVIDER_XR:
                     home_return_active = False
                     post_home_takeover_armed = False
@@ -1176,6 +1214,7 @@ if __name__ == '__main__':
             tv_wrapper=tv_wrapper or components.tv_wrapper,
             listen_keyboard_thread=listen_keyboard_thread,
             recorder=recorder or components.recorder,
+            validation_manager=components.validation_manager,
             sim_state_subscriber=sim_state_subscriber or components.sim_state_subscriber,
             agv_bridge=agv_bridge or components.agv_bridge,
             cameras=components.cameras.close_list(),

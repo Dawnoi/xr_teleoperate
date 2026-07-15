@@ -15,6 +15,7 @@ class UiCommandName(str, Enum):
     RECENTER = "recenter"
     RECORD_TOGGLE = "record_toggle"
     RECORD_CANCEL = "record_cancel"
+    SET_RECORD_ROOT = "set_record_root"
     SET_PROVIDER_HOLD = "set_provider_hold"
     SET_PROVIDER_XR = "set_provider_xr"
     START_RAW_REPLAY = "start_raw_replay"

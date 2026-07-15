@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
+import shutil
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +17,9 @@ from teleop.ui.command_bus import UiCommandBus, UiCommandName
 from teleop.ui.episode_store import PlaybackSession, latest_episode_summary, list_episodes
 from teleop.ui.exporter import DEFAULT_UI_URDF_PATH, UiExportManager, UiExportRequest
 from teleop.ui.state_store import UiStateStore
+
+
+EPISODE_NAME_RE = re.compile(r"episode_\d+$")
 
 
 class TeleopUiServer:
@@ -189,7 +194,11 @@ class TeleopUiServer:
                     owner._json_ok(self, {"ok": True, "queued": True, "command": command.name.value})
                     return
                 if path == "/recording/set_root_dir":
-                    owner._json_ok(self, {"ok": True, "root_dir": ""})
+                    owner._handle_recording_root_change(self, parsed.query)
+                    return
+                if path == "/recording/delete_episodes":
+                    owner._handle_episode_delete(self, parsed.query)
+                    return
                     return
                 if path == "/recording/set_fps":
                     owner._json_ok(self, {"ok": True, "fps": 0.0})
@@ -330,10 +339,17 @@ class TeleopUiServer:
         if path == "/recording/start":
             if not self._recording_enabled():
                 return UiCommandName.RECORD_TOGGLE, "recording is disabled"
+            if self._recording_validation_pending():
+                return UiCommandName.RECORD_TOGGLE, "episode validation is still running; wait for validation.json before starting another recording"
             return UiCommandName.RECORD_TOGGLE, "recording already active" if self._recording_active() else ""
         if path == "/recording/stop":
             return UiCommandName.RECORD_TOGGLE, "" if self._recording_active() else "recording is not active"
         return None
+
+    def _recording_validation_pending(self) -> bool:
+        _, snapshot = self.state_store.snapshot()
+        recording = snapshot.get("recording", {})
+        return bool(recording.get("validation_pending", False)) if isinstance(recording, dict) else False
 
     def _handle_real_replay_start(self, handler: BaseHTTPRequestHandler, query: str) -> None:
         params = parse_qs(query)
@@ -370,6 +386,70 @@ class TeleopUiServer:
             },
         )
         self._json_ok(handler, {"ok": True, "queued": True, "command": command.name.value})
+
+    def _recording_mutation_rejection(self) -> str:
+        if self._recording_active():
+            return "recording is active; stop/save or cancel before changing episode files"
+        if self._recording_validation_pending():
+            return "episode validation is pending; wait for validation.json before changing episode files"
+        _, snapshot = self.state_store.snapshot()
+        provider = snapshot.get("provider", {})
+        if isinstance(provider, dict) and provider.get("active_provider") == "raw_replay":
+            return "raw replay is active; stop real replay before changing episode files"
+        return ""
+
+    def _handle_recording_root_change(self, handler: BaseHTTPRequestHandler, query: str) -> None:
+        if not self._recording_enabled():
+            self._json_ok(handler, {"ok": False, "error": "recording is disabled; restart with --record before changing the recording root"}, status=400)
+            return
+        rejection = self._recording_mutation_rejection()
+        if rejection:
+            self._json_ok(handler, {"ok": False, "error": rejection}, status=400)
+            return
+        params = parse_qs(query)
+        root_dir = str(self._first_query_value(params, "root_dir") or "").strip()
+        if not root_dir:
+            self._json_ok(handler, {"ok": False, "error": "root_dir is required"}, status=400)
+            return
+        command = self.command_bus.submit(
+            UiCommandName.SET_RECORD_ROOT,
+            payload={"root_dir": root_dir},
+        )
+        self._json_ok(
+            handler,
+            {"ok": True, "queued": True, "command": command.name.value, "root_dir": root_dir},
+        )
+
+    def _handle_episode_delete(self, handler: BaseHTTPRequestHandler, query: str) -> None:
+        rejection = self._recording_mutation_rejection()
+        if rejection:
+            self._json_ok(handler, {"ok": False, "error": rejection}, status=400)
+            return
+        params = parse_qs(query)
+        root = Path(self._first_query_value(params, "root_dir") or self._default_episode_root()).expanduser().resolve()
+        if not root.is_dir():
+            self._json_ok(handler, {"ok": False, "error": f"episode root does not exist: {root}"}, status=400)
+            return
+        names = list(dict.fromkeys(str(name).strip() for name in params.get("episode", []) if str(name).strip()))
+        if not names:
+            self._json_ok(handler, {"ok": False, "error": "at least one episode is required"}, status=400)
+            return
+        if any(EPISODE_NAME_RE.fullmatch(name) is None for name in names):
+            self._json_ok(handler, {"ok": False, "error": "episode names must use episode_NNNN format"}, status=400)
+            return
+        playback_dir = self.playback.episode_dir.resolve() if self.playback.episode_dir is not None else None
+        targets = [(root / name).resolve() for name in names]
+        if any(target.parent != root or not target.is_dir() for target in targets):
+            self._json_ok(handler, {"ok": False, "error": "one or more requested episode directories do not exist"}, status=404)
+            return
+        if playback_dir is not None and playback_dir in targets:
+            if self.playback.state == "playing":
+                self._json_ok(handler, {"ok": False, "error": "stop the selected playback episode before deleting it"}, status=400)
+                return
+            self.playback.unload()
+        for target in targets:
+            shutil.rmtree(target)
+        self._json_ok(handler, {"ok": True, "deleted": names, "root_dir": str(root)})
 
     def _handle_inference_start(self, handler: BaseHTTPRequestHandler, query: str) -> None:
         rejection = self._inference_start_rejection()
@@ -519,7 +599,6 @@ class TeleopUiServer:
     def _unsupported_reference_route(path: str) -> bool:
         return (
             path in {"/camera/start", "/camera/stop"}
-            or path in {"/recording/delete_episodes"}
         )
 
     def _recording_active(self) -> bool:

@@ -217,13 +217,47 @@ def _image_time_ns(path: Path) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def load_persisted_validation(episode_dir: Path) -> dict[str, Any]:
+    """Load the report written by the post-recording worker without revalidating."""
+    data_path = episode_dir / "data.json"
+    report_path = episode_dir / "validation.json"
+    if not report_path.is_file():
+        return {
+            "episode_name": episode_dir.name,
+            "level": "error",
+            "status": "missing",
+            "errors": ["validation.json is missing; episode must be revalidated before export"],
+            "warnings": [],
+        }
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(report, dict):
+        raise ValueError(f"validation report must be a JSON object: {report_path}")
+    source_data = report.get("source_data", {})
+    if not isinstance(source_data, dict):
+        source_data = {}
+    data_stat = data_path.stat()
+    if (
+        int(source_data.get("size_bytes", -1)) != int(data_stat.st_size)
+        or int(source_data.get("mtime_ns", -1)) != int(data_stat.st_mtime_ns)
+    ):
+        stale = dict(report)
+        stale["level"] = "error"
+        stale["status"] = "stale"
+        stale["errors"] = [
+            *list(report.get("errors", [])),
+            "validation.json is stale because data.json changed after validation",
+        ]
+        return stale
+    return report
+
+
 def summarize_episode_fast(episode_dir: Path) -> dict[str, Any]:
     data_path = episode_dir / "data.json"
     stat = data_path.stat()
     with data_path.open("rb") as handle:
         handle.seek(max(0, stat.st_size - 2048))
         tail = handle.read().rstrip()
-    finalized = tail.endswith(b"}")
+    finalized = FINALIZED_JSON_RE.search(tail.decode("utf-8")) is not None
     frame_count = 0
     camera_dirs = {
         "head": episode_dir / "colors" / "head",
@@ -243,12 +277,16 @@ def summarize_episode_fast(episode_dir: Path) -> dict[str, Any]:
     duration_sec = 0.0
     if len(camera_times) >= 2:
         duration_sec = max(0.0, (max(camera_times) - min(camera_times)) / 1_000_000_000.0)
-    if not finalized or frame_count <= 0:
+    validation = load_persisted_validation(episode_dir)
+    level = str(validation.get("level", "error"))
+    if not finalized:
+        validation = {
+            **validation,
+            "level": "error",
+            "status": "incomplete",
+            "errors": [*list(validation.get("errors", [])), "data.json is not finalized yet"],
+        }
         level = "error"
-    elif camera_counts and any(count / max(1, frame_count) < 0.95 for count in camera_counts.values()):
-        level = "warning"
-    else:
-        level = "ok"
     return {
         "name": episode_dir.name,
         "path": str(episode_dir),
@@ -257,7 +295,7 @@ def summarize_episode_fast(episode_dir: Path) -> dict[str, Any]:
         "start_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
         "end_time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stat.st_mtime)),
         "validation_level": level,
-        "validation": {},
+        "validation": validation,
         "cameras": [
             {"camera_id": _camera_id(name), "camera_name": name, "camera_mode": "rgb"}
             for name in sorted(camera_counts, key=_camera_id)
@@ -292,7 +330,7 @@ def latest_episode_summary(root_dir: str | None, fallback: str | None = None) ->
     ]
     if not episode_dirs:
         return None
-    return summarize_episode(episode_dirs[0])
+    return summarize_episode_fast(episode_dirs[0])
 
 
 @dataclass
@@ -363,6 +401,19 @@ class PlaybackSession:
         self.play_started_monotonic = 0.0
         self.play_started_frame = 0
         return self.status()
+
+    def unload(self) -> None:
+        if self.state == "playing":
+            raise RuntimeError("cannot unload a playing episode")
+        self.root_dir = None
+        self.episode_dir = None
+        self.episode_name = ""
+        self.items = []
+        self.cameras = []
+        self.frame_index = 0
+        self.state = "disabled"
+        self.play_started_monotonic = 0.0
+        self.play_started_frame = 0
 
     def seek(self, frame: int) -> dict[str, Any]:
         total = len(self.items)

@@ -50,6 +50,12 @@ def build_runtime_recording_status(
     session_dir = str(getattr(recorder, "episode_dir", "") or "")
     phase = "recording" if record_running else "armed" if waiting_for_first_frame else "idle"
     record_start_monotonic_ns = getattr(flow_state, "record_start_monotonic_ns", None)
+    validation_manager = getattr(recording_flow, "validation_manager", None)
+    validation_status = validation_manager.status() if validation_manager is not None else {}
+    validation_pending = bool(validation_status.get("pending", False))
+    last_validation = validation_status.get("last_validation", {})
+    if validation_pending and not active:
+        phase = "validating"
     return {
         "is_recording": active,
         "active": active,
@@ -68,7 +74,10 @@ def build_runtime_recording_status(
         },
         "last_alert": {},
         "alert_seq": 0,
-        "last_validation": {},
+        "validation_pending": validation_pending,
+        "validation_current_episode_dir": validation_status.get("current_episode_dir", ""),
+        "validation_queued_episode_dirs": validation_status.get("queued_episode_dirs", []),
+        "last_validation": last_validation,
     }
 
 

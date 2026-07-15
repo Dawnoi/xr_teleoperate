@@ -148,10 +148,418 @@ function checkDot(ok) {
   return `<span class="dot ${ok === true ? "ok" : ok === false ? "err" : ""}"></span>`;
 }
 
+function validationPending(v) {
+  const statuses = [v?.status, v?.level, v?.validation_status, v?.action_semantics?.status]
+    .map((value) => String(value || "").toLowerCase());
+  return v?.pending === true || statuses.includes("pending");
+}
+
+function reportStatus(value) {
+  const status = String(value || "").toLowerCase();
+  return ["ok", "warning", "error", "pending", "missing", "stale", "incomplete"].includes(status)
+    ? status
+    : "unknown";
+}
+
+function reportState(v) {
+  if (!v || typeof v !== "object" || Object.keys(v).length === 0) {
+    return { key: "missing", label: "报告缺失", detail: "validation report 尚未提供，不能判定 episode 可用性。" };
+  }
+  if (validationPending(v)) {
+    return { key: "pending", label: "正在自检", detail: "正在完成 episode 自检；完成前不能开始下一条录制。" };
+  }
+  const explicit = reportStatus(v.status);
+  if (["missing", "stale", "incomplete"].includes(explicit)) {
+    const labels = { missing: "报告缺失", stale: "报告已过期", incomplete: "报告未完成" };
+    return { key: explicit, label: labels[explicit], detail: "当前报告不能作为有效检查证据，请重新执行 episode 自检。" };
+  }
+  if (!v.checked_at_ns) {
+    return { key: "missing", label: "报告未完成", detail: "报告缺少 checked_at_ns，不能判定任何检查为通过。" };
+  }
+  const level = reportStatus(v.level);
+  if (["ok", "warning", "error"].includes(level)) {
+    return { key: level, label: semanticStatusLabel(level), detail: "" };
+  }
+  return { key: "unknown", label: "未完成", detail: "报告缺少有效 level，不能显示通过。" };
+}
+
+function qualityClass(status) {
+  return status === "ok" ? "ok" : status === "warning" || status === "pending" ? "warning" : "error";
+}
+
+function qualityBadge(state) {
+  return badge(qualityClass(state.key), state.label);
+}
+
+function reportValue(value) {
+  if (value === undefined || value === null || value === "") return "未提供";
+  if (Array.isArray(value)) return value.length ? value.join(", ") : "无";
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function timeUnit(report) {
+  return report?.timestamp_source === "host_monotonic_only" ? "ms" : "未知单位";
+}
+
+function timeValue(value, unit) {
+  if (value === undefined || value === null || value === "") return "未提供";
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "无效";
+  return unit === "ms" ? `${(number / 1e6).toFixed(3)} ms` : `${number.toFixed(3)} ${unit}`;
+}
+
+const alignmentStatFields = [
+  ["mean_error_ns", "平均误差"],
+  ["p95_error_ns", "P95 误差"],
+  ["p99_error_ns", "P99 误差"],
+  ["max_error_ns", "最大误差"],
+  ["above_warning_threshold_count", "超 0.5T"],
+  ["above_error_threshold_count", "超 T"],
+  ["longest_consecutive_error_run", "最长连续超 T"],
+];
+
+function timeAlignmentContract(v) {
+  const report = v?.time_alignment;
+  if (!report || typeof report !== "object" || Array.isArray(report)) {
+    return { report: null, missing: ["time_alignment"] };
+  }
+  const missing = ["status", "errors", "warnings", "config", "enabled_cameras", "sample_interval", "action_support", "sources"]
+    .filter((key) => !Object.prototype.hasOwnProperty.call(report, key));
+  if (!Array.isArray(report.errors)) missing.push("errors(list)");
+  if (!Array.isArray(report.warnings)) missing.push("warnings(list)");
+  const actionSupport = report.action_support;
+  if (!actionSupport || typeof actionSupport !== "object" || Array.isArray(actionSupport)) missing.push("action_support(object)");
+  else {
+    ["status", "linear_count", "exact_count", "nearest_fallback_count", "nearest_fallback_frame_indices", "support_nearest_abs_delta_p95_ns", "support_nearest_abs_delta_max_ns", "support_max_abs_delta_p95_ns", "support_max_abs_delta_max_ns", "support_span_p95_ns", "support_span_max_ns", "warning_frame_indices", "error_frame_indices"]
+      .forEach((key) => { if (!Object.prototype.hasOwnProperty.call(actionSupport, key)) missing.push(`action_support.${key}`); });
+    ["nearest_fallback_frame_indices", "warning_frame_indices", "error_frame_indices"].forEach((key) => {
+      if (!Array.isArray(actionSupport[key])) missing.push(`action_support.${key}(list)`);
+    });
+  }
+  const sample = report.sample_interval;
+  if (!sample || typeof sample !== "object" || Array.isArray(sample)) missing.push("sample_interval(object)");
+  else {
+    ["status", "T_ns", "interval_median_ns", "interval_p95_ns", "interval_max_ns", "long_gap_count", "longest_consecutive_long_gap_run", "offending_frame_indices"]
+      .forEach((key) => { if (!Object.prototype.hasOwnProperty.call(sample, key)) missing.push(`sample_interval.${key}`); });
+    if (!Array.isArray(sample.offending_frame_indices)) missing.push("sample_interval.offending_frame_indices(list)");
+  }
+  const sources = report.sources;
+  if (!sources || typeof sources !== "object" || Array.isArray(sources)) missing.push("sources(object)");
+  else {
+    ["state", "action"].forEach((key) => { if (!Object.prototype.hasOwnProperty.call(sources, key)) missing.push(`sources.${key}`); });
+    if (!Array.isArray(report.enabled_cameras)) missing.push("enabled_cameras(list)");
+    else report.enabled_cameras.forEach((camera) => {
+      const sourceName = `camera.${camera}`;
+      if (!Object.prototype.hasOwnProperty.call(sources, sourceName)) missing.push(`sources.${sourceName}`);
+    });
+    Object.entries(sources).forEach(([name, source]) => {
+      if (!source || typeof source !== "object" || Array.isArray(source)) {
+        missing.push(`sources.${name}`);
+        return;
+      }
+      ["status", ...alignmentStatFields.map(([key]) => key)].forEach((key) => {
+        if (!Object.prototype.hasOwnProperty.call(source, key)) missing.push(`sources.${name}.${key}`);
+      });
+      if (!Array.isArray(source.offending_frame_indices)) missing.push(`sources.${name}.offending_frame_indices(list)`);
+      if (name.startsWith("camera.")) {
+        ["camera_frame_reuse_count", "camera_frame_reuse_fraction", "longest_consecutive_camera_frame_reuse_run", "camera_frame_reuse_indices"]
+          .forEach((key) => { if (!Object.prototype.hasOwnProperty.call(source, key)) missing.push(`sources.${name}.${key}`); });
+        if (!Array.isArray(source.camera_frame_reuse_indices)) missing.push(`sources.${name}.camera_frame_reuse_indices(list)`);
+      }
+    });
+  }
+  return { report, missing: [...new Set(missing)] };
+}
+
+function timeAlignmentState(v) {
+  const parent = reportState(v);
+  if (["pending", "missing", "stale", "incomplete"].includes(parent.key)) {
+    return { key: parent.key, label: parent.label, detail: parent.detail, contract: timeAlignmentContract(v) };
+  }
+  const contract = timeAlignmentContract(v);
+  if (!contract.report) return { key: "missing", label: "报告缺失", detail: "缺少 v.time_alignment，不能判定时间对齐。", contract };
+  if (contract.missing.length) {
+    return { key: "error", label: "报告字段缺失", detail: `time_alignment 缺少：${contract.missing.join("、")}`, contract };
+  }
+  const status = reportStatus(contract.report.status);
+  if (status === "pending") return { key: "pending", label: "正在自检", detail: "时间对齐报告仍在生成。", contract };
+  if (status === "unknown") return { key: "error", label: "未完成", detail: "time_alignment.status 无效，不能显示通过。", contract };
+  if (status === "ok" && contract.report.errors.length) return { key: "error", label: "错误", detail: "报告存在 errors，不能显示通过。", contract };
+  if (status === "ok" && contract.report.warnings.length) return { key: "warning", label: "有警告", detail: "报告存在 warnings，不能显示通过。", contract };
+  return { key: status, label: semanticStatusLabel(status), detail: "", contract };
+}
+
+function validationCardState(v) {
+  const base = reportState(v);
+  if (!["ok", "warning", "error"].includes(base.key)) return base;
+  const alignment = timeAlignmentState(v);
+  return alignment.key === "ok" ? base : alignment;
+}
+
+function alignmentIssues(report) {
+  return [
+    ...report.errors.map((issue) => `<li class="err-text">${esc(semanticIssueText(issue))}</li>`),
+    ...report.warnings.map((issue) => `<li class="warn-text">${esc(semanticIssueText(issue))}</li>`),
+  ].join("");
+}
+
+function frameIndexPreview(frames) {
+  if (!Array.isArray(frames) || !frames.length) return "无";
+  const preview = frames.slice(0, 12).join(", ");
+  return frames.length > 12 ? `${frames.length} 帧：${preview} ...` : preview;
+}
+
+function timeAlignmentSourceHtml(name, source, unit) {
+  const stats = alignmentStatFields.map(([key, label]) => `<div class="alignment-stat"><span>${esc(label)}</span><b>${esc(key.endsWith("count") || key === "longest_consecutive_error_run" ? reportValue(source[key]) : timeValue(source[key], unit))}</b></div>`).join("");
+  const frames = source.offending_frame_indices;
+  const reuseStats = name.startsWith("camera.")
+    ? `<div class="alignment-stat"><span>相机帧复用</span><b>${esc(reportValue(source.camera_frame_reuse_count))}</b></div><div class="alignment-stat"><span>复用比例</span><b>${Number.isFinite(Number(source.camera_frame_reuse_fraction)) ? `${(Number(source.camera_frame_reuse_fraction) * 100).toFixed(1)}%` : "未提供"}</b></div><div class="alignment-stat"><span>连续复用</span><b>${esc(reportValue(source.longest_consecutive_camera_frame_reuse_run))}</b></div>`
+    : "";
+  const reuseText = name.startsWith("camera.") ? `<span class="mini">复用帧 ${esc(frameIndexPreview(source.camera_frame_reuse_indices))}</span>` : "";
+  return `<div class="alignment-source"><div class="alignment-source-head"><b>${esc(name)}</b>${badge(reportStatus(source.status))}<span class="mini">异常帧 ${esc(frameIndexPreview(frames))}</span>${reuseText}</div><div class="alignment-stat-grid">${stats}${reuseStats}</div></div>`;
+}
+
+function actionSupportSummary(report, unit) {
+  const support = report.action_support;
+  const status = reportStatus(support.status);
+  const state = { key: status, label: semanticStatusLabel(status), detail: "" };
+  const stats = [
+    ["linear_count", "线性插值"],
+    ["exact_count", "原始动作精确命中"],
+    ["nearest_fallback_count", "最近邻备用"],
+    ["support_nearest_abs_delta_p95_ns", "P95 最近支撑距离"],
+    ["support_nearest_abs_delta_max_ns", "最大最近支撑距离"],
+    ["support_max_abs_delta_p95_ns", "P95 最远支撑距离"],
+    ["support_max_abs_delta_max_ns", "最大最远支撑距离"],
+    ["support_span_p95_ns", "P95 支撑跨度"],
+    ["support_span_max_ns", "最大支撑跨度"],
+  ].map(([key, label]) => `<div class="alignment-stat"><span>${esc(label)}</span><b>${esc(key.endsWith("count") ? reportValue(support[key]) : timeValue(support[key], unit))}</b></div>`).join("");
+  return `<div class="quality-section"><div class="quality-section-head"><div><b>动作插值支撑质量</b><span class="mini">动作标签由 head anchor 前后的原始动作构造；支撑距离越小越可靠</span></div>${qualityBadge(state)}</div><div class="alignment-stat-grid">${stats}</div><p class="mini">最近邻备用帧：${esc(frameIndexPreview(support.nearest_fallback_frame_indices))}；支撑异常帧：${esc(frameIndexPreview([...new Set([...support.warning_frame_indices, ...support.error_frame_indices])]))}</p></div>`;
+}
+
+function timeAlignmentSummary(v) {
+  const state = timeAlignmentState(v);
+  const report = state.contract?.report;
+  if (!report || state.contract.missing.length) {
+    return `<div class="quality-section"><div class="quality-section-head"><div><b>时间对齐误差</b><span class="mini">state、action、camera 各自与采样时刻的误差</span></div>${qualityBadge(state)}</div><div class="validation-conclusion error"><b>${esc(state.label)}</b><span>${esc(state.detail)}</span></div></div>`;
+  }
+  const unit = timeUnit(report);
+  const sample = report.sample_interval;
+  const sampleMissing = !sample || typeof sample !== "object" || Array.isArray(sample)
+    ? ["sample_interval"]
+    : ["status", "T_ns", "interval_median_ns", "interval_p95_ns", "interval_max_ns", "long_gap_count", "longest_consecutive_long_gap_run", "offending_frame_indices"]
+      .filter((key) => !Object.prototype.hasOwnProperty.call(sample, key));
+  const sampleState = sampleMissing.length
+    ? { key: "error", label: "字段缺失", detail: `sample_interval 缺少：${sampleMissing.join("、")}` }
+    : { key: reportStatus(sample.status), label: semanticStatusLabel(reportStatus(sample.status)), detail: "" };
+  const sampleText = sample && typeof sample === "object" && !Array.isArray(sample)
+    ? `<div class="alignment-stat-grid">${[
+        ["T_ns", "平均间隔 T"], ["interval_median_ns", "中位间隔"], ["interval_p95_ns", "P95 间隔"], ["interval_max_ns", "最大间隔"],
+        ["long_gap_count", "超 2.5T 次数"], ["longest_consecutive_long_gap_run", "最长连续超 2.5T"],
+      ].map(([key, label]) => `<div class="alignment-stat"><span>${label}</span><b>${esc(key.includes("count") || key.startsWith("longest_") ? reportValue(sample[key]) : timeValue(sample[key], unit))}</b></div>`).join("")}</div><p class="mini">异常帧索引：${esc(reportValue(sample.offending_frame_indices))}</p>`
+    : `<div class="validation-conclusion error"><b>采样间隔字段缺失</b><span>sample_interval 不是对象，不能判定采样间隔质量。</span></div>`;
+  const sources = Object.entries(report.sources).map(([name, source]) => timeAlignmentSourceHtml(name, source, unit)).join("");
+  const issueHtml = alignmentIssues(report);
+  return `<div class="quality-section"><div class="quality-section-head"><div><b>采样间隔质量</b><span class="mini">按 episode 自身采样间隔统计 · 单位：${esc(unit)}</span></div>${qualityBadge(sampleState)}</div>${sampleText}${sampleMissing.length ? `<div class="validation-conclusion error"><b>${esc(sampleState.label)}</b><span>${esc(sampleState.detail)}</span></div>` : ""}</div>${actionSupportSummary(report, unit)}<div class="quality-section"><div class="quality-section-head"><div><b>时间对齐误差</b><span class="mini">state、action、camera 各自与采样时刻的误差 · 单位：${esc(unit)}</span></div>${qualityBadge(state)}</div><div class="validation-conclusion ${qualityClass(state.key)}"><b>时间对齐：${esc(state.label)}</b><span>不比较 state 与 action 的数值差；这里只检查它们各自与采样时刻的时间对齐。</span></div><div class="alignment-source-grid">${sources}</div>${issueHtml ? `<ul class="validation-issues">${issueHtml}</ul>` : "<p class=\"mini\">errors：无；warnings：无。</p>"}</div>`;
+}
+
+function semanticField(source, keys) {
+  if (!source || typeof source !== "object") return undefined;
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(source, key)) return source[key];
+  }
+  return undefined;
+}
+
+function semanticNumber(value, digits = 3) {
+  if (value === undefined || value === null || value === "") return "未提供";
+  const number = Number(value);
+  return Number.isFinite(number) ? number.toFixed(digits) : "无效";
+}
+
+function semanticStatusClass(status) {
+  const value = String(status || "unknown").toLowerCase();
+  return ["ok", "warning", "error"].includes(value) ? value : "unknown";
+}
+
+function semanticStatusLabel(status) {
+  const value = String(status || "unknown").toLowerCase();
+  return {
+    ok: "通过",
+    warning: "有警告",
+    error: "错误",
+    not_applicable: "不适用",
+    pending: "正在自检",
+    unknown: "未完成",
+  }[value] || "未完成";
+}
+
+function semanticStatText(stats, unit) {
+  if (!stats || typeof stats !== "object") return `P95 未提供 · 峰值未提供${unit}`;
+  const peak = semanticField(stats, ["peak", "max"]);
+  return `P95 ${semanticNumber(stats.p95)}${unit} · 峰值 ${semanticNumber(peak)}${unit}`;
+}
+
+function semanticRatioText(report) {
+  const near = semanticField(report, ["near_limit", "hard_limit_proximity"]);
+  const pairedNear = semanticField(report, ["near_hard_limit"]);
+  if (pairedNear && typeof pairedNear === "object") {
+    const actionRatio = semanticField(pairedNear.action, ["near_ratio", "ratio", "fraction"]);
+    const stateRatio = semanticField(pairedNear.state, ["near_ratio", "ratio", "fraction"]);
+    const formatRatio = (value) => value === undefined ? "未提供" : `${semanticNumber(Number(value) * 100, 1)}%`;
+    return `action ${formatRatio(actionRatio)} · state ${formatRatio(stateRatio)}`;
+  }
+  const ratio = semanticField(report, ["near_limit_ratio", "near_limit_fraction"])
+    ?? semanticField(near, ["ratio", "fraction"]);
+  const count = semanticField(report, ["near_limit_count"])
+    ?? semanticField(near, ["count"]);
+  const ratioText = ratio === undefined ? "比例未提供" : `${semanticNumber(Number(ratio) * 100, 1)}%`;
+  const countText = count === undefined ? "样本数未提供" : `${semanticNumber(count, 0)} 个样本`;
+  return `${ratioText} · ${countText}`;
+}
+
+function semanticIssueText(issue) {
+  if (typeof issue === "string") return issue;
+  if (issue && typeof issue === "object") {
+    const code = semanticField(issue, ["code"]);
+    const message = semanticField(issue, ["message", "reason", "detail"]);
+    const scope = [semanticField(issue, ["side"]), semanticField(issue, ["joint"])]
+      .filter((value) => value !== undefined && value !== null && String(value) !== "")
+      .join(" / ");
+    return [code, scope, message].filter((value) => value !== undefined && value !== null && String(value) !== "").join(" · ") || "报告提供了未命名异常";
+  }
+  return String(issue ?? "报告提供了空异常项");
+}
+
+function semanticThresholdText(key, value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "无效";
+  if (key.endsWith("_ratio")) return `${(number * 100).toFixed(1)}%`;
+  if (key.endsWith("_rad_s2")) return `${number.toFixed(3)} rad/s²`;
+  if (key.endsWith("_rad_s")) return `${number.toFixed(3)} rad/s`;
+  if (key.endsWith("_m_s")) return `${number.toFixed(3)} m/s`;
+  if (key.endsWith("_rad")) return `${number.toFixed(3)} rad`;
+  if (key.endsWith("_m")) return `${number.toFixed(3)} m`;
+  if (key.endsWith("_s")) return `${number.toFixed(3)} s`;
+  return Number.isInteger(number) ? String(number) : number.toFixed(3);
+}
+
+const semanticThresholdLabels = {
+  near_limit_margin_rad: "硬限位近邻裕量",
+  near_limit_warning_ratio: "近限位警告比例",
+  near_limit_error_ratio: "近限位错误比例",
+  action_step_warning_rad: "动作步长警告阈值",
+  action_step_error_rad: "动作步长错误阈值",
+  action_velocity_warning_rad_s: "动作速度警告阈值",
+  action_velocity_error_rad_s: "动作速度错误阈值",
+  action_acceleration_warning_rad_s2: "动作加速度警告阈值",
+  action_acceleration_error_rad_s2: "动作加速度错误阈值",
+  motion_error_count: "快速动作错误次数",
+  gripper_jump_warning_rad: "夹爪跳变警告阈值",
+  gripper_jump_error_rad: "夹爪跳变错误阈值",
+  gripper_jump_error_count: "夹爪跳变错误次数",
+  action_event_min_step_rad: "动作事件最小步长",
+  feedback_event_min_step_rad: "反馈事件最小步长",
+  response_window_s: "响应匹配窗口",
+  response_lag_warning_s: "响应滞后警告阈值",
+  response_lag_error_s: "响应滞后错误阈值",
+  response_lag_error_count: "响应滞后错误次数",
+  response_unmatched_warning_count: "未匹配警告次数",
+  response_unmatched_error_count: "未匹配错误次数",
+};
+
+function actionSemanticsBadge(v) {
+  const state = reportState(v);
+  if (!["ok", "warning", "error"].includes(state.key)) return qualityBadge(state);
+  const semantics = v?.action_semantics;
+  if (!semantics || typeof semantics !== "object") return badge("error", "报告缺失");
+  return badge(semantics.status || "unknown", semanticStatusLabel(semantics.status));
+}
+
+function actionSemanticsSummary(v) {
+  const validation = reportState(v);
+  if (validation.key === "pending") {
+    return `<div class="action-semantic-section"><div class="validation-conclusion warning"><b>正在完成 episode 自检</b><span>动作语义报告尚未生成；完成前不能开始下一条录制。</span></div></div>`;
+  }
+  if (["missing", "stale", "incomplete", "unknown"].includes(validation.key)) {
+    return `<div class="action-semantic-section"><div class="validation-conclusion error"><b>${esc(validation.label)}</b><span>动作语义不能基于缺失或过期的 validation report 判定。</span></div></div>`;
+  }
+  const semantics = v?.action_semantics;
+  if (!semantics || typeof semantics !== "object") {
+    return `<div class="action-semantic-section"><div class="validation-conclusion error"><b>动作语义报告缺失</b><span>当前只能显示完整性与时间对齐结果，动作异常不能判定；请重新执行 episode 自检。</span></div></div>`;
+  }
+
+  const status = String(semantics.status || "unknown").toLowerCase();
+  const jointSpace = semantics.joint_space || {};
+  const jointStatus = String(jointSpace.status || "unknown").toLowerCase();
+  const jointReason = semanticField(jointSpace, ["reason", "not_applicable_reason"]);
+  const qposText = jointStatus === "not_applicable"
+    ? `未记录 qpos 动作，因此无法进行关节空间动作步长、速度、加速度和硬限位检查。${jointReason && jointReason !== "joint-space action is absent" ? ` 报告理由：${jointReason}` : ""}`
+    : `状态：${semanticStatusLabel(jointStatus)}${jointStatus === "unknown" ? "；报告未提供 qpos 检查状态，不能判定。" : ""}`;
+  const poseSpace = semantics.pose_space;
+  const poseText = poseSpace && typeof poseSpace === "object"
+    ? `位姿空间：${semanticStatusLabel(poseSpace.status)}`
+    : "位姿空间：报告未提供";
+  const armReports = jointSpace.arms && typeof jointSpace.arms === "object" ? jointSpace.arms : {};
+  const responseArms = semantics.response_lag?.arms && typeof semantics.response_lag.arms === "object" ? semantics.response_lag.arms : {};
+  const sides = ["left", "right"];
+  const armHtml = sides.map((side) => {
+    const arm = armReports[side] && typeof armReports[side] === "object" ? armReports[side] : {};
+    const joints = arm.joints && typeof arm.joints === "object" ? arm.joints : {};
+    const responseJoints = responseArms[side]?.joints && typeof responseArms[side].joints === "object" ? responseArms[side].joints : {};
+    const jointNames = [...new Set([...Object.keys(joints), ...Object.keys(responseJoints)])];
+    const rows = jointNames.length ? jointNames.map((jointName) => {
+      const report = joints[jointName] && typeof joints[jointName] === "object" ? joints[jointName] : {};
+      const lag = responseJoints[jointName] && typeof responseJoints[jointName] === "object" ? responseJoints[jointName] : {};
+      const matched = semanticField(lag, ["matched_count", "sample_count"]);
+      const unmatched = semanticField(lag, ["unmatched_count", "unmatched_command_event_count"]);
+      const lagText = `已匹配 ${semanticNumber(matched, 0)} · 未匹配 ${semanticNumber(unmatched, 0)} · median ${semanticNumber(lag.median_s)}s · P95 ${semanticNumber(semanticField(lag, ["p95_s", "percentile_95_s"]))}s · max ${semanticNumber(lag.max_s)}s`;
+      return `<tr><td><b>${esc(jointName)}</b><small class="mini">${esc(semanticStatusLabel(report.status))}</small></td><td>${esc(semanticStatText(report.action_step_rad, " rad"))}</td><td>${esc(semanticStatText(report.action_velocity_rad_s, " rad/s"))}</td><td>${esc(semanticStatText(report.action_acceleration_rad_s2, " rad/s²"))}</td><td>${esc(semanticRatioText(report))}</td><td>${esc(lagText)}</td></tr>`;
+    }).join("") : `<tr><td colspan="6" class="mini">${jointStatus === "not_applicable" ? "qpos 检查不适用：未记录关节动作。" : "报告未提供该侧关节统计，不能判定。"}</td></tr>`;
+    return `<div class="action-arm-card"><div class="action-block-head"><b>${side === "left" ? "左臂" : "右臂"}</b><span class="mini">每关节统计</span></div><div class="table-wrap action-table-wrap"><table><thead><tr><th>关节</th><th>动作步长<br><small>P95 / 峰值</small></th><th>速度<br><small>P95 / 峰值</small></th><th>加速度<br><small>P95 / 峰值</small></th><th>靠近硬限位</th><th>响应滞后</th></tr></thead><tbody>${rows}</tbody></table></div></div>`;
+  }).join("");
+
+  const gripperReports = semantics.grippers || jointSpace.grippers || {};
+  const gripperRows = sides.map((side) => {
+    const arm = armReports[side] || {};
+    const report = gripperReports[side] || arm.gripper || {};
+    const jumpStats = semanticField(report, ["action_step_rad", "jump_magnitude_rad", "step_rad"]);
+    const jumpCount = semanticField(report, ["jump_count", "excessive_jump_count"])
+      ?? semanticField(report.jump_stats, ["count", "jump_count"]);
+    return `<tr><td><b>${side === "left" ? "左夹爪" : "右夹爪"}</b></td><td>${esc(semanticNumber(jumpCount, 0))}</td><td>${esc(semanticStatText(jumpStats, " rad"))}</td></tr>`;
+  }).join("");
+
+  const thresholds = semantics.config?.thresholds && typeof semantics.config.thresholds === "object" ? semantics.config.thresholds : {};
+  const thresholdEntries = Object.entries(thresholds);
+  const thresholdHtml = thresholdEntries.length
+    ? thresholdEntries.map(([key, value]) => `<div><span>${esc(semanticThresholdLabels[key] || key)}</span><b>${esc(semanticThresholdText(key, value))}</b></div>`).join("")
+    : `<p class="mini">报告未提供 config.thresholds，不能解释本次检查使用的阈值。</p>`;
+  const errors = Array.isArray(semantics.errors) ? semantics.errors : null;
+  const warnings = Array.isArray(semantics.warnings) ? semantics.warnings : null;
+  const issueHtml = [
+    ...(errors === null ? [["error", "报告未提供 errors 字段"]] : errors.map((issue) => ["error", semanticIssueText(issue)])),
+    ...(warnings === null ? [["warning", "报告未提供 warnings 字段"]] : warnings.map((issue) => ["warning", semanticIssueText(issue)])),
+  ].map(([level, issue]) => `<li class="${level === "error" ? "err-text" : "warn-text"}">${esc(issue)}</li>`).join("");
+  return `<div class="action-semantic-section">
+    <div class="validation-conclusion ${semanticStatusClass(status)}"><b>动作语义检查：${esc(semanticStatusLabel(status))}</b><span>${esc(qposText)} ${esc(poseText)}</span></div>
+    <div class="action-block"><div class="action-block-head"><b>左右臂动作统计</b><span class="mini">步长、速度、加速度 P95/峰值与硬限位比例</span></div><div class="action-arm-grid">${armHtml}</div></div>
+    <div class="action-block"><div class="action-block-head"><b>夹爪跳变</b><span class="mini">跳变次数与步长统计</span></div><div class="table-wrap action-table-wrap"><table><thead><tr><th>对象</th><th>跳变次数</th><th>跳变步长</th></tr></thead><tbody>${gripperRows}</tbody></table></div></div>
+    <div class="action-block"><div class="action-block-head"><b>配置阈值</b><span class="mini">来自 validation report 的 config.thresholds</span></div><div class="action-thresholds">${thresholdHtml}</div></div>
+    <div class="action-block"><div class="action-block-head"><b>errors / warnings</b><span class="mini">动作语义报告原始异常</span></div>${issueHtml ? `<ul class="validation-issues">${issueHtml}</ul>` : "<p class=\"mini\">errors：无；warnings：无。</p>"}</div>
+  </div>`;
+}
+
 function validationSummary(v) {
-  if (!v || !v.checked_at_ns) return empty("停止 episode 后会在这里显示自检小结");
+  if (validationPending(v)) return `<div class="validation-summary"><div class="validation-conclusion warning"><b>正在完成 episode 自检</b><span>完成前不能开始下一条录制。</span></div></div>`;
+  const persistedState = reportState(v);
+  if (["missing", "stale", "incomplete"].includes(persistedState.key)) {
+    return `<div class="validation-summary quality-section"><div class="quality-section-head"><div><b>结构完整性</b><span class="mini">关节、夹爪、manifest 相机路径和 host receive 时间戳</span></div>${qualityBadge(persistedState)}</div><div class="validation-conclusion error"><b>${esc(persistedState.label)}</b><span>${esc(persistedState.detail)}</span></div></div>`;
+  }
+  if (!v || !v.checked_at_ns) return `<div class="validation-summary quality-section"><div class="validation-conclusion error"><b>报告未完成</b><span>validation report 缺少 checked_at_ns，不能判定 episode 通过。</span></div></div>`;
   const checks = v.checks || {};
   const cov = checks.camera_coverage || {};
+  const manifest = checks.camera_manifest || {};
   const robot = checks.robot_state || {};
   const fps = checks.fps || {};
   const errors = Array.isArray(v.errors) ? v.errors : [];
@@ -162,9 +570,10 @@ function validationSummary(v) {
   const cameraCounts = cov.counts || {};
   const frameCount = Number(v.frame_count || checks.frame_count?.count || 0);
   const cameraEntries = Object.entries(cameraCounts);
-  const cameraText = cameraEntries.length
-    ? cameraEntries.map(([cid, count]) => `cam${cid} ${count}/${frameCount}`).join(" · ")
-    : "无相机帧统计";
+  const enabledCameras = Array.isArray(manifest.enabled_cameras) ? manifest.enabled_cameras : [];
+  const cameraText = enabledCameras.length
+    ? `${enabledCameras.join("、")}：每帧必需`
+    : "manifest 缺失，不能确认相机完整性";
   const robotCounts = robot.counts || {};
   const hasRobotCounts = Object.keys(robotCounts).length > 0;
   const robotText = hasRobotCounts
@@ -176,12 +585,13 @@ function validationSummary(v) {
   const robotOk = robot.ok !== undefined
     ? !!robot.ok
     : !errors.some((x) => String(x).includes(".q_fb"));
-  const cameraOk = cov.ok !== undefined ? !!cov.ok : !errors.some((x) => String(x).includes("camera") || String(x).includes("image"));
+  const cameraOk = manifest.ok === true;
   const issueHtml = [...errors.map((x) => ["error", x]), ...warnings.map((x) => ["warning", x])]
     .slice(0, 8)
     .map(([level, text]) => `<li class="${level === "error" ? "err-text" : "warn-text"}">${esc(text)}</li>`)
     .join("");
-  return `<div class="validation-summary">
+  return `<div class="validation-summary quality-section">
+    <div class="quality-section-head"><div><b>结构完整性</b><span class="mini">关节、夹爪、manifest 相机路径和 host receive 时间戳</span></div>${qualityBadge(reportState(v))}</div>
     <div class="validation-title"><b>${esc(v.episode_name || "episode")}</b>${badge(v.level || "unknown")}</div>
     <div class="validation-conclusion ${v.level || "unknown"}">
       <b>${v.level === "ok" ? "结论：本 episode 数据可用" : v.level === "warning" ? "结论：本 episode 可用但存在风险" : "结论：本 episode 存在数据错误"}</b>
@@ -189,17 +599,18 @@ function validationSummary(v) {
     </div>
     <div class="validation-grid">
       <div>${checkDot(checks.frame_count?.ok)}<span>帧数</span><b>${frameCount}</b></div>
-      <div>${checkDot(fps.ok)}<span>采样</span><b>${Number(v.observed_fps || fps.observed || 0).toFixed(1)} fps</b><small>设置 ${Number(v.expected_fps || fps.expected || 0).toFixed(1)}</small></div>
+      <div>${checkDot(fps.ok)}<span>观测采样率</span><b>${Number(v.observed_fps || fps.observed || 0).toFixed(1)} fps</b><small>只作结构信息；间隔质量由下方独立判定</small></div>
       <div>${checkDot(robotOk)}<span>关节/夹爪</span><b>${esc(robotText)}</b><small>要求：左右臂每帧 7 关节 + gripper 均为有限数</small></div>
-      <div>${checkDot(cameraOk)}<span>相机完整性</span><b>${esc(cameraText)}</b><small>要求：每路相机覆盖率 ≥ 95%，图片非空</small></div>
+      <div>${checkDot(cameraOk)}<span>相机完整性</span><b>${esc(cameraText)}</b><small>要求：manifest 中每路相机每帧均有路径、文件和 host receive 时间戳</small></div>
     </div>
     ${issueHtml ? `<ul class="validation-issues">${issueHtml}</ul>` : `<p class="mini">未发现错误或警告，数据完整性检查通过。</p>`}
+    ${timeAlignmentSummary(v)}
   </div>`;
 }
 
 function renderRecord() {
   const r = state.snapshot?.recording || {};
-  const v = r.last_validation || {};
+  const v = { ...(r.last_validation || {}), pending: !!r.validation_pending };
   const teleop = state.snapshot?.teleop || {};
   const isRecording = !!r.active;
   const recordEnabled = r.enabled !== false;
@@ -252,11 +663,12 @@ function renderRecord() {
   }).join("");
   return `<div class="grid">
     <div class="card hero full"><div class="card-head"><div><div class="eyebrow">XR Teleoperate</div><div class="headline">${r.active ? "正在采集" : teleop.started ? "遥操运行中" : "等待接管"}</div><div class="subline">${esc(isRecording && r.session_dir ? r.session_dir : `采集目录：${loadedRoot}`)}</div></div>${badge(r.active ? "running" : teleop.started ? "connected" : "idle", r.active ? "REC" : teleop.started ? "START" : "IDLE")}</div>
-      <div class="form record-prep-form"><label>采集 FPS<input id="recordFps" value="${esc(localStorage.recordFps || r.fps || 30)}" disabled></label><div><p class="mini">这里沿用参考 collector 的布局；实际 FPS、相机和目录来自启动参数，网页只发控制意图。</p><p class="row"><button onclick="startTeleop()" ${teleop.started ? "disabled" : ""}>开始接管</button><button class="secondary" onclick="homeTeleop()" ${teleop.started ? "" : "disabled"}>回到 Home</button><button class="secondary" onclick="recenterTeleop()" ${teleop.started ? "" : "disabled"}>重置头参考</button><button class="danger" onclick="stopTeleop()">停止退出</button></p><p class="row"><button onclick="startRec()" ${r.active || !teleop.started || !recordEnabled ? "disabled" : ""}>● 开始录制</button><button class="danger" onclick="stopRec()" ${r.active ? "" : "disabled"}>停止并保存</button><button class="secondary" onclick="cancelRec()" ${r.active ? "" : "disabled"}>取消录制</button>${recordEnabled ? "" : `<span class="pill"><span class="dot warn"></span>启动时未加 --record</span>`}</p></div></div>
+      <div class="form record-prep-form"><label>采集 FPS<input id="recordFps" value="${esc(localStorage.recordFps || r.fps || 30)}" disabled></label><div><p class="mini">这里沿用参考 collector 的布局；实际 FPS、相机和目录来自启动参数，网页只发控制意图。</p><p class="row"><button onclick="startTeleop()" ${teleop.started ? "disabled" : ""}>开始接管</button><button class="secondary" onclick="homeTeleop()" ${teleop.started ? "" : "disabled"}>回到 Home</button><button class="secondary" onclick="recenterTeleop()" ${teleop.started ? "" : "disabled"}>重置头参考</button><button class="danger" onclick="stopTeleop()">停止退出</button></p><p class="row"><button onclick="startRec()" ${r.active || r.validation_pending || !teleop.started || !recordEnabled ? "disabled" : ""}>● 开始录制</button><button class="danger" onclick="stopRec()" ${r.active ? "" : "disabled"}>停止并保存</button><button class="secondary" onclick="cancelRec()" ${r.active ? "" : "disabled"}>取消录制</button>${recordEnabled ? "" : `<span class="pill"><span class="dot warn"></span>启动时未加 --record</span>`}</p></div></div>
       ${isRecording ? `<p class="mini">录制已进入 ${esc(r.phase || "recording")}；相机帧、机器人状态和 action 仍由主循环按 monotonic 时间对齐。</p>` : ""}
       <div class="prep-panels"><div><div class="toolbar"><div><h2>相机来源</h2><p class="mini">当前仓库相机由 CLI 参数打开；网页不启动、不停止相机。</p></div><button class="secondary" onclick="refreshAll()">刷新</button></div><div class="table-wrap"><table><thead><tr><th>Stream ID</th><th>来源</th><th>名称</th><th>链路</th><th>状态</th></tr></thead><tbody>${rows || `<tr><td colspan="5">${empty("尚未收到运行时相机帧；请检查启动参数、ZMQ sender 和网络链路")}</td></tr>`}</tbody></table></div></div><div><div class="toolbar"><div><h2>运行中流</h2><p class="mini">${activeIds.length} active${state.cameraStatusError ? ` · ${esc(state.cameraStatusError)}` : ""}</p></div></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>名称</th><th>模式</th><th>实际输出</th><th>请求参数</th><th>帧年龄</th></tr></thead><tbody>${streams || `<tr><td colspan="6">${empty("暂无运行流；检查启动参数是否启用本地或 ZMQ 相机")}</td></tr>`}</tbody></table></div></div></div>
     </div>
-    <div class="card full record-validation-card"><div class="card-head"><h2>采集自检小结</h2>${badge(v.level)}</div>${validationSummary(v)}</div>
+    <div class="card full record-validation-card"><div class="card-head"><h2>单条 episode 完整性与时间对齐检查</h2>${qualityBadge(validationCardState(v))}</div>${validationSummary(v)}</div>
+    <div class="card full record-action-semantics-card"><div class="card-head"><h2>动作语义与异常动作</h2>${actionSemanticsBadge(v)}</div>${actionSemanticsSummary(v)}</div>
     <div class="card full"><div class="card-head"><div><h2>多相机实时预览</h2><p class="mini">预览只读取当前进程已有 latest frame；不重启相机，不参与录制写盘。</p></div><span class="pill">${streamItems.length} live</span></div><div class="preview-grid layout-placeholder">${previews || empty("暂无可预览相机；请检查启动参数和相机链路")}</div></div>
     <div class="card full"><div class="card-head"><div><h2>实时数据曲线</h2><p class="mini">四图布局：左/右臂 J1-J7 与左/右夹爪分别显示，不再用线型区分。</p></div><span class="pill">4 charts</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left J1-J7</b><span>q_fb</span></div><canvas id="liveLeftJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="liveLeftJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right J1-J7</b><span>q_fb</span></div><canvas id="liveRightJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="liveRightJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Left Gripper</b><span>q_fb</span></div><canvas id="liveLeftGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveLeftGripperLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right Gripper</b><span>q_fb</span></div><canvas id="liveRightGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveRightGripperLegend"></div></div></div></div>
     <div class="modal ${state.cameraConfigOpen ? "show" : ""}" onclick="if(event.target===this) closeCameraConfig()"><div class="modal-card"><div class="card-head"><div><h2>相机启动参数说明</h2><p class="mini">当前仓库相机在 Python 进程启动时打开，网页只读取 latest frame。</p></div><button class="secondary" onclick="closeCameraConfig()">关闭</button></div><div class="form compact-form"><label>宽<input id="camWidth" value="${esc(localStorage.camWidth || "1280")}" disabled></label><label>高<input id="camHeight" value="${esc(localStorage.camHeight || "720")}" disabled></label><label>FPS<input id="camFps" value="${esc(localStorage.camFps || "30")}" disabled></label><label>模式<select id="camMode" disabled><option value="rgb" ${(localStorage.camMode || "rgb") === "rgb" ? "selected" : ""}>RGB</option><option value="depth" ${localStorage.camMode === "depth" ? "selected" : ""}>Depth</option></select></label><label>名称<input id="camName" placeholder="head / left_wrist / right_wrist" value="${esc(localStorage.camName || "")}" disabled></label><label>角色<input id="camRole" value="${esc(localStorage.camRole || "runtime")}" disabled></label></div><p class="mini">请用 --head-camera-id / --left-camera-id / --right-camera-id 或 --head-zmq-endpoint / --left-zmq-endpoint / --right-zmq-endpoint 配置。这样录制线程和 UI 预览共享同一个相机 source，不会因为网页操作重启相机而破坏对齐。</p></div></div>
@@ -545,7 +957,7 @@ const titles = {
 };
 const root = document.getElementById("app");
 
-root.innerHTML = `<div class="app"><aside class="side"><div class="brand"><div class="brand-mark">XR</div><div><div class="brand-title">xr_teleoperate</div><div class="brand-sub">UI control bridge</div></div></div><div class="side-status" id="sideStatus"></div><div class="side-root"><label>Record Root<input id="globalRecordRoot" value="${localStorage.recordRoot || "~/data/record/"}" disabled></label><p class="row"><button class="secondary" onclick="loadGlobalRecordRoot()">刷新列表</button></p><p class="mini">录制目录由启动参数 --task-dir/--task-name 决定；网页不修改当前进程配置。</p></div><div class="nav" id="nav"></div><div class="side-foot">Reference collector layout · xr runtime</div></aside><main class="main"><div class="top"><div><h1 id="topTitle">遥操录制工作台</h1><p id="topSub">connecting...</p></div><div class="top-actions"><span class="pill"><span id="connDot" class="dot"></span><span id="connText">connecting</span></span><span class="pill"><span id="recDot" class="dot"></span><span id="recText">record idle</span></span><button class="secondary" id="refreshBtn">刷新</button></div></div><div id="alert" class="banner"></div><section id="content"></section></main></div>`;
+root.innerHTML = `<div class="app"><aside class="side"><div class="brand"><div class="brand-mark">XR</div><div><div class="brand-title">xr_teleoperate</div><div class="brand-sub">UI control bridge</div></div></div><div class="side-status" id="sideStatus"></div><div class="side-root"><label>Record Root<input id="globalRecordRoot" value="${localStorage.recordRoot || "~/data/record/"}" onkeydown="if(event.key==='Enter'){loadGlobalRecordRoot()}" onchange="loadGlobalRecordRoot()"></label><p class="row"><button class="secondary" onclick="loadGlobalRecordRoot()">切换 Root</button></p><p class="mini">输入包含 episode_xxxx 的目标目录；切换仅允许在录制、自检和真机回放均停止时执行。</p></div><div class="nav" id="nav"></div><div class="side-foot">Reference collector layout · xr runtime</div></aside><main class="main"><div class="top"><div><h1 id="topTitle">遥操录制工作台</h1><p id="topSub">connecting...</p></div><div class="top-actions"><span class="pill"><span id="connDot" class="dot"></span><span id="connText">connecting</span></span><span class="pill"><span id="recDot" class="dot"></span><span id="recText">record idle</span></span><button class="secondary" id="refreshBtn">刷新</button></div></div><div id="alert" class="banner"></div><section id="content"></section></main></div>`;
 
 function el(id) { return document.getElementById(id); }
 function input(id) { return (document.getElementById(id))?.value || ""; }
@@ -758,12 +1170,17 @@ function loadGlobalRecordRoot() {
 
 async function setGlobalRecordRoot(value) {
   const rootDir = String(value || "").trim() || "~/data/record/";
-  localStorage.recordRoot = rootDir;
-  const box = document.getElementById("globalRecordRoot");
-  if (box && box.value !== rootDir) box.value = rootDir;
-  try { await api("/recording/set_root_dir?" + qs({ root_dir: rootDir })); } catch (_) {}
+  try {
+    await api("/recording/set_root_dir?" + qs({ root_dir: rootDir }));
+    localStorage.recordRoot = rootDir;
+    const box = document.getElementById("globalRecordRoot");
+    if (box && box.value !== rootDir) box.value = rootDir;
+    showBanner(`已请求切换采集 Root：${rootDir}；控制循环完成切换后可开始录制。`, "warning");
+  } catch (e) {
+    showBanner(`切换采集 Root 失败：${e?.message || e}`, "error");
+    return;
+  }
   await refreshEpisodes();
-  showBanner(`已加载 Root：${rootDir}`, "warning");
   if (state.active !== "record" || !state.snapshot?.recording?.active) render();
 }
 

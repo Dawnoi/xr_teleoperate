@@ -24,6 +24,33 @@ from data_pipeline.recording.alignment import (
 )
 
 
+_CAMERA_NAME_ALIASES = {
+    "head": "head",
+    "left_wrist": "left_wrist",
+    "wrist_left": "left_wrist",
+    "right_wrist": "right_wrist",
+    "wrist_right": "right_wrist",
+}
+_CAMERA_MANIFEST_ORDER = ("head", "left_wrist", "right_wrist")
+
+
+def _enabled_camera_manifest(camera_sources: dict[str, Any]) -> list[str]:
+    if not isinstance(camera_sources, dict):
+        raise TypeError("camera_sources must be the explicit camera source mapping")
+
+    enabled = []
+    for camera_name, source in camera_sources.items():
+        if source is None:
+            continue
+        canonical_name = _CAMERA_NAME_ALIASES.get(str(camera_name).strip())
+        if canonical_name is None:
+            raise ValueError(f"unsupported camera source name: {camera_name}")
+        if canonical_name in enabled:
+            raise ValueError(f"duplicate camera source name: {canonical_name}")
+        enabled.append(canonical_name)
+    return sorted(enabled, key=_CAMERA_MANIFEST_ORDER.index)
+
+
 @dataclass
 class RecordingCommandResult:
     record_running: bool
@@ -63,6 +90,7 @@ class TeleopRecordingFlow:
         dual_gripper_data_lock=None,
         dual_gripper_state_array=None,
         dual_gripper_action_array=None,
+        validation_manager=None,
     ):
         self.args = args
         self.recorder = recorder
@@ -74,6 +102,7 @@ class TeleopRecordingFlow:
         self.dual_gripper_data_lock = dual_gripper_data_lock
         self.dual_gripper_state_array = dual_gripper_state_array
         self.dual_gripper_action_array = dual_gripper_action_array
+        self.validation_manager = validation_manager
         self.state = TeleopRecordingState()
 
         frequency = max(float(args.frequency), 1e-6)
@@ -85,7 +114,14 @@ class TeleopRecordingFlow:
         self.record_future_wait_timeout_ns = int(max(120_000_000, (2.0 / frequency) * 1e9))
         self.pending_sample_timeout_ns = int(1_000_000_000)
 
-    def handle_commands(self, *, record_running: bool, record_toggle: bool, record_cancel: bool) -> RecordingCommandResult:
+    def handle_commands(
+        self,
+        *,
+        record_running: bool,
+        record_toggle: bool,
+        record_cancel: bool,
+        camera_sources: dict[str, Any],
+    ) -> RecordingCommandResult:
         """Consume operator recording commands and update episode lifecycle state."""
         if record_cancel:
             record_cancel = False
@@ -100,7 +136,20 @@ class TeleopRecordingFlow:
         if record_toggle:
             record_toggle = False
             if not record_running and not self.state.waiting_for_first_frame:
-                if self.recorder.create_episode():
+                if self.validation_manager is not None and self.validation_manager.is_busy():
+                    status = self.validation_manager.status()
+                    active_episode = status.get("current_episode_dir") or "queued episode"
+                    self.log.warning(
+                        "[RECORD_VALIDATE] recording start rejected: validation is still running for %s.",
+                        active_episode,
+                    )
+                    return RecordingCommandResult(
+                        record_running=False,
+                        record_toggle=record_toggle,
+                        record_cancel=record_cancel,
+                    )
+                enabled_cameras = _enabled_camera_manifest(camera_sources)
+                if self.recorder.create_episode(enabled_cameras=enabled_cameras):
                     self.state.record_start_monotonic_ns = int(time.monotonic_ns())
                     self.state.pending_samples.clear()
                     self.state.last_enqueued_primary_frame_id = None

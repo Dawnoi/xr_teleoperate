@@ -11,11 +11,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 from multiprocessing import Array, Lock, Value
+from pathlib import Path
 
 from core.camera.local_camera import LocalCameraStream
 from core.control.g1d_agv_bridge import G1DAgvBridge
 from core.control.motion_switcher import LocoClientWrapper, MotionSwitcher
 from core.input.teleop_input_provider import create_teleop_input_provider
+from data_pipeline.audit.episode_validation_manager import EpisodeValidationManager
 from data_pipeline.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
 from data_pipeline.recording.teleop_recording_flow import TeleopRecordingFlow
 from teleop.debug.latency_setup import setup_latency_tracker
@@ -86,6 +88,7 @@ class RealTeleopComponents:
     sim_state_subscriber: object | None = None
     recorder: object | None = None
     recording_flow: object | None = None
+    validation_manager: object | None = None
     cameras: CameraRuntime = field(default_factory=CameraRuntime)
     latency_tracker: object | None = None
 
@@ -140,7 +143,8 @@ def setup_real_teleop_components(args, *, log, components: RealTeleopComponents 
     components.ee = setup_end_effector(args, log)
     apply_affinity_if_requested(args, log)
     setup_sim(args, components)
-    components.recorder = setup_recorder(args)
+    components.validation_manager = EpisodeValidationManager() if args.record else None
+    components.recorder = setup_recorder(args, components.validation_manager)
     components.cameras = setup_cameras(args, log)
     components.recording_flow = setup_recording_flow(args, components, log)
     components.latency_tracker = setup_latency_tracker(args, components.arm_ctrl, log)
@@ -322,7 +326,7 @@ def setup_sim(args, components: RealTeleopComponents):
     components.sim_state_subscriber = start_sim_state_subscribe()
 
 
-def setup_recorder(args):
+def setup_recorder(args, validation_manager=None):
     if not args.record:
         return None
     return EpisodeWriter(
@@ -333,7 +337,31 @@ def setup_recorder(args):
         frequency=args.frequency,
         image_size=[args.camera_width, args.camera_height],
         rerun_log=not args.headless,
+        episode_finalized_callback=(validation_manager.submit if validation_manager is not None else None),
     )
+
+
+def switch_recording_root(args, components: RealTeleopComponents, root_dir: str | Path, log) -> None:
+    """Replace an idle writer so subsequent episodes use one exact root directory."""
+    if not args.record:
+        raise RuntimeError("recording root cannot change because --record is disabled")
+    validation_manager = components.validation_manager
+    if validation_manager is not None and validation_manager.is_busy():
+        raise RuntimeError("recording root cannot change while episode validation is pending")
+    previous_recorder = components.recorder
+    if previous_recorder is None or not previous_recorder.is_ready():
+        raise RuntimeError("recording root cannot change while an episode writer is active")
+
+    root = Path(root_dir).expanduser().resolve()
+    if not root.name:
+        raise ValueError("recording root must not be the filesystem root")
+    root.mkdir(parents=True, exist_ok=True)
+    previous_recorder.close()
+    args.task_dir = str(root.parent)
+    args.task_name = root.name
+    components.recorder = setup_recorder(args, validation_manager)
+    components.recording_flow = setup_recording_flow(args, components, log)
+    log.info("[RECORD_ROOT] switched recording root to %s", root)
 
 def setup_cameras(args, log) -> CameraRuntime:
     cameras = CameraRuntime()
@@ -395,4 +423,5 @@ def setup_recording_flow(args, components: RealTeleopComponents, log):
         dual_gripper_data_lock=components.ee.dual_gripper_data_lock,
         dual_gripper_state_array=components.ee.dual_gripper_state_array,
         dual_gripper_action_array=components.ee.dual_gripper_action_array,
+        validation_manager=components.validation_manager,
     )

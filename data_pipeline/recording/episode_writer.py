@@ -25,6 +25,34 @@ def canonical_color_key(color_key: str) -> str:
     }
     return mapping.get(key, key)
 
+
+_CAMERA_MANIFEST_ORDER = ("head", "left_wrist", "right_wrist")
+_CAMERA_MANIFEST_ALIASES = {
+    "head": "head",
+    "left_wrist": "left_wrist",
+    "wrist_left": "left_wrist",
+    "right_wrist": "right_wrist",
+    "wrist_right": "right_wrist",
+}
+
+
+def normalize_enabled_cameras(enabled_cameras):
+    if not isinstance(enabled_cameras, (list, tuple)):
+        raise TypeError("enabled_cameras must be an explicit list or tuple of camera names")
+
+    normalized = []
+    for camera_name in enabled_cameras:
+        if not isinstance(camera_name, str) or not camera_name.strip():
+            raise ValueError("enabled_cameras entries must be non-empty strings")
+        canonical_name = _CAMERA_MANIFEST_ALIASES.get(camera_name.strip())
+        if canonical_name not in _CAMERA_MANIFEST_ORDER:
+            raise ValueError(f"unsupported enabled camera: {camera_name}")
+        if canonical_name in normalized:
+            raise ValueError(f"duplicate enabled camera: {canonical_name}")
+        normalized.append(canonical_name)
+
+    return sorted(normalized, key=_CAMERA_MANIFEST_ORDER.index)
+
 class ZMQRawCameraReceiver:
     """Receive latest raw image frame from a remote ZMQ PUB endpoint.
 
@@ -216,7 +244,17 @@ class ZMQRawCameraReceiver:
             pass
 
 class EpisodeWriter():
-    def __init__(self, task_dir, task_goal=None, task_desc = None, task_steps = None, frequency=30, image_size=[640, 480], rerun_log = True):
+    def __init__(
+        self,
+        task_dir,
+        task_goal=None,
+        task_desc=None,
+        task_steps=None,
+        frequency=30,
+        image_size=[640, 480],
+        rerun_log=True,
+        episode_finalized_callback=None,
+    ):
         """
         image_size: [width, height]
         """
@@ -236,6 +274,7 @@ class EpisodeWriter():
 
         self.frequency = frequency
         self.image_size = image_size
+        self.episode_finalized_callback = episode_finalized_callback
 
         self.rerun_log = rerun_log
         self.online_logger = None
@@ -293,7 +332,7 @@ class EpisodeWriter():
             }
 
  
-    def create_episode(self):
+    def create_episode(self, *, enabled_cameras):
         """
         Create a new episode.
         Returns:
@@ -304,6 +343,9 @@ class EpisodeWriter():
         if not self.is_available:
             logger_mp.info("==> The class is currently unavailable for new operations. Please wait until ongoing tasks are completed.")
             return False  # Return False if the class is unavailable
+
+        normalized_enabled_cameras = normalize_enabled_cameras(enabled_cameras)
+        self.info = {**self.info, "enabled_cameras": normalized_enabled_cameras}
 
         # Reset episode-related data and create necessary directories
         self.item_id = -1
@@ -506,6 +548,9 @@ class EpisodeWriter():
             except Exception:
                 pass
             self.online_logger = None
+
+        if self.episode_finalized_callback is not None:
+            self.episode_finalized_callback(self.episode_dir)
 
         self.need_save = False     # Reset the save flag
         self.is_available = True   # Mark the class as available after saving

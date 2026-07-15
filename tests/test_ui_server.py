@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from teleop.ui.command_bus import UiCommandBus, UiCommandName
+from teleop.ui.episode_store import load_persisted_validation
 from teleop.ui.exporter import DEFAULT_UI_URDF_PATH, UiExportManager, UiExportRequest
 from teleop.ui.server import TeleopUiServer
 from teleop.ui.state_store import UiStateStore
@@ -94,6 +95,10 @@ class TeleopUiServerTest(unittest.TestCase):
         self.assertIn("selectQuickPlaybackEpisode", js_body)
         self.assertIn("changedPlaybackRuntime", js_body)
         self.assertIn("recorded state q", js_body)
+        self.assertIn("相机帧复用", js_body)
+        self.assertIn("连续复用", js_body)
+        self.assertIn("动作插值支撑质量", js_body)
+        self.assertIn("最近邻备用", js_body)
         self.assertIn("playback-top-grid", css_body)
         self.assertIn("const trace = latestReplayTrace || pendingReplayTrace || {};", js_body)
         self.assertIn("function refreshRealReplayStatus()", js_body)
@@ -662,7 +667,8 @@ class TeleopUiServerTest(unittest.TestCase):
             episodes = self._get_json(server, f"/recording/episodes?root_dir={root}")
             self.assertEqual([item["name"] for item in episodes["episodes"]], ["episode_0001"])
             self.assertEqual(episodes["episodes"][0]["frame_count"], 2)
-            self.assertEqual(episodes["episodes"][0]["validation_level"], "ok")
+            self.assertEqual(episodes["episodes"][0]["validation_level"], "error")
+            self.assertEqual(episodes["episodes"][0]["validation"]["status"], "missing")
 
             load_result = self._get_json(server, f"/playback/load?root_dir={root}&episode=episode_0001")
             self.assertEqual(load_result["ok"], True)
@@ -738,8 +744,39 @@ class TeleopUiServerTest(unittest.TestCase):
 
             validation = status["last_validation"]
             self.assertEqual(validation["episode_name"], "episode_0001")
-            self.assertEqual(validation["level"], "warning")
-            self.assertTrue(any("not finalized" in item for item in validation["warnings"]))
+            self.assertEqual(validation["level"], "error")
+            self.assertEqual(validation["status"], "incomplete")
+            self.assertTrue(any("not finalized" in item for item in validation["errors"]))
+
+    def test_persisted_validation_is_stale_after_data_json_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            episode_dir = pathlib.Path(tmp) / "episode_0001"
+            episode_dir.mkdir()
+            data_path = episode_dir / "data.json"
+            data_path.write_text('{"data": []}\n', encoding="utf-8")
+            source_stat = data_path.stat()
+            (episode_dir / "validation.json").write_text(
+                json.dumps(
+                    {
+                        "checked_at_ns": 1,
+                        "level": "ok",
+                        "source_data": {
+                            "size_bytes": source_stat.st_size,
+                            "mtime_ns": source_stat.st_mtime_ns,
+                        },
+                        "errors": [],
+                        "warnings": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            data_path.write_text('{"data": [1]}\n', encoding="utf-8")
+
+            validation = load_persisted_validation(episode_dir)
+
+            self.assertEqual(validation["level"], "error")
+            self.assertEqual(validation["status"], "stale")
+            self.assertTrue(any("stale" in item for item in validation["errors"]))
 
     def test_recording_start_and_stop_routes_queue_toggle_only_when_state_matches(self):
         state_store = UiStateStore({"recording": {"active": False, "frame_index": 0}})
@@ -912,6 +949,50 @@ class TeleopUiServerTest(unittest.TestCase):
             result = self._get_json(server, path)
             self.assertEqual(result["ok"], False)
             self.assertIn("not implemented", result["error"])
+
+    def test_recording_root_change_queues_control_loop_command(self):
+        command_bus = UiCommandBus()
+        server = TeleopUiServer(
+            command_bus=command_bus,
+            state_store=UiStateStore({"recording": {"active": False, "enabled": True}}),
+            host="127.0.0.1",
+            port=0,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+
+        result = self._get_json(server, "/recording/set_root_dir?root_dir=/tmp/new_raw_task")
+
+        self.assertEqual(result["ok"], True)
+        command = command_bus.drain()
+        self.assertEqual([item.name for item in command], [UiCommandName.SET_RECORD_ROOT])
+        self.assertEqual(command[0].payload, {"root_dir": "/tmp/new_raw_task"})
+
+    def test_delete_episodes_removes_only_requested_episode_directories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = pathlib.Path(tmp)
+            first = root / "episode_0001"
+            second = root / "episode_0002"
+            first.mkdir()
+            second.mkdir()
+            (first / "data.json").write_text("{}", encoding="utf-8")
+            (second / "data.json").write_text("{}", encoding="utf-8")
+            server = TeleopUiServer(
+                command_bus=UiCommandBus(),
+                state_store=UiStateStore({"recording": {"active": False, "enabled": True}}),
+                host="127.0.0.1",
+                port=0,
+            )
+            server.start()
+            self.addCleanup(server.stop)
+            server.playback.load(str(root), "episode_0001")
+
+            result = self._get_json(server, f"/recording/delete_episodes?root_dir={root}&episode=episode_0001")
+
+            self.assertEqual(result["deleted"], ["episode_0001"])
+            self.assertFalse(first.exists())
+            self.assertTrue(second.exists())
+            self.assertEqual(server.playback.state, "disabled")
 
     def test_events_route_returns_when_client_disconnects(self):
         class BrokenPipeWriter:

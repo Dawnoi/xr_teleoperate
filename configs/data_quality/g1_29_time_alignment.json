@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "frame_interval_warning_scale": 2.5,
+  "alignment_p95_warning_scale": 0.5,
+  "alignment_p99_error_scale": 1.0,
+  "error_min_count": 3,
+  "error_min_fraction": 0.01,
+  "error_consecutive_count": 3,
+  "camera_reuse_warning_min_count": 1,
+  "camera_reuse_warning_min_fraction": 0.0,
+  "camera_reuse_error_min_count": 3,
+  "camera_reuse_error_min_fraction": 0.2,
+  "camera_reuse_error_consecutive_count": 5,
+  "action_support_warning_scale": 0.5,
+  "action_support_error_scale": 1.0,
+  "action_support_span_warning_scale": 1.25,
+  "action_support_span_error_scale": 2.5
+}
