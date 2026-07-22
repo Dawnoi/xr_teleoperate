@@ -81,6 +81,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, nargs="*", default=None, help="Explicit episode indices to replay in order.")
     parser.add_argument("--episode-range", type=int, nargs=2, metavar=("START", "END"), help="Inclusive episode index range to replay.")
     parser.add_argument("--source", choices=["actions", "states"], default="actions", help="Replay qpos from this data.json field.")
+    parser.add_argument(
+        "--base-source",
+        choices=["none", "states"],
+        default="none",
+        help='Replay mobile-base freejoint pose from this source. "states" uses states.base.world_pose; default keeps the base fixed.',
+    )
     parser.add_argument("--frequency", type=float, default=30.0, help="Replay frequency when --realtime is not using recorded timestamps.")
     parser.add_argument("--speed", type=float, default=1.0, help="Replay speed multiplier. Must be positive.")
     parser.add_argument("--start-frame", type=int, default=0, help="First frame to replay.")
@@ -183,6 +189,13 @@ def finite_qpos(value: Any, expected_len: int, label: str) -> np.ndarray:
     return arr
 
 
+def finite_float(value: Any, label: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{label} must be finite, got {value!r}")
+    return result
+
+
 def qpos_from_item(item: dict[str, Any], frame_index: int, source: str, group: str, expected_len: int) -> np.ndarray:
     source_value = item.get(source)
     if not isinstance(source_value, dict):
@@ -191,6 +204,28 @@ def qpos_from_item(item: dict[str, Any], frame_index: int, source: str, group: s
     if not isinstance(group_value, dict) or "qpos" not in group_value:
         raise KeyError(f"frame {frame_index} missing {source}.{group}.qpos")
     return finite_qpos(group_value["qpos"], expected_len, f"frame {frame_index} {source}.{group}.qpos")
+
+
+def base_world_pose_from_item(item: dict[str, Any], frame_index: int) -> dict[str, float]:
+    states = item.get("states")
+    if not isinstance(states, dict):
+        raise KeyError(f"frame {frame_index} missing states")
+    base = states.get("base")
+    if not isinstance(base, dict):
+        raise KeyError(f"frame {frame_index} missing states.base")
+    world_pose = base.get("world_pose")
+    if not isinstance(world_pose, dict):
+        raise KeyError(f"frame {frame_index} missing states.base.world_pose")
+
+    values = {}
+    for field_name in ("x", "y", "z", "yaw"):
+        if field_name not in world_pose:
+            raise KeyError(f"frame {frame_index} missing states.base.world_pose.{field_name}")
+        values[field_name] = finite_float(
+            world_pose[field_name],
+            f"frame {frame_index} states.base.world_pose.{field_name}",
+        )
+    return values
 
 
 def sample_ns(item: dict[str, Any], frame_index: int) -> int:
@@ -223,9 +258,46 @@ def joint_qpos_indices_if_present(model: mj.MjModel, joint_names: list[str]) -> 
     return qpos_indices
 
 
+def joint_id_if_present(model: mj.MjModel, joint_name: str) -> int | None:
+    joint_id = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, joint_name)
+    return int(joint_id) if joint_id >= 0 else None
+
+
+def quat_wxyz_from_yaw(yaw: float) -> np.ndarray:
+    half = 0.5 * float(yaw)
+    return np.array([math.cos(half), 0.0, 0.0, math.sin(half)], dtype=float)
+
+
+def yaw_from_quat_wxyz(quat_wxyz) -> float:
+    w, x, y, z = [float(v) for v in quat_wxyz]
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+
 def gripper_state_to_mujoco_q(gripper_q: float) -> float:
     open_ratio = float(np.clip(float(gripper_q) / DEX1_REAL_MAX_Q, 0.0, 1.0))
     return DEX1_CLOSED_Q + (DEX1_OPEN_Q - DEX1_CLOSED_Q) * open_ratio
+
+
+def apply_recorded_base_pose_to_qpos(
+    *,
+    qpos: np.ndarray,
+    base_qpos: np.ndarray,
+    root_qpos_idx: int,
+    item: dict[str, Any],
+    frame_index: int,
+) -> None:
+    root_qpos_idx = int(root_qpos_idx)
+    if root_qpos_idx < 0 or root_qpos_idx + 7 > int(qpos.shape[0]):
+        raise ValueError(
+            f"g1d_freejoint qpos range is outside qpos: root_qpos_idx={root_qpos_idx}, qpos_size={qpos.shape[0]}"
+        )
+    pose = base_world_pose_from_item(item, frame_index)
+    qpos[root_qpos_idx] = pose["x"]
+    qpos[root_qpos_idx + 1] = pose["y"]
+    qpos[root_qpos_idx + 2] = float(base_qpos[root_qpos_idx + 2]) + pose["z"]
+    qpos[root_qpos_idx + 3 : root_qpos_idx + 7] = quat_wxyz_from_yaw(pose["yaw"])
 
 
 def set_frame_qpos(
@@ -236,6 +308,8 @@ def set_frame_qpos(
     item: dict[str, Any],
     frame_index: int,
     source: str,
+    base_source: str = "none",
+    root_qpos_idx: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     left_arm = qpos_from_item(item, frame_index, source, "left_arm", 7)
     right_arm = qpos_from_item(item, frame_index, source, "right_arm", 7)
@@ -244,6 +318,16 @@ def set_frame_qpos(
     right_ee = qpos_from_item(item, frame_index, source, "right_ee", 1)
 
     data.qpos[:] = base_qpos
+    if base_source == "states":
+        if root_qpos_idx is None:
+            raise RuntimeError('--base-source states requires MuJoCo joint "g1d_freejoint"')
+        apply_recorded_base_pose_to_qpos(
+            qpos=data.qpos,
+            base_qpos=base_qpos,
+            root_qpos_idx=root_qpos_idx,
+            item=item,
+            frame_index=frame_index,
+        )
     for idx, qpos_idx in enumerate(arm_qpos_indices):
         data.qpos[qpos_idx] = arm_q[idx]
 
@@ -337,6 +421,12 @@ def replay(args: argparse.Namespace) -> None:
     base_qpos = data.qpos.copy()
 
     arm_qpos_indices = joint_qpos_indices(model, ARM_JOINT_NAMES)
+    root_qpos_idx = None
+    if args.base_source == "states":
+        root_freejoint_id = joint_id_if_present(model, "g1d_freejoint")
+        if root_freejoint_id is None:
+            raise ValueError('--base-source states requires MuJoCo joint "g1d_freejoint"; use --viewer-robot g1_d_mobile')
+        root_qpos_idx = int(model.jnt_qposadr[root_freejoint_id])
     dex1_qpos_indices = None
     if args.ee == "dex1":
         dex1_qpos_indices = {
@@ -348,7 +438,8 @@ def replay(args: argparse.Namespace) -> None:
 
     print(
         f"[RAW_MUJOCO_REPLAY] dataset={args.dataset} episodes={','.join(f'{idx:04d}' for idx in episode_indices)} "
-        f"source={args.source} viewer_robot={args.viewer_robot} ee={args.ee} xml={xml_path} headless={args.headless}"
+        f"source={args.source} base_source={args.base_source} viewer_robot={args.viewer_robot} "
+        f"ee={args.ee} xml={xml_path} headless={args.headless}"
     )
 
     stop_requested = False
@@ -368,6 +459,8 @@ def replay(args: argparse.Namespace) -> None:
             item=items[frame_index],
             frame_index=frame_index,
             source=args.source,
+            base_source=args.base_source,
+            root_qpos_idx=root_qpos_idx,
         )
         mj.mj_forward(model, data)
         return arm_q, gripper_q

@@ -70,9 +70,10 @@ def _create_lerobot_offline_provider(args, arm_ik=None) -> BaseTeleopInputProvid
         from core.input.raw_offline import RawEpisodeInputProvider
 
         logger_mp.info(
-            "Detected raw episode replay input, episode_dir=%s arm_source=%s.",
+            "Detected raw episode replay input, episode_dir=%s arm_source=%s base_source=%s.",
             validation.get("episode_dir"),
             arm_source,
+            getattr(args, "offline_replay_base_source", "none"),
         )
         return RawEpisodeInputProvider(
             dataset_root=dataset_root,
@@ -80,6 +81,7 @@ def _create_lerobot_offline_provider(args, arm_ik=None) -> BaseTeleopInputProvid
             arm_source=arm_source,
             speed_scale=getattr(args, "offline_replay_speed_scale", 1.0),
             motion_repr="pose" if str(arm_source) == "fk_cmd_pose" else "qpos",
+            base_source=getattr(args, "offline_replay_base_source", "none"),
         )
     return LeRobotOfflineInputProvider(
         dataset_root=dataset_root,

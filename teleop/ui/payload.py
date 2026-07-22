@@ -66,6 +66,7 @@ def build_web_payload(
             "last_alert": recording.get("last_alert", {}),
             "alert_seq": int(recording.get("alert_seq", 0) or 0),
             "last_validation": recording.get("last_validation", {}),
+            "base": dict(recording.get("base", {}) or {}),
         },
         "playback": dict(playback_status or {}),
         "convert": dict(convert_status or {}),

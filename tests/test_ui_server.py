@@ -104,6 +104,8 @@ class TeleopUiServerTest(unittest.TestCase):
         self.assertIn("function refreshRealReplayStatus()", js_body)
         self.assertIn("function reconcileRealReplayStatus", js_body)
         self.assertIn("realReplayCommandPending", js_body)
+        self.assertIn("realReplayBaseSource", js_body)
+        self.assertIn("base_source", js_body)
         self.assertIn("changedPlaybackProviderState", js_body)
         self.assertIn("function syncPlaybackTrace()", js_body)
         self.assertIn("playbackTraceBadge", js_body)
@@ -881,7 +883,7 @@ class TeleopUiServerTest(unittest.TestCase):
 
         start_result = self._get_json(
             server,
-            "/replay/real/start?root_dir=/tmp/raw_root&episode=episode_0245&arm_source=action&speed_scale=0.5",
+            "/replay/real/start?root_dir=/tmp/raw_root&episode=episode_0245&arm_source=action&base_source=none&speed_scale=0.5",
         )
         stop_result = self._get_json(server, "/replay/real/stop")
         commands = command_bus.drain()
@@ -893,7 +895,51 @@ class TeleopUiServerTest(unittest.TestCase):
         self.assertEqual(commands[0].payload["episode_index"], 245)
         self.assertEqual(commands[0].payload["episode_name"], "episode_0245")
         self.assertEqual(commands[0].payload["arm_source"], "action")
+        self.assertEqual(commands[0].payload["base_source"], "none")
         self.assertEqual(commands[0].payload["speed_scale"], 0.5)
+
+    def test_real_replay_start_accepts_action_and_rejects_invalid_base_source(self):
+        command_bus = UiCommandBus()
+        state_store = UiStateStore(
+            {
+                "recording": {"active": False, "phase": "idle"},
+                "provider": {"active_provider": "hold"},
+                "teleop": {"started": True},
+            }
+        )
+        server = TeleopUiServer(
+            command_bus=command_bus,
+            state_store=state_store,
+            host="127.0.0.1",
+            port=0,
+        )
+        server.start()
+        self.addCleanup(server.stop)
+
+        action_result = self._get_json(
+            server,
+            "/replay/real/start?episode=episode_0001&base_source=action",
+        )
+        commands = command_bus.drain()
+
+        self.assertEqual(action_result["ok"], True)
+        self.assertEqual(commands[0].payload["base_source"], "action")
+
+        invalid_result = self._get_json(
+            server,
+            "/replay/real/start?episode=episode_0001&base_source=state",
+        )
+        self.assertEqual(invalid_result["ok"], False)
+        self.assertIn("unsupported base_source", invalid_result["error"])
+        self.assertEqual(command_bus.drain(), [])
+
+        missing_result = self._get_json(
+            server,
+            "/replay/real/start?episode=episode_0001",
+        )
+        self.assertEqual(missing_result["ok"], False)
+        self.assertIn("base_source", missing_result["error"])
+        self.assertEqual(command_bus.drain(), [])
 
     def test_real_replay_start_rejects_when_recording_active_or_armed(self):
         for recording in (

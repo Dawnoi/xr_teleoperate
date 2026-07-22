@@ -510,6 +510,66 @@ class UiIntegrationTest(unittest.TestCase):
         self.assertEqual(status["last_alignment"]["pending_samples"], 2)
         self.assertTrue(status["last_alignment"]["waiting_for_first_frame"])
 
+    def test_build_runtime_recording_status_reports_base_receiver_status(self):
+        args = SimpleNamespace(
+            task_dir="/tmp/data",
+            task_name="pick_cube",
+            frequency=30.0,
+            record=True,
+            record_base=True,
+            base_odom_topic="rt/agv/odom",
+            base_height_topic="rt/hispeed_state",
+            base_state_max_age_ms=150.0,
+            base_action_max_age_ms=500.0,
+        )
+        recorder = SimpleNamespace(item_id=0, episode_dir="/tmp/data/pick_cube/episode_0001")
+        recording_flow = SimpleNamespace(state=SimpleNamespace(waiting_for_first_frame=False, pending_samples=[]))
+        base_state_receiver = SimpleNamespace(is_alive=lambda: True)
+
+        status = build_runtime_recording_status(
+            args=args,
+            recorder=recorder,
+            recording_flow=recording_flow,
+            record_running=True,
+            base_state_receiver=base_state_receiver,
+        )
+
+        self.assertEqual(
+            status["base"],
+            {
+                "enabled": True,
+                "receiver_alive": True,
+                "odom_topic": "rt/agv/odom",
+                "height_topic": "rt/hispeed_state",
+                "state_max_age_ms": 150.0,
+                "action_max_age_ms": 500.0,
+            },
+        )
+
+    def test_build_web_payload_preserves_recording_base_status(self):
+        payload = build_web_payload(
+            recording_status={
+                "is_recording": False,
+                "base": {
+                    "enabled": True,
+                    "receiver_alive": True,
+                    "odom_topic": "rt/agv/odom",
+                    "height_topic": "rt/hispeed_state",
+                },
+            },
+            updated_mono=123.0,
+        )
+
+        self.assertEqual(
+            payload["recording"]["base"],
+            {
+                "enabled": True,
+                "receiver_alive": True,
+                "odom_topic": "rt/agv/odom",
+                "height_topic": "rt/hispeed_state",
+            },
+        )
+
     def test_build_runtime_camera_status_reads_latest_meta_without_owning_camera(self):
         class Source:
             def __init__(self, meta):

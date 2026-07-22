@@ -33,6 +33,30 @@ def nearest_timed_sample(buffer: deque, target_ns: int, max_delta_ns: int | None
     return result
 
 
+def hold_last_timed_sample(
+    buffer: deque,
+    target_ns: int,
+    max_age_ns: int | None = None,
+    min_timestamp_ns: int | None = None,
+):
+    target_ns = int(target_ns)
+    for entry in reversed(buffer):
+        t_ns = int(entry["t_ns"])
+        if min_timestamp_ns is not None and t_ns < int(min_timestamp_ns):
+            continue
+        if t_ns > target_ns:
+            continue
+        age_ns = target_ns - t_ns
+        if max_age_ns is not None and age_ns > int(max_age_ns):
+            return None
+        result = dict(entry)
+        result["delta_to_target_ns"] = int(t_ns - target_ns)
+        result["target_monotonic_ns"] = target_ns
+        result["interpolation_mode"] = "hold_last"
+        return result
+    return None
+
+
 def interpolate_timed_sample(
     buffer: deque,
     target_ns: int,

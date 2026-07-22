@@ -110,6 +110,34 @@ def _build_offline_tele_data(
 
 
 @dataclass
+class BaseCommandIntent:
+    vx: float = 0.0
+    vy: float = 0.0
+    wz: float = 0.0
+    z: float = 0.0
+    source: str = "none"
+    frame_index: int = -1
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        values = [self.vx, self.vy, self.wz, self.z]
+        if not all(np.isfinite(float(value)) for value in values):
+            raise ValueError(f"base command intent contains non-finite values: {values}")
+        self.vx = float(self.vx)
+        self.vy = float(self.vy)
+        self.wz = float(self.wz)
+        self.z = float(self.z)
+        self.source = str(self.source)
+        self.frame_index = int(self.frame_index)
+        if self.metadata is None:
+            self.metadata = {}
+        elif isinstance(self.metadata, Mapping):
+            self.metadata = dict(self.metadata)
+        else:
+            raise TypeError("base command metadata must be a mapping or None")
+
+
+@dataclass
 class MotionIntent:
     kind: str
     left_wrist_pose: np.ndarray | None = None
@@ -162,6 +190,15 @@ class TeleopInputSample:
     tele_data: TeleData
     motion_intent: MotionIntent
     done: bool = False
+    base_intent: BaseCommandIntent | None = None
+
+    def __post_init__(self) -> None:
+        if self.base_intent is None or isinstance(self.base_intent, BaseCommandIntent):
+            return
+        if isinstance(self.base_intent, Mapping):
+            self.base_intent = BaseCommandIntent(**dict(self.base_intent))
+            return
+        raise TypeError("base_intent must be BaseCommandIntent, mapping, or None")
 
 
 class BaseTeleopInputProvider:

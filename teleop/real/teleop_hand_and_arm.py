@@ -45,7 +45,7 @@ from teleop.real.setup import (
     switch_recording_root,
 )
 from teleop.runtime.operator_runtime import OperatorRuntime
-from teleop.control_flow.base_command import apply_base_command
+from teleop.control_flow.base_command import apply_base_command, stop_base_command
 from teleop.control_flow.arm_command_pipeline import build_arm_command
 from teleop.control_flow.operator_state import OperatorStateFlow, rebase_xr_takeover_after_provider_switch
 from teleop.control_flow.end_effector_command import (
@@ -240,6 +240,8 @@ def cleanup_real_teleop_resources(
     recorder,
     validation_manager,
     sim_state_subscriber,
+    base_state_receiver,
+    loco_wrapper,
     agv_bridge,
     cameras,
     ui_server,
@@ -248,6 +250,12 @@ def cleanup_real_teleop_resources(
 ):
     if ui_server is not None:
         ui_server.stop()
+
+    stop_base_command(
+        args=args,
+        loco_wrapper=loco_wrapper,
+        agv_bridge=agv_bridge,
+    )
 
     try:
         if arm_ctrl is not None:
@@ -276,11 +284,8 @@ def cleanup_real_teleop_resources(
     except Exception as e:
         logger_mp.error(f"Failed to close teleop input provider: {e}")
 
-    try:
-        if agv_bridge is not None:
-            agv_bridge.close()
-    except Exception as e:
-        logger_mp.error(f"Failed to close G1D AGV bridge: {e}")
+    if agv_bridge is not None:
+        agv_bridge.close()
 
     try:
         if not args.motion:
@@ -295,6 +300,9 @@ def cleanup_real_teleop_resources(
             sim_state_subscriber.stop_subscribe()
     except Exception as e:
         logger_mp.error(f"Failed to stop sim state subscriber: {e}")
+
+    if base_state_receiver is not None:
+        base_state_receiver.close()
 
     for camera in cameras:
         try:
@@ -324,6 +332,7 @@ if __name__ == '__main__':
     recorder = None
     recording_flow = None
     sim_state_subscriber = None
+    base_state_receiver = None
     agv_bridge = None
     ui_command_bus = None
     ui_state_store = None
@@ -353,11 +362,11 @@ if __name__ == '__main__':
     timing_debugger = TimingDebugger(enabled=args.timing_debug, interval_sec=args.timing_debug_interval)
     state_history_size = max(32, int(args.frequency * 6))
     action_history_size = max(32, int(args.frequency * 6))
+    base_history_size = max(32, int(getattr(args, "base_history_size", 512)))
     state_history = deque(maxlen=state_history_size)
     action_history = deque(maxlen=action_history_size)
+    base_action_history = deque(maxlen=base_history_size)
     control_dt = 1.0 / max(args.frequency, 1e-6)
-    if args.base_controller == "g1d_agv" and args.motion:
-        raise ValueError("Do not combine --base-controller g1d_agv with --motion. G1D AGV base control should run with the arms kept in debug mode.")
     if args.input_provider == "lerobot_offline":
         validate_lerobot_offline_episode(
             args.offline_replay_dataset_root,
@@ -408,9 +417,23 @@ if __name__ == '__main__':
         gripper_ctrl = components.ee.gripper_ctrl
         loco_wrapper = components.loco_wrapper
         agv_bridge = components.agv_bridge
+        base_stop_state = {"latched": True}
+
+        def stop_base_once(reason: str) -> None:
+            if base_stop_state["latched"]:
+                return
+            stop_base_command(
+                args=args,
+                loco_wrapper=loco_wrapper,
+                agv_bridge=agv_bridge,
+            )
+            base_stop_state["latched"] = True
+            logger_mp.info("[BASE_CTRL] stopped: %s", reason)
+
         recorder = components.recorder
         recording_flow = components.recording_flow
         sim_state_subscriber = components.sim_state_subscriber
+        base_state_receiver = components.base_state_receiver
         latency_tracker = components.latency_tracker
         if args.ui:
             ui_command_bus = UiCommandBus()
@@ -424,6 +447,7 @@ if __name__ == '__main__':
                     ready=READY,
                     stopping=STOP,
                     provider_status=provider_runtime.status(),
+                    base_state_receiver=base_state_receiver,
                 )
             )
             ui_server = TeleopUiServer(
@@ -501,6 +525,7 @@ if __name__ == '__main__':
                         ready=READY,
                         stopping=STOP,
                         provider_status=provider_runtime.status(),
+                        base_state_receiver=base_state_receiver,
                     )
                 )
             time.sleep(0.033)
@@ -566,6 +591,7 @@ if __name__ == '__main__':
                         if not printed_wait_live:
                             logger_mp.info("[HEAD_REF] waiting for live headset/controller pose before calibration...")
                             printed_wait_live = True
+                        stop_base_once("calibration_wait")
                         arm_ctrl.ctrl_dual_arm(calibration_hold_q.copy(), calibration_hold_tauff.copy())
                         time.sleep(0.01)
                         continue
@@ -581,6 +607,7 @@ if __name__ == '__main__':
                     current_hold_q = calibration_hold_q.copy()
                     current_hold_tauff = calibration_hold_tauff.copy()
                 else:
+                    stop_base_once("calibration_wait")
                     arm_ctrl.ctrl_dual_arm(calibration_hold_q.copy(), calibration_hold_tauff.copy())
                     time.sleep(0.01)
                     continue
@@ -640,6 +667,7 @@ if __name__ == '__main__':
                         ready=READY,
                         stopping=STOP,
                         provider_status=provider_runtime.status(),
+                        base_state_receiver=base_state_receiver,
                     )
                 )
             current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, current_lr_arm_q)
@@ -654,6 +682,7 @@ if __name__ == '__main__':
                     home_return_active = False
                     post_home_takeover_armed = False
                     was_online_inference = provider_runtime.active_provider_kind == ActiveProviderKind.ONLINE_INFERENCE
+                    stop_base_once("ui_hold")
                     provider_runtime.set_hold(reason=str(payload.get("reason", "ui_hold")))
                     if was_online_inference:
                         set_online_inference_gripper_mode(gripper_ctrl, False)
@@ -671,6 +700,7 @@ if __name__ == '__main__':
                 elif command.name == UiCommandName.SET_PROVIDER_XR:
                     home_return_active = False
                     post_home_takeover_armed = False
+                    stop_base_once("ui_xr")
                     provider_runtime.set_live(reason=str(payload.get("reason", "ui_xr")))
                     set_online_inference_gripper_mode(gripper_ctrl, False)
                     rebase_xr_takeover_after_provider_switch(
@@ -686,13 +716,40 @@ if __name__ == '__main__':
                     logger_mp.info("[UI_PROVIDER] switched to XR live.")
                 elif command.name == UiCommandName.START_RAW_REPLAY:
                     if recording_is_active_or_armed(RECORD_RUNNING, recording_flow):
+                        stop_base_once("raw_replay_rejected_recording")
                         provider_runtime.fail_raw_replay("recording is active or armed; stop/cancel recording before real replay")
                         logger_mp.error("[UI_REPLAY] rejected: recording is active or armed.")
                     else:
+                        replay_base_source = str(payload.get("base_source", "none") or "none")
+                        if replay_base_source not in {"none", "action"}:
+                            stop_base_once("raw_replay_rejected_base_source")
+                            provider_runtime.fail_raw_replay(
+                                f"unsupported UI raw replay base_source: {replay_base_source}"
+                            )
+                            logger_mp.error("[UI_REPLAY] rejected: unsupported base_source=%s", replay_base_source)
+                            continue
+                        if replay_base_source == "action" and not args.base_motion:
+                            stop_base_once("raw_replay_rejected_base_motion")
+                            provider_runtime.fail_raw_replay(
+                                "base_source=action requires restarting with --base-motion"
+                            )
+                            logger_mp.error("[UI_REPLAY] rejected: base_source=action requires --base-motion.")
+                            continue
+                        if replay_base_source == "action" and str(args.base_controller) != "g1d_agv":
+                            stop_base_once("raw_replay_rejected_base_controller")
+                            provider_runtime.fail_raw_replay(
+                                "base_source=action requires restarting with --base-controller g1d_agv"
+                            )
+                            logger_mp.error(
+                                "[UI_REPLAY] rejected: base_source=action requires base_controller=g1d_agv, got %s.",
+                                args.base_controller,
+                            )
+                            continue
                         current_hold_q = current_lr_arm_q.copy()
                         current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
                         home_return_active = False
                         post_home_takeover_armed = False
+                        stop_base_once("raw_replay_start")
                         if provider_runtime.active_provider_kind != ActiveProviderKind.HOLD:
                             provider_runtime.set_hold(reason="raw_replay_start_sync_hold")
                             set_online_inference_gripper_mode(gripper_ctrl, False)
@@ -701,6 +758,7 @@ if __name__ == '__main__':
                             episode_index=int(payload.get("episode_index", -1)),
                             episode_name=str(payload.get("episode_name", "")),
                             arm_source=str(payload.get("arm_source", "action")),
+                            base_source=replay_base_source,
                             speed_scale=float(payload.get("speed_scale", 1.0)),
                         )
                         operator_state_flow = OperatorStateFlow(
@@ -708,10 +766,11 @@ if __name__ == '__main__':
                             log=logger_mp,
                         )
                         logger_mp.info(
-                            "[UI_REPLAY] started raw replay: root=%s episode=%s arm_source=%s speed_scale=%.3f",
+                            "[UI_REPLAY] started raw replay: root=%s episode=%s arm_source=%s base_source=%s speed_scale=%.3f",
                             payload.get("dataset_root", ""),
                             payload.get("episode_name", ""),
                             payload.get("arm_source", "action"),
+                            replay_base_source,
                             float(payload.get("speed_scale", 1.0)),
                         )
                 elif command.name == UiCommandName.STOP_RAW_REPLAY:
@@ -719,20 +778,24 @@ if __name__ == '__main__':
                     current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
                     home_return_active = False
                     post_home_takeover_armed = False
+                    stop_base_once("raw_replay_stop")
                     provider_runtime.stop_raw_replay(reason=str(payload.get("reason", "ui_stop")))
                     logger_mp.info("[UI_REPLAY] stopped raw replay -> HOLD.")
                 elif command.name == UiCommandName.START_ONLINE_INFERENCE:
                     if recording_is_active_or_armed(RECORD_RUNNING, recording_flow):
+                        stop_base_once("online_inference_rejected_recording")
                         provider_runtime.fail_online_inference(
                             "recording is active or armed; stop/cancel recording before starting online inference"
                         )
                         logger_mp.error("[UI_INFERENCE] rejected: recording is active or armed.")
                     elif provider_runtime.active_provider_kind == ActiveProviderKind.RAW_REPLAY:
+                        stop_base_once("online_inference_rejected_raw_replay")
                         provider_runtime.fail_online_inference("raw replay is active; stop replay before starting online inference")
                         logger_mp.error("[UI_INFERENCE] rejected: raw replay is active.")
                     else:
                         missing_cameras = missing_online_inference_camera_names(components.cameras)
                         if missing_cameras:
+                            stop_base_once("online_inference_rejected_missing_cameras")
                             provider_runtime.fail_online_inference(
                                 "missing required online inference cameras: " + ", ".join(missing_cameras)
                             )
@@ -742,6 +805,7 @@ if __name__ == '__main__':
                             current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
                             home_return_active = False
                             post_home_takeover_armed = False
+                            stop_base_once("online_inference_start")
                             if provider_runtime.active_provider_kind != ActiveProviderKind.HOLD:
                                 provider_runtime.set_hold(reason="online_inference_start_sync_hold")
                             provider_runtime.start_online_inference(prompt=str(payload.get("prompt", "")))
@@ -754,11 +818,13 @@ if __name__ == '__main__':
                     current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
                     home_return_active = False
                     post_home_takeover_armed = False
+                    stop_base_once("online_inference_stop")
                     provider_runtime.stop_online_inference(reason=str(payload.get("reason", "ui_stop")))
                     set_online_inference_gripper_mode(gripper_ctrl, False)
                     logger_mp.info("[UI_INFERENCE] stopped -> HOLD.")
 
             if provider_runtime.active_provider_kind == ActiveProviderKind.HOLD:
+                stop_base_once("provider_hold")
                 arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
                 current_time = time.time()
                 time_elapsed = current_time - start_time
@@ -770,6 +836,11 @@ if __name__ == '__main__':
             active_input_provider = provider_runtime.active_input_provider_name()
             is_ui_raw_replay = provider_runtime.active_provider_kind == ActiveProviderKind.RAW_REPLAY
             is_ui_online_inference = provider_runtime.active_provider_kind == ActiveProviderKind.ONLINE_INFERENCE
+            raw_replay_base_source = "none"
+            if is_ui_raw_replay:
+                raw_replay_base_source = str(
+                    (provider_runtime.status().get("real_replay") or {}).get("base_source", "none") or "none"
+                )
 
             # get active provider tele data
             tele_fetch_start = time.perf_counter()
@@ -794,6 +865,7 @@ if __name__ == '__main__':
             if is_ui_online_inference and ui_command_bus is not None and ui_command_bus.online_inference_stop_requested():
                 current_hold_q = current_lr_arm_q.copy()
                 current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
+                stop_base_once("online_inference_stop_pending")
                 provider_runtime.stop_online_inference(reason="ui_stop_pending_after_inference_fetch")
                 set_online_inference_gripper_mode(gripper_ctrl, False)
                 arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
@@ -802,9 +874,11 @@ if __name__ == '__main__':
             if sample is None:
                 if is_ui_raw_replay:
                     if bool(getattr(active_provider, "stop_interrupted", False)):
+                        stop_base_once("raw_replay_stop_interrupted")
                         provider_runtime.stop_raw_replay(reason="ui_stop_interrupt")
                         logger_mp.info("[UI_REPLAY] stop request interrupted raw replay frame wait -> HOLD.")
                     else:
+                        stop_base_once("raw_replay_finished")
                         provider_runtime.finish_raw_replay(reason="provider_done")
                     current_hold_q = current_lr_arm_q.copy()
                     current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
@@ -824,6 +898,7 @@ if __name__ == '__main__':
                         )
                     START = False
                     STOP = True
+                    stop_base_once("offline_replay_finished")
                     continue
                 timing_debugger.maybe_report(arm_ctrl=arm_ctrl, gripper_ctrl=gripper_ctrl)
                 time.sleep(0.01)
@@ -853,6 +928,7 @@ if __name__ == '__main__':
                     metadata.get("online_inference_status"),
                     metadata.get("error"),
                 )
+                stop_base_once("online_inference_failed")
                 provider_runtime.fail_online_inference(str(metadata.get("error", "online inference provider failed")))
                 set_online_inference_gripper_mode(gripper_ctrl, False)
                 current_hold_q = current_lr_arm_q.copy()
@@ -928,7 +1004,12 @@ if __name__ == '__main__':
                 loco_wrapper=loco_wrapper,
                 agv_bridge=agv_bridge,
                 timing_debugger=timing_debugger,
+                base_intent=getattr(sample, "base_intent", None),
+                base_provider_active=active_input_provider in {"lerobot_offline", "online_inference"},
+                base_stop_latched=base_stop_state["latched"],
+                base_command_source="provider" if raw_replay_base_source == "action" else None,
             )
+            base_stop_state["latched"] = base_result.base_stop_latched
             base_control_mode = base_result.base_control_mode
             base_control_ms = base_result.base_control_ms
             base_move_ms = base_result.base_move_ms
@@ -943,7 +1024,20 @@ if __name__ == '__main__':
             base_vy = base_result.base_vy
             base_wz = base_result.base_wz
             base_z = base_result.base_z
+            if args.record_base:
+                base_action_source = "g1d_agv_bridge" if base_control_mode == "g1d_agv_async" else base_control_mode
+                append_timed_sample(
+                    base_action_history,
+                    int(time.monotonic_ns()),
+                    vx_cmd=float(base_vx),
+                    vy_cmd=float(base_vy),
+                    wz_cmd=float(base_wz),
+                    z_cmd=float(base_z),
+                    source=base_action_source,
+                    base_control_mode=base_control_mode,
+                )
             if base_result.stop_requested:
+                stop_base_once("controller_stop")
                 START = False
                 STOP = True
             if base_result.should_continue_frame:
@@ -1150,6 +1244,7 @@ if __name__ == '__main__':
             if is_ui_raw_replay and bool(getattr(sample, "done", False)):
                 current_hold_q = sol_q.copy()
                 current_hold_tauff = sol_tauff.copy()
+                stop_base_once("raw_replay_final_frame")
                 provider_runtime.finish_raw_replay(reason="sample_done")
                 logger_mp.info("[UI_REPLAY] raw replay reached final frame -> HOLD.")
             if home_return_active and np.all(np.abs(sol_q - home_target_q) < 0.05):
@@ -1160,6 +1255,14 @@ if __name__ == '__main__':
 
             # record data
             if recording_flow is not None:
+                base_state_history_snapshot = None
+                base_height_history_snapshot = None
+                if args.record_base:
+                    if base_state_receiver is None:
+                        raise RuntimeError("--record-base is enabled but base_state_receiver is not initialized")
+                    if not base_state_receiver.is_alive():
+                        raise RuntimeError("--record-base receiver thread is not alive")
+                    base_state_history_snapshot, base_height_history_snapshot = base_state_receiver.snapshot_histories()
                 frame_recording = recording_flow.process_frame(
                     record_running=RECORD_RUNNING,
                     camera_sources=camera_sources,
@@ -1169,6 +1272,9 @@ if __name__ == '__main__':
                     arm_ik=arm_ik,
                     get_wrist_poses=get_robot_wrist_poses,
                     sim_state_subscriber=sim_state_subscriber,
+                    base_state_history=base_state_history_snapshot,
+                    base_height_history=base_height_history_snapshot,
+                    base_action_history=base_action_history if args.record_base else None,
                 )
                 RECORD_RUNNING = frame_recording.record_running
                 READY = frame_recording.ready
@@ -1189,6 +1295,7 @@ if __name__ == '__main__':
                             ready=READY,
                             stopping=STOP,
                             provider_status=provider_runtime.status(),
+                            base_state_receiver=base_state_receiver,
                         )
                     )
                 if frame_recording.should_continue_frame:
@@ -1216,6 +1323,8 @@ if __name__ == '__main__':
             recorder=recorder or components.recorder,
             validation_manager=components.validation_manager,
             sim_state_subscriber=sim_state_subscriber or components.sim_state_subscriber,
+            base_state_receiver=base_state_receiver or components.base_state_receiver,
+            loco_wrapper=loco_wrapper or components.loco_wrapper,
             agv_bridge=agv_bridge or components.agv_bridge,
             cameras=components.cameras.close_list(),
             ui_server=ui_server,

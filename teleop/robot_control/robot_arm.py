@@ -433,21 +433,49 @@ class G1_29_ArmController:
         logger_mp.info("[G1_29_ArmController] ctrl_dual_arm_go_home start...")
         max_attempts = 100
         current_attempts = 0
+        home_target_q = np.zeros(14)
+        start_q = self.get_current_dual_arm_q().copy()
         with self.ctrl_lock:
-            self.q_target = np.zeros(14)
+            self.q_target = home_target_q.copy()
             # self.tauff_target = np.zeros(14)
         tolerance = 0.05  # Tolerance threshold for joint angles to determine "close to zero", can be adjusted based on your motor's precision requirements
+        logger_mp.info(
+            "[HOME] start_q=%s target_q=%s max_abs_error=%.6f tolerance=%.6f",
+            np.array2string(start_q, precision=4),
+            np.array2string(home_target_q, precision=4),
+            float(np.max(np.abs(start_q - home_target_q))),
+            tolerance,
+        )
         while current_attempts < max_attempts:
             current_q = self.get_current_dual_arm_q()
-            if np.all(np.abs(current_q) < tolerance):
+            max_abs_error = float(np.max(np.abs(current_q - home_target_q)))
+            if max_abs_error < tolerance:
                 if self.motion_mode:
                     for weight in np.linspace(1, 0, num=101):
                         self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = weight;
                         time.sleep(0.02)
                 logger_mp.info("[G1_29_ArmController] both arms have reached the home position.")
-                break
+                return
             current_attempts += 1
+            if current_attempts % 20 == 0:
+                logger_mp.info(
+                    "[HOME] progress attempt=%d/%d q=%s max_abs_error=%.6f",
+                    current_attempts,
+                    max_attempts,
+                    np.array2string(current_q, precision=4),
+                    max_abs_error,
+                )
             time.sleep(0.05)
+        final_q = self.get_current_dual_arm_q().copy()
+        logger_mp.error(
+            "[HOME] timeout: start_q=%s final_q=%s target_q=%s max_abs_error=%.6f tolerance=%.6f attempts=%d",
+            np.array2string(start_q, precision=4),
+            np.array2string(final_q, precision=4),
+            np.array2string(home_target_q, precision=4),
+            float(np.max(np.abs(final_q - home_target_q))),
+            tolerance,
+            max_attempts,
+        )
 
     def speed_gradual_max(self, t = 5.0):
         '''Parameter t is the total time required for arms velocity to gradually increase to its maximum value, in seconds. The default is 5.0.'''

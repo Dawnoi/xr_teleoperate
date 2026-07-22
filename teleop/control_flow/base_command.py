@@ -7,7 +7,10 @@ return the flags/metrics that the main loop needs to apply global state changes.
 
 from dataclasses import dataclass
 from typing import Any, Optional
+import math
 import time
+
+from core.input.base import BaseCommandIntent
 
 
 @dataclass
@@ -28,10 +31,108 @@ class BaseCommandResult:
     base_z: float = 0.0
     stop_requested: bool = False
     should_continue_frame: bool = False
+    base_stop_latched: bool = False
 
 
 def _apply_deadzone(value: float, deadzone: float) -> float:
     return 0.0 if abs(value) < deadzone else value
+
+
+def stop_base_command(*, args: Any, loco_wrapper: Any = None, agv_bridge: Any = None) -> None:
+    if not args.base_motion:
+        return
+    controller = str(getattr(args, "base_controller", "none") or "none")
+    if controller == "none":
+        return
+    if controller == "loco":
+        if loco_wrapper is None:
+            raise RuntimeError("loco_wrapper is required for --base-controller loco")
+        loco_wrapper.Move(0.0, 0.0, 0.0)
+        return
+    if controller == "g1d_agv":
+        if agv_bridge is None:
+            raise RuntimeError("agv_bridge is required for --base-controller g1d_agv")
+        agv_bridge.stop_sync()
+        return
+    raise ValueError(f"unsupported base_controller: {controller}")
+
+
+def _validate_provider_base_intent(
+    *,
+    args: Any,
+    intent: BaseCommandIntent,
+    loco_wrapper: Any,
+    agv_bridge: Any,
+) -> None:
+    limits = (
+        ("vx", "base_max_vx"),
+        ("vy", "base_max_vy"),
+        ("wz", "base_max_wz"),
+        ("z", "base_max_z"),
+    )
+    for axis, limit_name in limits:
+        limit = float(getattr(args, limit_name))
+        if not math.isfinite(limit) or limit <= 0.0:
+            stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            raise ValueError(f"{limit_name} must be positive and finite, got {limit!r}")
+        value = float(getattr(intent, axis))
+        if abs(value) > limit:
+            stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            raise ValueError(
+                f"provider base command {axis}={value:.6g} exceeds {limit_name} "
+                f"(--base-max-{axis})={limit:.6g}"
+            )
+
+
+def _controller_base_intent(args: Any, tele_data: Any, *, home_return_active: bool) -> BaseCommandIntent:
+    if home_return_active:
+        return BaseCommandIntent(source="controller")
+
+    left_stick_x = _apply_deadzone(float(tele_data.left_ctrl_thumbstickValue[0]), args.base_stick_deadzone)
+    left_stick_y = _apply_deadzone(float(tele_data.left_ctrl_thumbstickValue[1]), args.base_stick_deadzone)
+    right_stick_x = _apply_deadzone(float(tele_data.right_ctrl_thumbstickValue[0]), args.base_stick_deadzone)
+    right_stick_y = _apply_deadzone(float(tele_data.right_ctrl_thumbstickValue[1]), args.base_stick_deadzone)
+
+    if args.base_controller == "loco":
+        return BaseCommandIntent(
+            vx=-left_stick_y * args.base_max_vx,
+            vy=-left_stick_x * args.base_max_vy,
+            wz=-right_stick_x * args.base_max_wz,
+            z=0.0,
+            source="controller:loco",
+        )
+    if args.base_controller == "g1d_agv":
+        return BaseCommandIntent(
+            vx=left_stick_y * args.base_max_vx,
+            vy=0.0,
+            wz=-left_stick_x * args.base_max_wz,
+            z=right_stick_y * args.base_max_z,
+            source="controller:g1d_agv",
+        )
+    return BaseCommandIntent(source="controller:none")
+
+
+def _base_intent_for_source(
+    *,
+    args: Any,
+    source: str,
+    tele_data: Any,
+    home_return_active: bool,
+    base_intent: BaseCommandIntent | None,
+) -> BaseCommandIntent | None:
+    if str(getattr(args, "base_controller", "none")) == "none" or source == "none":
+        return None
+    if source == "controller":
+        if str(getattr(args, "input_mode", "hand")) != "controller":
+            return None
+        return _controller_base_intent(args, tele_data, home_return_active=home_return_active)
+    if source == "provider":
+        if home_return_active:
+            return BaseCommandIntent(source="provider:home_return")
+        if base_intent is None:
+            raise RuntimeError("base_command_source=provider requires sample.base_intent")
+        return base_intent
+    raise ValueError(f"unsupported base_command_source: {source}")
 
 
 def apply_base_command(
@@ -42,6 +143,10 @@ def apply_base_command(
     loco_wrapper: Any = None,
     agv_bridge: Any = None,
     timing_debugger: Any = None,
+    base_intent: BaseCommandIntent | None = None,
+    base_provider_active: bool = True,
+    base_stop_latched: bool = False,
+    base_command_source: str | None = None,
 ) -> BaseCommandResult:
     """Apply one frame of base control and return main-loop state/metrics.
 
@@ -52,17 +157,46 @@ def apply_base_command(
 
     base_control_start = time.perf_counter()
     result = BaseCommandResult()
+    controller = str(getattr(args, "base_controller", "none") or "none")
+    source = str(base_command_source or getattr(args, "base_command_source", "controller") or "controller")
 
-    if args.input_mode == "controller" and args.motion:
-        result.base_control_mode = "loco"
-        if tele_data.right_ctrl_aButton:
-            result.stop_requested = True
+    if tele_data.right_ctrl_aButton:
+        result.stop_requested = True
 
+    if not args.base_motion:
+        result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
+        result.base_misc_ms = result.base_control_ms
+        return result
+
+    if source == "provider" and not bool(base_provider_active):
+        if not base_stop_latched:
+            stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+        result.base_control_mode = "provider_inactive"
+        result.base_stop_latched = True
+        result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
+        result.base_misc_ms = result.base_control_ms
+        return result
+
+    if (
+        source == "provider"
+        and controller != "none"
+        and not home_return_active
+        and base_intent is None
+    ):
+        stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+        raise RuntimeError("base_command_source=provider requires sample.base_intent")
+
+    if (
+        controller == "loco"
+        and source == "controller"
+        and str(getattr(args, "input_mode", "hand")) == "controller"
+    ):
         if tele_data.left_ctrl_thumbstick and tele_data.right_ctrl_thumbstick:
             if loco_wrapper is None:
-                raise RuntimeError("loco_wrapper is required for --motion base control")
+                raise RuntimeError("loco_wrapper is required for --base-controller loco")
             loco_wrapper.Damp()
             time.sleep(0.05)
+            result.base_control_mode = "loco"
             result.should_continue_frame = True
             result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
             result.base_misc_ms = max(
@@ -71,88 +205,61 @@ def apply_base_command(
             )
             return result
 
-        left_stick_x = float(tele_data.left_ctrl_thumbstickValue[0])
-        left_stick_y = float(tele_data.left_ctrl_thumbstickValue[1])
-        right_stick_x = float(tele_data.right_ctrl_thumbstickValue[0])
+    intent = _base_intent_for_source(
+        args=args,
+        source=source,
+        tele_data=tele_data,
+        home_return_active=home_return_active,
+        base_intent=base_intent,
+    )
+    if source == "provider" and intent is not None:
+        _validate_provider_base_intent(
+            args=args,
+            intent=intent,
+            loco_wrapper=loco_wrapper,
+            agv_bridge=agv_bridge,
+        )
+    if intent is not None:
+        result.base_vx = float(intent.vx)
+        result.base_vy = float(intent.vy)
+        result.base_wz = float(intent.wz)
+        result.base_z = float(intent.z)
 
-        if home_return_active:
-            result.base_vx = 0.0
-            result.base_vy = 0.0
-            result.base_wz = 0.0
-        else:
-            left_stick_x = _apply_deadzone(left_stick_x, args.base_stick_deadzone)
-            left_stick_y = _apply_deadzone(left_stick_y, args.base_stick_deadzone)
-            right_stick_x = _apply_deadzone(right_stick_x, args.base_stick_deadzone)
-
-            # Match Unitree loco semantics:
-            #   left stick  -> body-frame x/y velocity
-            #   right stick -> body-frame angular z velocity
-            result.base_vx = -left_stick_y * args.base_max_vx
-            result.base_vy = -left_stick_x * args.base_max_vy
-            result.base_wz = -right_stick_x * args.base_max_wz
-
+    if controller == "none" or intent is None:
+        result.base_control_mode = "none"
+    elif controller == "loco":
+        result.base_control_mode = "loco"
         if loco_wrapper is None:
-            raise RuntimeError("loco_wrapper is required for --motion base control")
+            raise RuntimeError("loco_wrapper is required for --base-controller loco")
         base_move_start = time.perf_counter()
         loco_wrapper.Move(result.base_vx, result.base_vy, result.base_wz)
         result.base_move_ms = (time.perf_counter() - base_move_start) * 1000.0
-
-    elif args.input_mode == "controller" and args.base_controller == "g1d_agv":
+    elif controller == "g1d_agv":
         result.base_control_mode = "g1d_agv_async"
-        if tele_data.right_ctrl_aButton:
-            result.stop_requested = True
-
-        left_stick_x = float(tele_data.left_ctrl_thumbstickValue[0])
-        left_stick_y = float(tele_data.left_ctrl_thumbstickValue[1])
-        right_stick_x = float(tele_data.right_ctrl_thumbstickValue[0])
-        right_stick_y = float(tele_data.right_ctrl_thumbstickValue[1])
-
-        left_stick_x = _apply_deadzone(left_stick_x, args.base_stick_deadzone)
-        left_stick_y = _apply_deadzone(left_stick_y, args.base_stick_deadzone)
-        right_stick_x = _apply_deadzone(right_stick_x, args.base_stick_deadzone)
-        right_stick_y = _apply_deadzone(right_stick_y, args.base_stick_deadzone)
-
-        if home_return_active:
-            result.base_vx = 0.0
-            result.base_vy = 0.0
-            result.base_wz = 0.0
-            result.base_z = 0.0
-        else:
-            # Backported from the official unitree_sdk2 G1D example path:
-            #   AgvClient.Move(vx, vy, vyaw)
-            #   AgvClient.HeightAdjust(vz)
-            # Note: the official G1D AGV header comments that vy is currently
-            # ignored by the AGV side. For practical teleop on G1D, we therefore
-            # map left stick X to yaw so it behaves like the official remote:
-            #   left stick up/down -> forward/backward
-            #   left stick left/right -> in-place turn
-            #   right stick up/down -> column height adjust
-            result.base_vx = left_stick_y * args.base_max_vx
-            result.base_vy = 0.0
-            result.base_wz = -left_stick_x * args.base_max_wz
-            result.base_z = right_stick_y * args.base_max_z
-
-        if agv_bridge is not None:
-            agv_send_start = time.perf_counter()
-            base_move_start = time.perf_counter()
-            agv_bridge.set_target(result.base_vx, result.base_vy, result.base_wz, result.base_z)
-            result.base_move_ms = (time.perf_counter() - base_move_start) * 1000.0
-            if timing_debugger is not None:
-                timing_debugger.add_agv(time.perf_counter() - agv_send_start)
-            try:
-                agv_timing_snapshot = agv_bridge.get_timing_snapshot()
-            except Exception:
-                agv_timing_snapshot = None
-            if agv_timing_snapshot is not None:
-                result.base_async_publish_hz = float(agv_timing_snapshot.get("publish_hz", 0.0))
-                move_stats = agv_timing_snapshot.get("move_stats") or {}
-                height_stats = agv_timing_snapshot.get("height_stats") or {}
-                cycle_stats = agv_timing_snapshot.get("cycle_stats") or {}
-                queue_stats = agv_timing_snapshot.get("queue_delay_stats") or {}
-                result.base_async_move_avg_ms = move_stats.get("avg_ms")
-                result.base_async_height_avg_ms = height_stats.get("avg_ms")
-                result.base_async_cycle_avg_ms = cycle_stats.get("avg_ms")
-                result.base_async_queue_avg_ms = queue_stats.get("avg_ms")
+        if agv_bridge is None:
+            raise RuntimeError("agv_bridge is required for --base-controller g1d_agv")
+        agv_send_start = time.perf_counter()
+        base_move_start = time.perf_counter()
+        agv_bridge.set_target(result.base_vx, result.base_vy, result.base_wz, result.base_z)
+        result.base_move_ms = (time.perf_counter() - base_move_start) * 1000.0
+        if timing_debugger is not None:
+            timing_debugger.add_agv(time.perf_counter() - agv_send_start)
+        agv_timing_snapshot = agv_bridge.get_timing_snapshot()
+        last_error = str(agv_timing_snapshot.get("last_error") or "")
+        if last_error:
+            stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            raise RuntimeError(f"G1D AGV bridge publish error: {last_error}")
+        result.base_async_publish_hz = float(agv_timing_snapshot.get("publish_hz", 0.0))
+        move_stats = agv_timing_snapshot.get("move_stats") or {}
+        height_stats = agv_timing_snapshot.get("height_stats") or {}
+        cycle_stats = agv_timing_snapshot.get("cycle_stats") or {}
+        queue_stats = agv_timing_snapshot.get("queue_delay_stats") or {}
+        result.base_async_move_avg_ms = move_stats.get("avg_ms")
+        result.base_async_height_avg_ms = height_stats.get("avg_ms")
+        result.base_async_cycle_avg_ms = cycle_stats.get("avg_ms")
+        result.base_async_queue_avg_ms = queue_stats.get("avg_ms")
+    else:
+        raise ValueError(f"unsupported base_controller: {controller}")
 
     result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
     result.base_misc_ms = max(

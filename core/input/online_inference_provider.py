@@ -10,6 +10,7 @@ from inference.online_session import CameraSample, OnlineInferenceConfig, Online
 from inference.pose_transform import load_pose_transformer
 from inference.transport import HttpJsonInferenceTransport, TcpJsonTransport
 from core.input.base import (
+    BaseCommandIntent,
     BaseTeleopInputProvider,
     MotionIntent,
     TeleopInputSample,
@@ -22,6 +23,43 @@ from core.input.xr_input_types import TeleData
 
 
 logger_mp = logging_mp.getLogger(__name__)
+
+
+def _base_intent_from_online_metadata(metadata: Mapping[str, Any], frame_index: int) -> BaseCommandIntent | None:
+    value = metadata.get("online_base_action")
+    status = str(metadata.get("online_inference_status") or "")
+    if value is None:
+        if status and status != "executing_chunk":
+            return BaseCommandIntent(
+                source=f"online_inference:{status}",
+                frame_index=frame_index,
+                metadata={
+                    "online_inference_status": status,
+                    "online_chunk_index": metadata.get("online_chunk_index"),
+                    "online_chunk_size": metadata.get("online_chunk_size"),
+                    "online_chunk_seq": metadata.get("online_chunk_seq"),
+                },
+            )
+        return None
+    arr = np.asarray(value, dtype=float).reshape(-1)
+    if arr.shape[0] != 4:
+        raise ValueError(f"online_base_action must have length 4, got {arr.shape[0]}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("online_base_action contains NaN or Inf")
+    return BaseCommandIntent(
+        vx=arr[0],
+        vy=arr[1],
+        wz=arr[2],
+        z=arr[3],
+        source="online_inference",
+        frame_index=frame_index,
+        metadata={
+            "online_inference_status": status,
+            "online_chunk_index": metadata.get("online_chunk_index"),
+            "online_chunk_size": metadata.get("online_chunk_size"),
+            "online_chunk_seq": metadata.get("online_chunk_seq"),
+        },
+    )
 
 
 def _http_handshake_payload(protocol_profile: str) -> dict[str, Any]:
@@ -195,9 +233,10 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
             source="online_inference",
             metadata=metadata,
         )
+        base_intent = _base_intent_from_online_metadata(metadata, self._frame_index)
         self._frame_index += 1
         done = step.status == "failed"
-        return TeleopInputSample(tele_data=tele_data, motion_intent=motion_intent, done=done)
+        return TeleopInputSample(tele_data=tele_data, motion_intent=motion_intent, done=done, base_intent=base_intent)
 
     def _coerce_camera_samples(self, kwargs: dict[str, Any]) -> list[CameraSample]:
         explicit_samples = kwargs.get("camera_samples")

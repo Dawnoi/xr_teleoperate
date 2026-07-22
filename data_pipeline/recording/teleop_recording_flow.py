@@ -18,10 +18,12 @@ from data_pipeline.recording.alignment import (
     build_alignment_timestamp_entry,
     camera_frame_identity,
     camera_meta_monotonic_ns,
+    hold_last_timed_sample,
     interpolate_timed_sample_strict,
     nearest_timed_sample,
     timed_buffer_bounds,
 )
+from data_pipeline.recording.base_recording import build_base_action_record, build_base_state_record
 
 
 _CAMERA_NAME_ALIASES = {
@@ -113,6 +115,11 @@ class TeleopRecordingFlow:
         self.action_nearest_fallback_max_delta_ns = self.state_nearest_fallback_max_delta_ns
         self.record_future_wait_timeout_ns = int(max(120_000_000, (2.0 / frequency) * 1e9))
         self.pending_sample_timeout_ns = int(1_000_000_000)
+        self.record_base = bool(getattr(args, "record_base", False))
+        self.base_state_max_delta_ns = int(max(1_000_000, float(getattr(args, "base_state_max_age_ms", 150.0)) * 1e6))
+        self.base_height_max_delta_ns = self.base_state_max_delta_ns
+        self.base_action_max_age_ns = int(max(1_000_000, float(getattr(args, "base_action_max_age_ms", 500.0)) * 1e6))
+        self.base_height_required = bool(str(getattr(args, "base_height_topic", "/hispeed_state") or "").strip())
 
     def handle_commands(
         self,
@@ -181,6 +188,9 @@ class TeleopRecordingFlow:
         arm_ik,
         get_wrist_poses: Callable[[Any, np.ndarray], tuple[np.ndarray, np.ndarray]],
         sim_state_subscriber=None,
+        base_state_history: deque | None = None,
+        base_height_history: deque | None = None,
+        base_action_history: deque | None = None,
     ) -> RecordingFrameResult:
         """Align the current frame to camera time and append items to the recorder."""
         ready = self.recorder.is_ready()
@@ -206,6 +216,9 @@ class TeleopRecordingFlow:
             camera_sources=camera_sources,
             state_history=state_history,
             action_history=action_history,
+            base_state_history=base_state_history,
+            base_height_history=base_height_history,
+            base_action_history=base_action_history,
             record_min_timestamp_ns=record_min_timestamp_ns,
             arm_ik=arm_ik,
             get_wrist_poses=get_wrist_poses,
@@ -349,6 +362,9 @@ class TeleopRecordingFlow:
         camera_sources: dict[str, Any],
         state_history: deque,
         action_history: deque,
+        base_state_history: deque | None,
+        base_height_history: deque | None,
+        base_action_history: deque | None,
         record_min_timestamp_ns: int,
         arm_ik,
         get_wrist_poses: Callable[[Any, np.ndarray], tuple[np.ndarray, np.ndarray]],
@@ -357,9 +373,19 @@ class TeleopRecordingFlow:
         while self.state.pending_samples:
             pending = self.state.pending_samples[0]
             sample_monotonic_ns = int(pending["sample_monotonic_ns"])
-            status, aligned_state, aligned_action = self._resolve_pending_alignment(
+            (
+                status,
+                aligned_state,
+                aligned_action,
+                aligned_base_state,
+                aligned_base_height,
+                aligned_base_action,
+            ) = self._resolve_pending_alignment(
                 state_history=state_history,
                 action_history=action_history,
+                base_state_history=base_state_history,
+                base_height_history=base_height_history,
+                base_action_history=base_action_history,
                 sample_monotonic_ns=sample_monotonic_ns,
                 record_min_timestamp_ns=record_min_timestamp_ns,
             )
@@ -379,6 +405,9 @@ class TeleopRecordingFlow:
                 pending=pending,
                 aligned_state=aligned_state,
                 aligned_action=aligned_action,
+                aligned_base_state=aligned_base_state,
+                aligned_base_height=aligned_base_height,
+                aligned_base_action=aligned_base_action,
                 arm_ik=arm_ik,
                 get_wrist_poses=get_wrist_poses,
             )
@@ -387,6 +416,9 @@ class TeleopRecordingFlow:
                 sample_monotonic_ns=sample_monotonic_ns,
                 aligned_state=aligned_state,
                 aligned_action=aligned_action,
+                aligned_base_state=aligned_base_state,
+                aligned_base_height=aligned_base_height,
+                aligned_base_action=aligned_base_action,
                 colors=colors,
                 depths=depths,
                 states=states,
@@ -403,23 +435,26 @@ class TeleopRecordingFlow:
         *,
         state_history: deque,
         action_history: deque,
+        base_state_history: deque | None,
+        base_height_history: deque | None,
+        base_action_history: deque | None,
         sample_monotonic_ns: int,
         record_min_timestamp_ns: int,
-    ) -> tuple[str, dict | None, dict | None]:
+    ) -> tuple[str, dict | None, dict | None, dict | None, dict | None, dict | None]:
         state_earliest, state_latest = timed_buffer_bounds(state_history, min_timestamp_ns=record_min_timestamp_ns)
         action_earliest, action_latest = timed_buffer_bounds(action_history, min_timestamp_ns=record_min_timestamp_ns)
         sample_age_ns = int(time.monotonic_ns()) - int(sample_monotonic_ns)
 
         if state_earliest is None or action_earliest is None:
-            return "wait", None, None
+            return "wait", None, None, None, None, None
         if sample_monotonic_ns < state_earliest or sample_monotonic_ns < action_earliest:
             self.log.warning("[RECORD_ALIGN] drop pending sample: target timestamp fell out of state/action history window.")
-            return "drop", None, None
+            return "drop", None, None, None, None, None
         if state_latest is None or action_latest is None:
-            return "wait", None, None
+            return "wait", None, None, None, None, None
         if sample_monotonic_ns > state_latest or sample_monotonic_ns > action_latest:
             if sample_age_ns <= self.record_future_wait_timeout_ns:
-                return "wait", None, None
+                return "wait", None, None, None, None, None
 
         aligned_state = self._aligned_sample(
             state_history,
@@ -438,14 +473,84 @@ class TeleopRecordingFlow:
         if aligned_state is None:
             if sample_age_ns > self.pending_sample_timeout_ns:
                 self.log.warning("[RECORD_ALIGN] drop pending sample: no interpolated state found at primary camera timestamp.")
-                return "drop", None, None
-            return "wait", None, None
+                return "drop", None, None, None, None, None
+            return "wait", None, None, None, None, None
         if aligned_action is None:
             if sample_age_ns > self.pending_sample_timeout_ns:
                 self.log.warning("[RECORD_ALIGN] drop pending sample: no interpolated action found at primary camera timestamp.")
-                return "drop", None, None
-            return "wait", None, None
-        return "ready", aligned_state, aligned_action
+                return "drop", None, None, None, None, None
+            return "wait", None, None, None, None, None
+
+        base_status, aligned_base_state, aligned_base_height, aligned_base_action = self._resolve_base_alignment(
+            base_state_history=base_state_history,
+            base_height_history=base_height_history,
+            base_action_history=base_action_history,
+            sample_monotonic_ns=sample_monotonic_ns,
+            record_min_timestamp_ns=record_min_timestamp_ns,
+            sample_age_ns=sample_age_ns,
+        )
+        if base_status != "ready":
+            return base_status, None, None, None, None, None
+        return "ready", aligned_state, aligned_action, aligned_base_state, aligned_base_height, aligned_base_action
+
+    def _resolve_base_alignment(
+        self,
+        *,
+        base_state_history: deque | None,
+        base_height_history: deque | None,
+        base_action_history: deque | None,
+        sample_monotonic_ns: int,
+        record_min_timestamp_ns: int,
+        sample_age_ns: int,
+    ) -> tuple[str, dict | None, dict | None, dict | None]:
+        if not self.record_base:
+            return "ready", None, None, None
+        if base_state_history is None or base_action_history is None:
+            raise RuntimeError("--record-base requires base_state_history and base_action_history")
+        if self.base_height_required and base_height_history is None:
+            raise RuntimeError("--record-base requires base_height_history when --base-height-topic is set")
+
+        aligned_base_state = nearest_timed_sample(
+            base_state_history,
+            sample_monotonic_ns,
+            max_delta_ns=self.base_state_max_delta_ns,
+            min_timestamp_ns=record_min_timestamp_ns,
+        )
+        aligned_base_action = hold_last_timed_sample(
+            base_action_history,
+            sample_monotonic_ns,
+            max_age_ns=self.base_action_max_age_ns,
+            min_timestamp_ns=record_min_timestamp_ns,
+        )
+        aligned_base_height = None
+        if self.base_height_required:
+            aligned_base_height = nearest_timed_sample(
+                base_height_history,
+                sample_monotonic_ns,
+                max_delta_ns=self.base_height_max_delta_ns,
+                min_timestamp_ns=record_min_timestamp_ns,
+            )
+
+        if aligned_base_state is None:
+            if sample_age_ns > self.pending_sample_timeout_ns:
+                self.log.warning("[RECORD_ALIGN] drop pending sample: no aligned base state found at primary camera timestamp.")
+                return "drop", None, None, None
+            return "wait", None, None, None
+        if aligned_base_action is None:
+            if sample_age_ns > self.pending_sample_timeout_ns:
+                self.log.warning("[RECORD_ALIGN] drop pending sample: no aligned base action found at primary camera timestamp.")
+                return "drop", None, None, None
+            return "wait", None, None, None
+        if self.base_height_required and aligned_base_height is None:
+            if sample_age_ns > self.pending_sample_timeout_ns:
+                self.log.warning("[RECORD_ALIGN] drop pending sample: no aligned base height found at primary camera timestamp.")
+                return "drop", None, None, None
+            return "wait", None, None, None
+
+        aligned_base_state["interpolation_mode"] = "nearest"
+        if aligned_base_height is not None:
+            aligned_base_height["interpolation_mode"] = "nearest"
+        return "ready", aligned_base_state, aligned_base_height, aligned_base_action
 
     def _add_record_item(
         self,
@@ -454,6 +559,9 @@ class TeleopRecordingFlow:
         sample_monotonic_ns: int,
         aligned_state: dict,
         aligned_action: dict,
+        aligned_base_state: dict | None,
+        aligned_base_height: dict | None,
+        aligned_base_action: dict | None,
         colors,
         depths,
         states,
@@ -470,6 +578,11 @@ class TeleopRecordingFlow:
             "action": build_alignment_timestamp_entry(aligned_action, sample_monotonic_ns),
             "camera": camera_timestamps,
         }
+        if self.record_base:
+            timestamps["base_state"] = self._alignment_timestamp_with_source(aligned_base_state, sample_monotonic_ns)
+            timestamps["base_action"] = self._alignment_timestamp_with_source(aligned_base_action, sample_monotonic_ns)
+            if aligned_base_height is not None:
+                timestamps["base_height"] = self._alignment_timestamp_with_source(aligned_base_height, sample_monotonic_ns)
         aligned_arm_tauff = np.asarray(aligned_action["tauff"], dtype=float).reshape(-1)
         if aligned_arm_tauff.shape[0] != 14 or not np.all(np.isfinite(aligned_arm_tauff)):
             self.log.warning("[RECORD_ALIGN] drop pending sample: invalid aligned arm tauff for control sidecar.")
@@ -497,6 +610,16 @@ class TeleopRecordingFlow:
                 control_extras=control_extras,
             )
         return True
+
+    def _alignment_timestamp_with_source(self, aligned_entry: dict, sample_monotonic_ns: int):
+        entry = build_alignment_timestamp_entry(aligned_entry, sample_monotonic_ns)
+        source_topic = aligned_entry.get("source_topic")
+        if source_topic:
+            entry["source_topic"] = str(source_topic)
+        source_stamp_ns = aligned_entry.get("source_stamp_ns")
+        if source_stamp_ns is not None:
+            entry["source_stamp_ns"] = int(source_stamp_ns)
+        return entry
 
     def _aligned_sample(self, buffer, target_ns, *, strict_max_delta_ns, fallback_max_delta_ns, min_timestamp_ns):
         aligned = interpolate_timed_sample_strict(
@@ -536,7 +659,18 @@ class TeleopRecordingFlow:
                 camera_timestamps[camera_name] = meta
         return colors, depths, camera_timestamps
 
-    def _build_state_action_payload(self, *, pending, aligned_state, aligned_action, arm_ik, get_wrist_poses):
+    def _build_state_action_payload(
+        self,
+        *,
+        pending,
+        aligned_state,
+        aligned_action,
+        aligned_base_state,
+        aligned_base_height,
+        aligned_base_action,
+        arm_ik,
+        get_wrist_poses,
+    ):
         aligned_lr_arm_q = np.asarray(aligned_state["q"], dtype=float)
         aligned_sol_q = np.asarray(aligned_action["q"], dtype=float)
         left_arm_state = aligned_lr_arm_q[:7]
@@ -590,6 +724,9 @@ class TeleopRecordingFlow:
             "left_ee": {"qpos": pending["left_hand_action"], "qvel": [], "torque": []},
             "right_ee": {"qpos": pending["right_hand_action"], "qvel": [], "torque": []},
         }
+        if self.record_base:
+            states["base"] = build_base_state_record(aligned_base_state, aligned_base_height)
+            actions["base"] = build_base_action_record(aligned_base_action)
         return states, actions
 
 

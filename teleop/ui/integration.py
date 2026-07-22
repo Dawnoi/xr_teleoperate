@@ -37,6 +37,7 @@ def build_runtime_recording_status(
     recorder: Any,
     recording_flow: Any,
     record_running: bool,
+    base_state_receiver: Any | None = None,
 ) -> dict[str, Any]:
     task_root = Path(str(args.task_dir)) / str(args.task_name)
     flow_state = getattr(recording_flow, "state", None)
@@ -56,6 +57,15 @@ def build_runtime_recording_status(
     last_validation = validation_status.get("last_validation", {})
     if validation_pending and not active:
         phase = "validating"
+    base_enabled = bool(getattr(args, "record_base", False))
+    base_status = {
+        "enabled": base_enabled,
+        "receiver_alive": bool(base_state_receiver.is_alive()) if base_state_receiver is not None else False,
+        "odom_topic": str(getattr(args, "base_odom_topic", "") or ""),
+        "height_topic": str(getattr(args, "base_height_topic", "") or ""),
+        "state_max_age_ms": float(getattr(args, "base_state_max_age_ms", 0.0) or 0.0),
+        "action_max_age_ms": float(getattr(args, "base_action_max_age_ms", 0.0) or 0.0),
+    }
     return {
         "is_recording": active,
         "active": active,
@@ -78,6 +88,7 @@ def build_runtime_recording_status(
         "validation_current_episode_dir": validation_status.get("current_episode_dir", ""),
         "validation_queued_episode_dirs": validation_status.get("queued_episode_dirs", []),
         "last_validation": last_validation,
+        "base": base_status,
     }
 
 
@@ -109,6 +120,7 @@ def build_runtime_web_payload(
     ready: bool = False,
     stopping: bool = False,
     provider_status: dict[str, Any] | None = None,
+    base_state_receiver: Any | None = None,
 ) -> dict[str, Any]:
     left_q_fb = None
     right_q_fb = None
@@ -152,6 +164,7 @@ def build_runtime_web_payload(
             recorder=recorder,
             recording_flow=recording_flow,
             record_running=record_running,
+            base_state_receiver=base_state_receiver,
         ),
         active_root_dir=str(Path(str(args.task_dir)) / str(args.task_name)),
         playback_status={"state": "disabled", "error": "playback is not implemented in xr_teleoperate UI"},

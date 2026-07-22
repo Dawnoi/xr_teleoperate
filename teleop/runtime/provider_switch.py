@@ -21,6 +21,7 @@ class RealReplayStatus:
     episode_name: str = ""
     episode_index: int = -1
     arm_source: str = "action"
+    base_source: str = "none"
     speed_scale: float = 1.0
     frame_index: int = -1
     error: str = ""
@@ -34,6 +35,7 @@ class RealReplayStatus:
             "episode_name": self.episode_name,
             "episode_index": self.episode_index,
             "arm_source": self.arm_source,
+            "base_source": self.base_source,
             "speed_scale": self.speed_scale,
             "frame_index": self.frame_index,
             "error": self.error,
@@ -147,6 +149,7 @@ class TeleopProviderRuntime:
         episode_index: int,
         episode_name: str = "",
         arm_source: str = "action",
+        base_source: str = "none",
         speed_scale: float = 1.0,
     ) -> None:
         if self._active_provider_kind != ActiveProviderKind.HOLD:
@@ -154,6 +157,9 @@ class TeleopProviderRuntime:
         source = str(arm_source or "action")
         if source not in {"action", "state", "fk_cmd_pose"}:
             raise ValueError(f"unsupported raw replay arm_source: {source}")
+        base = str(base_source or "none")
+        if base not in {"none", "action"}:
+            raise ValueError(f"unsupported raw replay base_source: {base}")
         scale = float(speed_scale)
         if not math.isfinite(scale) or scale <= 0.0:
             raise ValueError("raw replay speed_scale must be positive and finite")
@@ -164,6 +170,7 @@ class TeleopProviderRuntime:
             dataset_root=root,
             episode_index=index,
             arm_source=source,
+            base_source=base,
             speed_scale=scale,
         )
         self._raw_provider = provider
@@ -176,6 +183,7 @@ class TeleopProviderRuntime:
             episode_name=str(episode_name or f"episode_{index:04d}"),
             episode_index=index,
             arm_source=source,
+            base_source=base,
             speed_scale=scale,
             frame_index=-1,
         )

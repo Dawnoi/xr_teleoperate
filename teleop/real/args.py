@@ -21,17 +21,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--home-return-speed', type=float, default=0.6,
                         help='Dedicated arm joint speed limit in rad/s used only while returning to the ready/home pose via left Y.')
     parser.add_argument('--base-max-vx', type=float, default=0.3,
-                        help='Maximum commanded chassis x velocity in m/s from the left thumbstick Y axis when --motion is enabled.')
+                        help='Maximum commanded chassis x velocity in m/s from the left thumbstick Y axis.')
     parser.add_argument('--base-max-vy', type=float, default=0.3,
-                        help='Maximum commanded chassis y velocity in m/s from the left thumbstick X axis when --motion is enabled.')
+                        help='Maximum commanded chassis y velocity in m/s from the left thumbstick X axis.')
     parser.add_argument('--base-max-wz', type=float, default=0.3,
-                        help='Maximum commanded chassis angular z velocity in rad/s from the right thumbstick X axis when --motion is enabled.')
+                        help='Maximum commanded chassis angular z velocity in rad/s from the right thumbstick X axis.')
     parser.add_argument('--base-max-z', type=float, default=1.0,
                         help='Maximum normalized G1D AGV HeightAdjust command from the right thumbstick Y axis when --base-controller g1d_agv is enabled.')
     parser.add_argument('--base-stick-deadzone', type=float, default=0.08,
                         help='Thumbstick deadzone for chassis motion commands in motion mode.')
-    parser.add_argument('--base-controller', type=str, choices=['none', 'g1d_agv'], default='none',
-                        help='Optional chassis control path. Use g1d_agv for the official G1D AGV API while keeping arm control in debug mode.')
+    parser.add_argument('--base-controller', type=str, choices=['none', 'loco', 'g1d_agv'], default='none',
+                        help='Mobile-base command backend. none disables chassis output, loco uses Unitree loco Move, g1d_agv uses the official G1D AGV bridge.')
+    parser.add_argument('--base-command-source', type=str, choices=['none', 'controller', 'provider'], default='controller',
+                        help='Mobile-base command source. controller uses XR controller sticks, provider uses the active replay/inference provider base action.')
+    parser.add_argument('--base-motion', action='store_true',
+                        help='Permit selected mobile-base backend output without changing the arm DDS command route.')
     parser.add_argument('--head-reference-mode', type=str, choices=['head_coupled', 'fixed_per_grip', 'live_head_reference', 'head_decoupled_live', 'hybrid', 'calibrated', 'live'], default='live_head_reference',
                         help='Controller wrist reference frame. "head_coupled" = fixed once after calibration. "fixed_per_grip" = freeze the current head translation at each grip takeover, release it when grip is released. "live_head_reference" = current head translation is always the live reference. "hybrid" = live when idle, frozen while gripping. Legacy aliases: calibrated=head_coupled, live/head_decoupled_live=live_head_reference semantics.')
     parser.add_argument('--controller-orientation-mode', type=str, choices=['absolute', 'relative', 'neutral'], default='absolute',
@@ -48,6 +52,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='Episode index for offline replay provider.')
     parser.add_argument('--offline-replay-arm-source', type=str, choices=['action', 'state', 'fk_cmd_pose'], default='action',
                         help='Arm source used by offline replay provider.')
+    parser.add_argument('--offline-replay-base-source', type=str, choices=['none', 'action'], default='none',
+                        help='Base source used by raw offline replay provider. action replays actions.base as provider base commands.')
     parser.add_argument('--offline-replay-speed-scale', type=float, default=1.0,
                         help='Playback speed scale for offline replay provider.')
     parser.add_argument('--offline-replay-end-action', type=str, choices=['home', 'hold'], default='home',
@@ -145,7 +151,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--ui-preview-fps', type=float, default=5.0,
                         help='Maximum state publish rate for the optional web UI event stream.')
     # mode flags
-    parser.add_argument('--motion', action = 'store_true', help = 'Enable motion control mode')
+    parser.add_argument('--motion', action='store_true',
+                        help='Use the arm SDK DDS command route (rt/arm_sdk) for real-robot arms.')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
@@ -155,6 +162,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--record', action = 'store_true', help = 'Enable data recording mode')
     parser.add_argument('--record-arm-repr', type=str, choices=['qpos', 'pose', 'both'], default='qpos',
                         help='Recording representation for arm data: joint angles (qpos), wrist pose, or both.')
+    parser.add_argument('--record-base', action='store_true',
+                        help='Record mobile-base pose/velocity/action into raw episode JSON. Requires --record and Unitree DDS access to --base-odom-topic.')
+    parser.add_argument('--base-odom-topic', type=str, default='rt/agv/odom',
+                        help='Unitree DDS odometry topic used for recorded base world pose and velocity.')
+    parser.add_argument('--base-height-topic', type=str, default='rt/hispeed_state',
+                        help='Unitree DDS Point32 topic used for recorded base height. Set empty string to disable height recording.')
+    parser.add_argument('--base-state-max-age-ms', type=float, default=150.0,
+                        help='Maximum allowed base state/height timestamp delta from the camera sample in milliseconds.')
+    parser.add_argument('--base-action-max-age-ms', type=float, default=500.0,
+                        help='Maximum allowed hold-last base command age in milliseconds.')
+    parser.add_argument('--base-history-size', type=int, default=512,
+                        help='Maximum number of base state/action samples retained for timestamp alignment.')
+    parser.add_argument('--base-startup-timeout-sec', type=float, default=3.0,
+                        help='Seconds to wait for initial base odom/height messages when --record-base is enabled.')
     parser.add_argument('--task-dir', type = str, default = './utils/data/', help = 'path to save data')
     parser.add_argument('--task-name', type = str, default = 'pick cube', help = 'task file name for recording')
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
@@ -179,4 +200,16 @@ def parse_args(argv=None):
     args = build_arg_parser().parse_args(argv)
     if args.ui:
         args.headless = True
+    if args.base_motion and args.base_controller == 'none':
+        raise ValueError('--base-motion requires --base-controller loco or g1d_agv')
+    if args.record_base and not args.record:
+        raise ValueError("--record-base requires --record")
+    if args.record_base and float(args.base_state_max_age_ms) <= 0.0:
+        raise ValueError("--base-state-max-age-ms must be positive")
+    if args.record_base and float(args.base_action_max_age_ms) <= 0.0:
+        raise ValueError("--base-action-max-age-ms must be positive")
+    if args.record_base and int(args.base_history_size) <= 0:
+        raise ValueError("--base-history-size must be positive")
+    if args.record_base and float(args.base_startup_timeout_sec) <= 0.0:
+        raise ValueError("--base-startup-timeout-sec must be positive")
     return args

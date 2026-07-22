@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 
 from core.input.base import (
+    BaseCommandIntent,
     BaseTeleopInputProvider,
     MotionIntent,
     TeleopInputSample,
@@ -88,6 +89,30 @@ def _qpos_from_item(item: Mapping[str, Any], frame_index: int, source_key: str, 
     if "qpos" not in group:
         raise KeyError(f"frame {frame_index} missing {source_key}.{group_key}.qpos")
     return finite_vector(group["qpos"], expected_len, f"frame {frame_index} {source_key}.{group_key}.qpos")
+
+
+def _base_action_intent_from_item(item: Mapping[str, Any], frame_index: int) -> BaseCommandIntent:
+    actions = _mapping_value(item, "actions", f"frame {frame_index}")
+    base_value = actions.get("base")
+    if not isinstance(base_value, Mapping):
+        raise KeyError(f"frame {frame_index} missing actions.base")
+    base = base_value
+    missing = [key for key in ("vx_cmd", "vy_cmd", "wz_cmd", "z_cmd") if key not in base]
+    if missing:
+        raise KeyError(f"frame {frame_index} missing actions.base.{missing[0]}")
+    return BaseCommandIntent(
+        vx=base["vx_cmd"],
+        vy=base["vy_cmd"],
+        wz=base["wz_cmd"],
+        z=base["z_cmd"],
+        source="raw_episode:actions.base",
+        frame_index=frame_index,
+        metadata={
+            "episode_index": int(item.get("episode_index", -1)) if "episode_index" in item else None,
+            "recorded_source": str(base.get("source", "")),
+            "base_control_mode": str(base.get("base_control_mode", "")),
+        },
+    )
 
 
 def _pose_from_item(item: Mapping[str, Any], frame_index: int, source_key: str, group_key: str) -> np.ndarray:
@@ -194,14 +219,18 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
         arm_source: str = "action",
         speed_scale: float = 1.0,
         motion_repr: str = "qpos",
+        base_source: str = "none",
     ):
         self.dataset_root = Path(dataset_root)
         self.episode_index = int(episode_index)
         self.arm_source = str(arm_source)
         self.motion_repr = str(motion_repr)
         self.speed_scale = float(speed_scale)
+        self.base_source = str(base_source or "none")
         if self.arm_source not in {"action", "state", "fk_cmd_pose"}:
             raise ValueError(f"unsupported raw arm_source: {self.arm_source}")
+        if self.base_source not in {"none", "action"}:
+            raise ValueError(f"unsupported raw base_source: {self.base_source}")
         if self.arm_source == "fk_cmd_pose":
             self.motion_repr = "pose"
         if self.motion_repr not in {"qpos", "pose"}:
@@ -214,6 +243,9 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
             self.motion_repr,
         )
         self._items = load_raw_episode_items(self.dataset_root, self.episode_index)
+        if self.base_source == "action":
+            for frame_index, item in enumerate(self._items):
+                _base_action_intent_from_item(item, frame_index)
         self._cursor = 0
         self._done = len(self._items) == 0
         self._first_sample_ns = _sample_monotonic_ns(self._items[0], 0)
@@ -254,6 +286,15 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
             GRIPPER_SIZE,
             f"frame {frame_index} recorded_gripper_state_q",
         )
+
+    def _base_intent(self, item: Mapping[str, Any], frame_index: int) -> BaseCommandIntent | None:
+        if self.base_source == "none":
+            return None
+        if self.base_source == "action":
+            intent = _base_action_intent_from_item(item, frame_index)
+            intent.metadata.update({"episode_index": self.episode_index})
+            return intent
+        raise ValueError(f"unsupported raw base_source: {self.base_source}")
 
     def _joint_position_motion_intent(self, item: Mapping[str, Any], frame_index: int) -> MotionIntent:
         source_key = "actions" if self.arm_source == "action" else "states"
@@ -332,6 +373,7 @@ class RawEpisodeInputProvider(BaseTeleopInputProvider):
         return TeleopInputSample(
             tele_data=tele_data,
             motion_intent=motion_intent,
+            base_intent=self._base_intent(item, frame_index),
             done=is_last,
         )
 

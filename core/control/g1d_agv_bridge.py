@@ -95,7 +95,15 @@ class G1DAgvBridge:
         self._cmd_lock = threading.Lock()
         self._cmd_cond = threading.Condition(self._cmd_lock)
         self._running = True
-        self._pending_target = {"vx": 0.0, "vy": 0.0, "vyaw": 0.0, "vz": 0.0, "stamp_ns": 0}
+        self._command_generation = 0
+        self._pending_target = {
+            "vx": 0.0,
+            "vy": 0.0,
+            "vyaw": 0.0,
+            "vz": 0.0,
+            "stamp_ns": 0,
+            "generation": self._command_generation,
+        }
         self._has_pending = False
         self._last_sent_move = (None, None, None)
         self._last_sent_height = None
@@ -163,10 +171,13 @@ class G1DAgvBridge:
                     self._stderr_lines.append(msg)
                     self._last_error = msg
 
-    def _send_sync(self, line: str) -> str:
+    def _send_sync(self, line: str, *, expected_generation: int | None = None) -> str | None:
         if self.process is None or self.process.stdin is None or self.process.stdout is None:
             raise RuntimeError("G1D AGV bridge process is not running")
         with self._io_lock:
+            with self._cmd_lock:
+                if expected_generation is not None and int(expected_generation) != self._command_generation:
+                    return None
             self.process.stdin.write(line + "\n")
             self.process.stdin.flush()
             ack = self.process.stdout.readline().strip()
@@ -195,18 +206,29 @@ class G1DAgvBridge:
                 float(target["vyaw"]),
             )
             height_value = float(target["vz"])
+            target_generation = int(target["generation"])
 
             try:
                 if self._should_send_move(move_tuple):
                     start_ns = time.perf_counter_ns()
-                    self._send_sync(f"MOVE {move_tuple[0]:.6f} {move_tuple[1]:.6f} {move_tuple[2]:.6f}")
+                    move_ack = self._send_sync(
+                        f"MOVE {move_tuple[0]:.6f} {move_tuple[1]:.6f} {move_tuple[2]:.6f}",
+                        expected_generation=target_generation,
+                    )
+                    if move_ack is None:
+                        continue
                     move_ms = (time.perf_counter_ns() - start_ns) / 1e6
                     self._last_sent_move = move_tuple
                     self._last_sent_move_ns = time.perf_counter_ns()
 
                 if self._should_send_height(height_value):
                     start_ns = time.perf_counter_ns()
-                    self._send_sync(f"HEIGHT {height_value:.6f}")
+                    height_ack = self._send_sync(
+                        f"HEIGHT {height_value:.6f}",
+                        expected_generation=target_generation,
+                    )
+                    if height_ack is None:
+                        continue
                     height_ms = (time.perf_counter_ns() - start_ns) / 1e6
                     self._last_sent_height = height_value
                     self._last_sent_height_ns = time.perf_counter_ns()
@@ -248,12 +270,16 @@ class G1DAgvBridge:
     def set_target(self, vx: float, vy: float, vyaw: float, vz: float = 0.0) -> str:
         stamp_ns = time.perf_counter_ns()
         with self._cmd_cond:
+            if not self._running:
+                raise RuntimeError("G1D AGV bridge is closed")
+            self._command_generation += 1
             self._pending_target = {
                 "vx": float(vx),
                 "vy": float(vy),
                 "vyaw": float(vyaw),
                 "vz": float(vz),
                 "stamp_ns": stamp_ns,
+                "generation": self._command_generation,
             }
             self._has_pending = True
             self._cmd_cond.notify()
@@ -271,9 +297,34 @@ class G1DAgvBridge:
             vyaw = float(self._pending_target.get("vyaw", 0.0))
         return self.set_target(vx, vy, vyaw, vz)
 
+    def stop_sync(self) -> str:
+        with self._cmd_cond:
+            if not self._running:
+                raise RuntimeError("G1D AGV bridge is closed")
+            self._command_generation += 1
+            self._pending_target = {
+                "vx": 0.0,
+                "vy": 0.0,
+                "vyaw": 0.0,
+                "vz": 0.0,
+                "stamp_ns": time.perf_counter_ns(),
+                "generation": self._command_generation,
+            }
+            self._has_pending = False
+            self._cmd_cond.notify_all()
+
+        ack = self._send_sync("STOP")
+        if ack is None or not ack.startswith("OK STOP "):
+            raise RuntimeError(f"G1D AGV bridge STOP failed: ack={ack!r}")
+        with self._cmd_lock:
+            self._last_sent_move = (0.0, 0.0, 0.0)
+            self._last_sent_height = 0.0
+            self._last_sent_move_ns = time.perf_counter_ns()
+            self._last_sent_height_ns = time.perf_counter_ns()
+        return ack
+
     def stop(self) -> str:
-        self.set_target(0.0, 0.0, 0.0, 0.0)
-        return "QUEUED STOP"
+        return self.stop_sync()
 
     def get_timing_snapshot(self):
         with self._cmd_lock:
@@ -293,26 +344,19 @@ class G1DAgvBridge:
             }
 
     def close(self) -> None:
+        if self.process is None:
+            return
+        self.stop_sync()
         with self._cmd_cond:
             self._running = False
             self._has_pending = False
             self._cmd_cond.notify_all()
         if self._worker_thread is not None:
             self._worker_thread.join(timeout=1.0)
-        if self.process is None:
-            return
-        try:
-            self._send_sync("QUIT")
-        except Exception:
-            pass
-        try:
-            self.process.terminate()
-            self.process.wait(timeout=2.0)
-        except Exception:
-            try:
-                self.process.kill()
-            except Exception:
-                pass
+        ack = self._send_sync("QUIT")
+        if ack != "BYE":
+            raise RuntimeError(f"G1D AGV bridge QUIT failed: ack={ack!r}")
+        self.process.wait(timeout=2.0)
         self.process = None
 
 

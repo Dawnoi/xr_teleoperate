@@ -25,6 +25,7 @@ python teleop/real/teleop_hand_and_arm.py \
   --ee dex1 \
   --network-interface eno1 \
   --base-controller g1d_agv \
+  --base-motion \
   --controller-deadman grip \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
@@ -55,6 +56,7 @@ python teleop/real/teleop_hand_and_arm.py \
   --ee dex1 \
   --network-interface wlo1 \
   --base-controller g1d_agv \
+  --base-motion \
   --controller-deadman grip \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
@@ -80,6 +82,7 @@ python teleop/real/teleop_hand_and_arm.py \
   --ee dex1 \
   --network-interface wlo1 \
   --base-controller g1d_agv \
+  --base-motion \
   --controller-deadman grip \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
@@ -219,6 +222,15 @@ python teleop/real/teleop_hand_and_arm.py \
 ```text
 http://<robot-host-ip>:8085
 ```
+
+#### UI 真机回放底盘
+
+在网页“回放”页加载 episode 后，`base_source` 可选：
+
+- `none`：只回放双臂和末端执行器，不修改底盘。
+- `action`：同时回放 `actions.base` 中的 `vx_cmd`、`vy_cmd`、`wz_cmd`、`z_cmd`。
+
+选择 `action` 的启动前提是主程序已使用 `--base-motion --base-controller g1d_agv` 启动，且 episode 每一帧都有 `actions.base`。UI 回放启动时会临时把底盘命令源切到 raw replay provider；停止或完成回放后，底盘同步停车并恢复正常 XR 控制配置。录制 active/armed 时，UI 会拒绝开始真机回放。
 
 UI 动态 HTTP 推理示例：进程仍以 XR 作为常驻输入启动；在网页“推理”页点击“启动真机推理”后，主循环先 HOLD，再切换到 HTTP pi0.5 provider。推理停止后保持 HOLD，可在页面显式恢复 XR。
 
@@ -1063,8 +1075,9 @@ G1D 当前链路不要使用：
 
 原因：
 
-- 手臂应走 debug 模式
-- 底盘应走 `g1d_agv`
+- `--motion` 会让双臂改走 `rt/arm_sdk`。
+- 当前本体应让双臂保持 Debug mode 的 `rt/lowcmd`。
+- 要启用 G1D 底盘，使用 `--base-motion --base-controller g1d_agv`。
 
 
   cd ~/unitree_ws/src/xr_teleoperate

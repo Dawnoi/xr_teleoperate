@@ -18,6 +18,7 @@ from core.control.g1d_agv_bridge import G1DAgvBridge
 from core.control.motion_switcher import LocoClientWrapper, MotionSwitcher
 from core.input.teleop_input_provider import create_teleop_input_provider
 from data_pipeline.audit.episode_validation_manager import EpisodeValidationManager
+from data_pipeline.recording.base_state_receiver import BaseStateReceiver
 from data_pipeline.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
 from data_pipeline.recording.teleop_recording_flow import TeleopRecordingFlow
 from teleop.debug.latency_setup import setup_latency_tracker
@@ -86,6 +87,7 @@ class RealTeleopComponents:
     agv_bridge: object | None = None
     reset_pose_publisher: object | None = None
     sim_state_subscriber: object | None = None
+    base_state_receiver: object | None = None
     recorder: object | None = None
     recording_flow: object | None = None
     validation_manager: object | None = None
@@ -146,36 +148,54 @@ def setup_real_teleop_components(args, *, log, components: RealTeleopComponents 
     components.validation_manager = EpisodeValidationManager() if args.record else None
     components.recorder = setup_recorder(args, components.validation_manager)
     components.cameras = setup_cameras(args, log)
+    components.base_state_receiver = setup_base_state_receiver(args, log)
     components.recording_flow = setup_recording_flow(args, components, log)
     components.latency_tracker = setup_latency_tracker(args, components.arm_ctrl, log)
     return components
 
 
 def setup_base(args, components: RealTeleopComponents, log):
-    if args.motion:
-        if args.input_mode == "controller":
-            components.loco_wrapper = LocoClientWrapper()
-            log.info(
-                "[BASE_CTRL] enabled: left stick Y -> x(vx), left stick X -> y(vy), "
-                "right stick X -> yaw(wz) "
-                f"(max_vx={args.base_max_vx:.2f}, max_vy={args.base_max_vy:.2f}, max_wz={args.base_max_wz:.2f})"
-            )
-        return
+    base_command_source = str(getattr(args, "base_command_source", "controller") or "controller")
+    if not args.motion:
+        motion_switcher = MotionSwitcher()
+        status, _ = motion_switcher.Enter_Debug_Mode()
+        log.info(f"Enter debug mode: {'Success' if status == 0 else 'Failed'}")
 
-    motion_switcher = MotionSwitcher()
-    status, _ = motion_switcher.Enter_Debug_Mode()
-    log.info(f"Enter debug mode: {'Success' if status == 0 else 'Failed'}")
+    if args.base_controller == "none":
+        log.info("[BASE_CTRL] disabled: --base-controller none.")
+        return
+    if not args.base_motion:
+        log.info("[BASE_CTRL] output disabled: add --base-motion to enable %s.", args.base_controller)
+        return
+    if args.base_controller == "loco":
+        components.loco_wrapper = LocoClientWrapper()
+        log.info(
+            "[BASE_CTRL] enabled: Unitree loco backend, source=%s "
+            "(left stick Y -> x(vx), left stick X -> y(vy), right stick X -> yaw(wz), "
+            "max_vx=%.2f, max_vy=%.2f, max_wz=%.2f)",
+            base_command_source,
+            args.base_max_vx,
+            args.base_max_vy,
+            args.base_max_wz,
+        )
+        return
     if args.base_controller == "g1d_agv":
         components.agv_bridge = G1DAgvBridge(network_interface=args.network_interface, auto_build=True)
         log.info(
-            "[BASE_CTRL] enabled: official G1D AgvClient bridge (async target queue) "
-            f"(left stick Y -> x(vx), left stick X -> yaw(wz), right stick Y -> z, "
-            f"max_vx={args.base_max_vx:.2f}, max_wz={args.base_max_wz:.2f}, max_z={args.base_max_z:.2f})"
+            "[BASE_CTRL] enabled: official G1D AgvClient bridge (async target queue), source=%s "
+            "(controller mapping: left stick Y -> x(vx), left stick X -> yaw(wz), right stick Y -> z, "
+            "max_vx=%.2f, max_wz=%.2f, max_z=%.2f)",
+            base_command_source,
+            args.base_max_vx,
+            args.base_max_wz,
+            args.base_max_z,
         )
         log.warning(
             "[BASE_CTRL] G1D AgvClient limitation: official API currently ignores vy, "
             "so this path maps left stick X to in-place yaw instead of lateral strafing."
         )
+        return
+    raise ValueError(f"unsupported base_controller: {args.base_controller}")
 
 
 def setup_arm_and_input(args, components: RealTeleopComponents):
@@ -374,6 +394,33 @@ def setup_cameras(args, log) -> CameraRuntime:
     cameras.left_local = maybe_open_local_camera("left_wrist", args.left_camera_id, args, log)
     cameras.right_local = maybe_open_local_camera("right_wrist", args.right_camera_id, args, log)
     return cameras
+
+
+def setup_base_state_receiver(args, log):
+    if not bool(getattr(args, "record_base", False)):
+        return None
+    receiver = BaseStateReceiver(
+        odom_topic=args.base_odom_topic,
+        height_topic=args.base_height_topic,
+        history_size=args.base_history_size,
+        network_interface=args.network_interface,
+    )
+    receiver.start()
+    if not receiver.wait_until_ready(args.base_startup_timeout_sec):
+        receiver.close()
+        raise RuntimeError(
+            "[BASE_RECORD] failed to receive initial base data within "
+            f"{float(args.base_startup_timeout_sec):.1f}s "
+            f"(odom_topic={args.base_odom_topic!r}, height_topic={args.base_height_topic!r})"
+        )
+    log.info(
+        "[BASE_RECORD] enabled: odom_topic=%s, height_topic=%s, max_state_age_ms=%.1f, max_action_age_ms=%.1f",
+        args.base_odom_topic,
+        args.base_height_topic or "<disabled>",
+        float(args.base_state_max_age_ms),
+        float(args.base_action_max_age_ms),
+    )
+    return receiver
 
 
 def maybe_open_local_camera(name: str, camera_id: int, args, log):

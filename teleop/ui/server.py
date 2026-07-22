@@ -370,6 +370,22 @@ class TeleopUiServer:
             self._json_ok(handler, {"ok": False, "error": f"unsupported arm_source: {arm_source}"}, status=400)
             return
 
+        base_source = self._first_query_value(params, "base_source")
+        if not base_source:
+            self._json_ok(
+                handler,
+                {"ok": False, "error": "base_source is required; expected one of: none, action"},
+                status=400,
+            )
+            return
+        if base_source not in {"none", "action"}:
+            self._json_ok(
+                handler,
+                {"ok": False, "error": f"unsupported base_source: {base_source}; expected one of: none, action"},
+                status=400,
+            )
+            return
+
         speed_scale, speed_error = self._positive_float_query(params, "speed_scale", 1.0)
         if speed_error:
             self._json_ok(handler, {"ok": False, "error": speed_error}, status=400)
@@ -382,6 +398,7 @@ class TeleopUiServer:
                 "episode_index": int(episode_index),
                 "episode_name": str(episode_name),
                 "arm_source": str(arm_source),
+                "base_source": str(base_source),
                 "speed_scale": float(speed_scale),
             },
         )

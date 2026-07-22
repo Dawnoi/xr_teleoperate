@@ -16,8 +16,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from core.input.raw_offline import load_raw_dry_run_summary
-from core.input.raw_offline import load_raw_episode_items
+from core.input.raw_offline import RawEpisodeInputProvider, load_raw_dry_run_summary
 from core.input.raw_offline import raw_gripper_source_key
 from core.input.teleop_input_provider import dex1_q_to_trigger_value
 from teleop.debug.gripper_state_ui import OpenCVGripperStateUI
@@ -133,7 +132,9 @@ def build_subprocess_command(
     max_arm_joint_speed: float,
     speed_scale: float,
     motion: bool,
+    base_motion: bool,
     arm_source: str,
+    base_source: str,
     end_action: str,
 ) -> List[str]:
     cmd = [
@@ -168,15 +169,31 @@ def build_subprocess_command(
         "anchored_safe",
         "--controller-orientation-mode",
         "relative",
-        "--base-controller",
-        "none",
         "--headless",
         "--auto-start",
     ]
+    normalized_base_source = str(base_source or "none")
+    if normalized_base_source == "action":
+        cmd.extend(
+            [
+                "--base-controller",
+                "g1d_agv",
+                "--base-command-source",
+                "provider",
+                "--offline-replay-base-source",
+                "action",
+            ]
+        )
+    elif normalized_base_source == "none":
+        cmd.extend(["--base-controller", "none"])
+    else:
+        raise ValueError(f"unsupported --base-source: {normalized_base_source}")
     if network_interface:
         cmd.extend(["--network-interface", str(network_interface)])
     if motion:
         cmd.append("--motion")
+    if base_motion:
+        cmd.append("--base-motion")
     return cmd
 
 
@@ -533,10 +550,30 @@ class SubprocessReplayRunner:
         self._thread.join(timeout=timeout)
 
 
+def validate_base_replay_args(args) -> None:
+    base_source = str(getattr(args, "base_source", "none"))
+    if base_source == "none":
+        return
+    if base_source != "action":
+        raise ValueError(f"unsupported --base-source: {base_source}")
+    if not args.base_motion:
+        raise ValueError("--base-source action requires --base-motion")
+
+
 def run_replay(args) -> int:
+    validate_base_replay_args(args)
     summary = load_raw_dry_run_summary(args.dataset_root, args.episode_index, args.arm_source)
     print_dry_run_summary(summary)
     print_force_hold_config(args)
+    if args.base_source == "action":
+        RawEpisodeInputProvider(
+            dataset_root=args.dataset_root,
+            episode_index=args.episode_index,
+            arm_source=args.arm_source,
+            speed_scale=args.speed_scale,
+            base_source="action",
+        )
+        print("[RAW_BASE_REPLAY] base_source=action validated through RawEpisodeInputProvider.")
     if args.dry_run:
         return 0
 
@@ -548,7 +585,9 @@ def run_replay(args) -> int:
         max_arm_joint_speed=args.max_arm_joint_speed,
         speed_scale=args.speed_scale,
         motion=args.motion,
+        base_motion=args.base_motion,
         arm_source=args.arm_source,
+        base_source=args.base_source,
         end_action=args.end_action,
     )
     if args.no_gripper:
@@ -591,7 +630,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-arm-joint-speed", type=float, default=1.5)
     parser.add_argument("--speed-scale", type=float, default=1.0)
     parser.add_argument("--motion", action="store_true")
+    parser.add_argument("--base-motion", action="store_true")
     parser.add_argument("--show-state-ui", action="store_true")
+    parser.add_argument(
+        "--base-source",
+        choices=["none", "action"],
+        default="none",
+        help='Replay mobile-base velocity commands. "action" routes actions.base through the main teleop provider and G1DAgvBridge; default leaves base untouched.',
+    )
     parser.add_argument(
         "--gripper-force-hold-tau-thresh",
         type=float,

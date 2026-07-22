@@ -166,6 +166,7 @@ class OnlineInferenceSession:
 
         self._current_chunk_left: Optional[List[np.ndarray]] = None
         self._current_chunk_right: Optional[List[np.ndarray]] = None
+        self._current_chunk_base: Optional[List[np.ndarray]] = None
         self._current_chunk_index = 0
         self._current_chunk_size = 0
         self._current_post_action_delay_ns = int(self.config.post_action_delay_ms * 1_000_000)
@@ -709,7 +710,13 @@ class OnlineInferenceSession:
 
         self._chunk_seq += 1
         self._current_chunk_seq = self._chunk_seq
+        base_steps = self._parse_base_action_steps(payload, chunk_size)
         self._last_action_debug = self._make_action_debug(left_steps, right_steps, chunk_size)
+        if base_steps is not None:
+            self._last_action_debug["base"] = {
+                "chunk_size": len(base_steps),
+                "first_step": [float(value) for value in base_steps[0]],
+            }
         self._last_action_debug.update(
             {
                 "chunk_seq": int(self._current_chunk_seq),
@@ -720,6 +727,7 @@ class OnlineInferenceSession:
         self._log_action_chunk(left_steps, right_steps, chunk_size)
         self._current_chunk_left = left_steps
         self._current_chunk_right = right_steps
+        self._current_chunk_base = base_steps
         self._current_chunk_index = 0
         self._current_chunk_size = chunk_size
         self._current_post_action_delay_ns = delay_ms_value * 1_000_000
@@ -924,7 +932,29 @@ class OnlineInferenceSession:
             metadata["online_obs_send_to_action_recv_ms"] = (
                 int(self._current_action_recv_perf_ns) - int(self._current_observation_send_perf_ns)
             ) / 1e6
+        if self._current_chunk_base is not None:
+            if step_index >= len(self._current_chunk_base):
+                raise ValueError(
+                    f"base action chunk missing step {step_index}; chunk_size={len(self._current_chunk_base)}"
+                )
+            metadata["online_base_action"] = [float(value) for value in self._current_chunk_base[step_index]]
         return metadata
+
+    @staticmethod
+    def _parse_base_action_steps(payload: Dict[str, Any], chunk_size: int) -> Optional[List[np.ndarray]]:
+        if "base_action" not in payload:
+            return None
+        arr = np.asarray(payload["base_action"], dtype=np.float64)
+        if arr.shape == (4,):
+            arr = np.repeat(arr.reshape(1, 4), int(chunk_size), axis=0)
+        elif arr.ndim == 2 and arr.shape[1] == 4:
+            if arr.shape[0] != int(chunk_size):
+                raise ValueError(f"base_action chunk length {arr.shape[0]} does not match action chunk length {chunk_size}")
+        else:
+            raise ValueError(f"base_action must have shape (4,) or (N,4), got {arr.shape}")
+        if not np.all(np.isfinite(arr)):
+            raise ValueError("base_action must contain only finite values")
+        return [np.asarray(row, dtype=np.float64).copy() for row in arr]
 
     def _advance_due_steps(self, now_ns: int) -> None:
         if self._current_step_start_ns is None:
@@ -947,6 +977,7 @@ class OnlineInferenceSession:
         self._post_action_ready_after_ns = int(self._current_step_start_ns) + self._current_post_action_delay_ns
         self._current_chunk_left = None
         self._current_chunk_right = None
+        self._current_chunk_base = None
         self._current_chunk_index = 0
         self._current_chunk_size = 0
         self._current_step_start_ns = None
