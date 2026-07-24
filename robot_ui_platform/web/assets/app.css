@@ -1,0 +1,48 @@
+:root {
+  color: #1e2930;
+  background: #eef2f0;
+  font-family: Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body { margin: 0; }
+
+header {
+  min-height: 92px;
+  padding: 18px max(24px, calc((100vw - 1320px) / 2));
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  background: #17363a;
+  color: #f9fcfb;
+}
+
+.eyebrow { margin: 0 0 5px; color: #b6d0c9; font-size: 12px; letter-spacing: 0; }
+h1, h2, p { margin-top: 0; }
+h1 { margin-bottom: 0; font-size: 26px; font-weight: 600; }
+h2 { margin-bottom: 12px; font-size: 18px; }
+.state { border-left: 4px solid #dfaa46; padding-left: 10px; min-width: 160px; }
+
+main { max-width: 1320px; margin: 0 auto; padding: 22px 24px 36px; display: grid; gap: 24px; }
+section { min-width: 0; }
+.command-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; }
+.command { background: #fff; border: 1px solid #cfd8d5; border-radius: 6px; padding: 12px; min-height: 108px; display: grid; gap: 8px; align-content: start; }
+.command label { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.command button { min-height: 34px; border: 1px solid #28676b; border-radius: 4px; background: #28676b; color: #fff; font-weight: 600; cursor: pointer; }
+.command button:disabled { border-color: #a9b3b1; background: #a9b3b1; cursor: not-allowed; }
+.command-result { min-height: 17px; margin: 0; color: #9c3c26; font-size: 12px; overflow-wrap: anywhere; }
+.fields { display: grid; gap: 6px; }
+.fields input { width: 100%; min-width: 0; padding: 7px; border: 1px solid #bac7c3; border-radius: 3px; }
+
+.preview-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 12px; }
+.preview { margin: 0; background: #15272b; color: #e6eeeb; border-radius: 6px; overflow: hidden; }
+.preview img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #090d0e; }
+.preview figcaption { padding: 8px 10px; font-size: 13px; }
+.status-section pre { margin: 0; max-height: 460px; overflow: auto; padding: 14px; border: 1px solid #cfd8d5; border-radius: 6px; background: #fff; font: 12px/1.45 monospace; }
+
+@media (max-width: 640px) {
+  header { padding: 16px 18px; align-items: flex-start; flex-direction: column; }
+  main { padding: 18px; }
+}

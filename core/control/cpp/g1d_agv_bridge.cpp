@@ -42,7 +42,7 @@ int main(int argc, char** argv) {
       vy = clampf(vy, -1.5F, 1.5F);
       vyaw = clampf(vyaw, -0.6F, 0.6F);
       const int32_t ret = client.Move(vx, vy, vyaw);
-      std::cout << "OK MOVE " << ret << std::endl;
+      std::cout << (ret == 0 ? "OK MOVE " : "ERR MOVE ") << ret << std::endl;
       std::cout.flush();
       continue;
     }
@@ -52,7 +52,7 @@ int main(int argc, char** argv) {
       iss >> vz;
       vz = clampf(vz, -1.0F, 1.0F);
       const int32_t ret = client.HeightAdjust(vz);
-      std::cout << "OK HEIGHT " << ret << std::endl;
+      std::cout << (ret == 0 ? "OK HEIGHT " : "ERR HEIGHT ") << ret << std::endl;
       std::cout.flush();
       continue;
     }
@@ -60,7 +60,8 @@ int main(int argc, char** argv) {
     if (cmd == "STOP") {
       const int32_t ret_move = client.Move(0.0F, 0.0F, 0.0F);
       const int32_t ret_height = client.HeightAdjust(0.0F);
-      std::cout << "OK STOP " << ret_move << " " << ret_height << std::endl;
+      const bool stop_ok = ret_move == 0 && ret_height == 0;
+      std::cout << (stop_ok ? "OK STOP " : "ERR STOP ") << ret_move << " " << ret_height << std::endl;
       std::cout.flush();
       continue;
     }

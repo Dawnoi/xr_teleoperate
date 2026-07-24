@@ -32,29 +32,59 @@ class BaseCommandResult:
     stop_requested: bool = False
     should_continue_frame: bool = False
     base_stop_latched: bool = False
+    base_stop_fault: bool = False
+    base_stop_error: str = ""
+
+
+@dataclass(frozen=True)
+class BaseStopResult:
+    confirmed: bool
+    controller: str
+    ack: str = ""
+    error: str = ""
 
 
 def _apply_deadzone(value: float, deadzone: float) -> float:
     return 0.0 if abs(value) < deadzone else value
 
 
-def stop_base_command(*, args: Any, loco_wrapper: Any = None, agv_bridge: Any = None) -> None:
+def stop_base_command(*, args: Any, loco_wrapper: Any = None, agv_bridge: Any = None) -> BaseStopResult:
     if not args.base_motion:
-        return
+        return BaseStopResult(confirmed=True, controller="disabled")
     controller = str(getattr(args, "base_controller", "none") or "none")
     if controller == "none":
-        return
+        return BaseStopResult(confirmed=True, controller=controller)
     if controller == "loco":
         if loco_wrapper is None:
             raise RuntimeError("loco_wrapper is required for --base-controller loco")
         loco_wrapper.Move(0.0, 0.0, 0.0)
-        return
+        return BaseStopResult(confirmed=True, controller=controller, ack="MOVE 0 0 0")
     if controller == "g1d_agv":
         if agv_bridge is None:
             raise RuntimeError("agv_bridge is required for --base-controller g1d_agv")
-        agv_bridge.stop_sync()
-        return
+        ack = agv_bridge.stop_sync()
+        confirmed = ack == "OK STOP 0 0"
+        if confirmed:
+            return BaseStopResult(confirmed=True, controller=controller, ack=ack)
+        timing = agv_bridge.get_timing_snapshot()
+        last_error = str(timing.get("last_error") or "")
+        error = last_error or f"unexpected G1D AGV STOP acknowledgement: {ack!r}"
+        return BaseStopResult(confirmed=False, controller=controller, ack=str(ack or ""), error=error)
     raise ValueError(f"unsupported base_controller: {controller}")
+
+
+def resolve_runtime_base_command_source(
+    *,
+    active_input_provider: str,
+    is_ui_raw_replay: bool,
+    raw_replay_base_source: str,
+) -> str | None:
+    """Select provider-owned base input only while its UI provider is active."""
+    if str(active_input_provider) == "online_inference":
+        return "provider"
+    if bool(is_ui_raw_replay) and str(raw_replay_base_source) == "action":
+        return "provider"
+    return None
 
 
 def _validate_provider_base_intent(
@@ -73,11 +103,15 @@ def _validate_provider_base_intent(
     for axis, limit_name in limits:
         limit = float(getattr(args, limit_name))
         if not math.isfinite(limit) or limit <= 0.0:
-            stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            stop_result = stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            if not stop_result.confirmed:
+                raise RuntimeError(f"base STOP was not confirmed: {stop_result.error}")
             raise ValueError(f"{limit_name} must be positive and finite, got {limit!r}")
         value = float(getattr(intent, axis))
         if abs(value) > limit:
-            stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            stop_result = stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            if not stop_result.confirmed:
+                raise RuntimeError(f"base STOP was not confirmed: {stop_result.error}")
             raise ValueError(
                 f"provider base command {axis}={value:.6g} exceeds {limit_name} "
                 f"(--base-max-{axis})={limit:.6g}"
@@ -146,6 +180,7 @@ def apply_base_command(
     base_intent: BaseCommandIntent | None = None,
     base_provider_active: bool = True,
     base_stop_latched: bool = False,
+    base_stop_fault: bool = False,
     base_command_source: str | None = None,
 ) -> BaseCommandResult:
     """Apply one frame of base control and return main-loop state/metrics.
@@ -168,11 +203,26 @@ def apply_base_command(
         result.base_misc_ms = result.base_control_ms
         return result
 
+    if base_stop_fault:
+        stop_result = stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+        result.base_stop_latched = stop_result.confirmed
+        result.base_stop_fault = not stop_result.confirmed
+        result.base_stop_error = stop_result.error
+        result.base_control_mode = "base_stop_fault" if result.base_stop_fault else "base_stop_recovered"
+        result.should_continue_frame = True
+        result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
+        result.base_misc_ms = result.base_control_ms
+        return result
+
     if source == "provider" and not bool(base_provider_active):
         if not base_stop_latched:
-            stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            stop_result = stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            result.base_stop_latched = stop_result.confirmed
+            result.base_stop_fault = not stop_result.confirmed
+            result.base_stop_error = stop_result.error
+        else:
+            result.base_stop_latched = True
         result.base_control_mode = "provider_inactive"
-        result.base_stop_latched = True
         result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
         result.base_misc_ms = result.base_control_ms
         return result
@@ -183,7 +233,9 @@ def apply_base_command(
         and not home_return_active
         and base_intent is None
     ):
-        stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+        stop_result = stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+        if not stop_result.confirmed:
+            raise RuntimeError(f"base STOP was not confirmed: {stop_result.error}")
         raise RuntimeError("base_command_source=provider requires sample.base_intent")
 
     if (
@@ -238,6 +290,17 @@ def apply_base_command(
         result.base_control_mode = "g1d_agv_async"
         if agv_bridge is None:
             raise RuntimeError("agv_bridge is required for --base-controller g1d_agv")
+        agv_timing_snapshot = agv_bridge.get_timing_snapshot()
+        if not bool(agv_timing_snapshot.get("healthy", True)):
+            stop_result = stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            result.base_stop_latched = stop_result.confirmed
+            result.base_stop_fault = True
+            result.base_stop_error = str(agv_timing_snapshot.get("fault_reason") or stop_result.error)
+            result.base_control_mode = "base_stop_fault"
+            result.should_continue_frame = True
+            result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
+            result.base_misc_ms = result.base_control_ms
+            return result
         agv_send_start = time.perf_counter()
         base_move_start = time.perf_counter()
         agv_bridge.set_target(result.base_vx, result.base_vy, result.base_wz, result.base_z)
@@ -247,8 +310,15 @@ def apply_base_command(
         agv_timing_snapshot = agv_bridge.get_timing_snapshot()
         last_error = str(agv_timing_snapshot.get("last_error") or "")
         if last_error:
-            stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
-            raise RuntimeError(f"G1D AGV bridge publish error: {last_error}")
+            stop_result = stop_base_command(args=args, loco_wrapper=loco_wrapper, agv_bridge=agv_bridge)
+            result.base_stop_latched = stop_result.confirmed
+            result.base_stop_fault = True
+            result.base_stop_error = last_error
+            result.base_control_mode = "base_stop_fault"
+            result.should_continue_frame = True
+            result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
+            result.base_misc_ms = result.base_control_ms
+            return result
         result.base_async_publish_hz = float(agv_timing_snapshot.get("publish_hz", 0.0))
         move_stats = agv_timing_snapshot.get("move_stats") or {}
         height_stats = agv_timing_snapshot.get("height_stats") or {}

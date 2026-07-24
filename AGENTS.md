@@ -22,7 +22,7 @@
 ## 当前环境约定
 
 - 当前项目测试默认使用 conda 环境 `dex`
-- 远程主机是 `luopengcheng@yxgn-unitree-001`
+- 远程主机别名严格使用 `unitree001`
 - 远程对应仓库路径是 `~/programs/xr_teleoperate`
 - 远程环境是 `tv`
 - 本地对应的同名仓库在 `/home/luopengcheng/Programs/Unitree`

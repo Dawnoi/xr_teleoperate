@@ -140,10 +140,25 @@ python teleop/real/teleop_hand_and_arm.py \
 
 UI 的边界：
 
-- UI 不新建 ROS 节点，不另开机器人控制链路。
-- UI 按钮只投递 `start / stop / home / recenter / recording / inference` 意图，真正执行仍在 `teleop/real/teleop_hand_and_arm.py` 主循环里复用原有控制链路。
+- UI 不新建 ROS 节点，不另开机器人控制链路，也不直接发送关节目标、IK 目标或 DDS 消息。
+- XR 真机入口默认继续使用 `TeleopUiServer` 和 `teleop/ui/web` 的既有页面布局、HTTP 路由、SSE 状态流及 `UiCommandBus`。真正执行仍在 `teleop/real/teleop_hand_and_arm.py` 的原控制循环中复用原有控制链路。
+- `robot_ui_platform` 与 `XrTeleoperateBackend` 是供其他机器人显式接入的通用库，不会替换 XR 默认页面。它们接收高层意图并转入既有命令总线，不满足状态前提时明确返回 `rejected`，不会静默忽略。
 - UI 不启动、不停止相机；相机仍由 `--head-camera-id` / `--head-zmq-endpoint` 等启动参数决定。
 - UI 预览只读取当前相机 source 的 latest frame，不参与 episode 写盘，不改变录制对齐。
+
+底盘安全约束：当 STOP 未收到确认时，主循环进入 `base_stop_fault`，只会按控制频率重试 STOP，绝不下发新的非零底盘目标；故障会写入 UI 快照和日志。若 G1D bridge 子进程已经退出，Python 已失去到底盘的通信通道，因此 AGV 控制端必须配置“命令超时自动归零”的 watchdog；缺少该 watchdog 时，软件不能保证进程故障后的停车安全。
+
+可选通用 UI API（当前 XR 默认页面不启用）：
+
+- `GET /api/v1/capabilities`：查询当前后端与可用意图。
+- `GET /api/v1/snapshot`、`GET /api/v1/events`：读取轮询快照或 SSE 状态流。
+- `POST /api/v1/intents`：提交 `{id, type, payload, expected_snapshot_version}`。
+- `GET /api/v1/commands/<id>`：查询命令接受/拒绝结果。
+- `GET /api/v1/previews/<stream_id>`：读取 `head`、`left_wrist`、`right_wrist` 的 JPEG 预览。
+
+当前 XR 浏览器页面由 `teleop/ui/web` 提供，保持原有布局。未来其他机器人若显式启动 `UiHost`，其页面会按 capabilities 动态生成操作控件；`accepted_by_control_layer` 表示意图已进入该机器人控制线程的既有命令总线，动作是否完成仍须以 snapshot 为准。
+
+接入另一台机器人时，不复制 XR 控制代码：实现 `UiBackend` 的 `capabilities()`、`consume_intent()`、`snapshot()`、`get_preview()`，再将构造函数注册到 `UiBackendFactory`。若机器人服务分布在多个进程，Backend 应调用其 gateway，而不是把控制逻辑搬进 UI 进程。
 
 示例（假设本地三路相机分别是 `/dev/video0 /dev/video2 /dev/video4`）：
 
@@ -225,14 +240,14 @@ http://<robot-host-ip>:8085
 
 #### UI 真机回放底盘
 
-在网页“回放”页加载 episode 后，`base_source` 可选：
+在共享 UI 的 `replay.start` 操作中填写 `dataset_root`、`episode_name` 与 `base_source` 后，`base_source` 可选：
 
 - `none`：只回放双臂和末端执行器，不修改底盘。
 - `action`：同时回放 `actions.base` 中的 `vx_cmd`、`vy_cmd`、`wz_cmd`、`z_cmd`。
 
-选择 `action` 的启动前提是主程序已使用 `--base-motion --base-controller g1d_agv` 启动，且 episode 每一帧都有 `actions.base`。UI 回放启动时会临时把底盘命令源切到 raw replay provider；停止或完成回放后，底盘同步停车并恢复正常 XR 控制配置。录制 active/armed 时，UI 会拒绝开始真机回放。
+选择 `action` 的启动前提是主程序已使用 `--base-motion --base-controller g1d_agv` 启动，且 episode 每一帧都有 `actions.base`。UI 回放启动时会临时把底盘命令源切到 raw replay provider；停止或完成回放后，底盘同步停车并恢复正常 XR 控制配置。录制 active/armed 时，UI 会明确拒绝开始真机回放。
 
-UI 动态 HTTP 推理示例：进程仍以 XR 作为常驻输入启动；在网页“推理”页点击“启动真机推理”后，主循环先 HOLD，再切换到 HTTP pi0.5 provider。推理停止后保持 HOLD，可在页面显式恢复 XR。
+UI 动态 HTTP 推理示例：进程仍以 XR 作为常驻输入启动；在共享 UI 的 `inference.start` 操作中填写 prompt 后，主循环先 HOLD，再切换到 HTTP pi0.5 provider。推理停止后保持 HOLD，可通过 `provider.xr` 显式恢复 XR。
 
 ```bash
 cd ~/unitree_ws/src/xr_teleoperate

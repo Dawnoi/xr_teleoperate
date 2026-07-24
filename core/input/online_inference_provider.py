@@ -29,18 +29,17 @@ def _base_intent_from_online_metadata(metadata: Mapping[str, Any], frame_index: 
     value = metadata.get("online_base_action")
     status = str(metadata.get("online_inference_status") or "")
     if value is None:
-        if status and status != "executing_chunk":
-            return BaseCommandIntent(
-                source=f"online_inference:{status}",
-                frame_index=frame_index,
-                metadata={
-                    "online_inference_status": status,
-                    "online_chunk_index": metadata.get("online_chunk_index"),
-                    "online_chunk_size": metadata.get("online_chunk_size"),
-                    "online_chunk_seq": metadata.get("online_chunk_seq"),
-                },
-            )
-        return None
+        return BaseCommandIntent(
+            source="online_inference:missing_base_action",
+            frame_index=frame_index,
+            metadata={
+                "online_inference_status": status,
+                "online_chunk_index": metadata.get("online_chunk_index"),
+                "online_chunk_size": metadata.get("online_chunk_size"),
+                "online_chunk_seq": metadata.get("online_chunk_seq"),
+                "online_base_action_available": False,
+            },
+        )
     arr = np.asarray(value, dtype=float).reshape(-1)
     if arr.shape[0] != 4:
         raise ValueError(f"online_base_action must have length 4, got {arr.shape[0]}")

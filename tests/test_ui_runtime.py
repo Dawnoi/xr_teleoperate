@@ -543,6 +543,9 @@ class UiIntegrationTest(unittest.TestCase):
                 "height_topic": "rt/hispeed_state",
                 "state_max_age_ms": 150.0,
                 "action_max_age_ms": 500.0,
+                "stop_confirmed": True,
+                "control_fault": False,
+                "fault_reason": "",
             },
         )
 

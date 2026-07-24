@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Robot UI</title>
+    <link rel="stylesheet" href="/assets/app.css">
+  </head>
+  <body>
+    <header>
+      <div>
+        <p class="eyebrow">UNIFIED ROBOT UI</p>
+        <h1 id="backend-name">连接中</h1>
+      </div>
+      <div id="runtime-state" class="state">等待状态</div>
+    </header>
+    <main>
+      <section class="command-section">
+        <h2>操作</h2>
+        <div id="commands" class="command-grid"></div>
+      </section>
+      <section class="camera-section">
+        <h2>相机</h2>
+        <div id="previews" class="preview-grid"></div>
+      </section>
+      <section class="status-section">
+        <h2>运行状态</h2>
+        <pre id="snapshot"></pre>
+      </section>
+    </main>
+    <template id="command-template">
+      <form class="command">
+        <label></label>
+        <div class="fields"></div>
+        <button type="submit"></button>
+        <p class="command-result"></p>
+      </form>
+    </template>
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

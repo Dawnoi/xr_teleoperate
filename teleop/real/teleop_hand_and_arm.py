@@ -45,7 +45,11 @@ from teleop.real.setup import (
     switch_recording_root,
 )
 from teleop.runtime.operator_runtime import OperatorRuntime
-from teleop.control_flow.base_command import apply_base_command, stop_base_command
+from teleop.control_flow.base_command import (
+    apply_base_command,
+    resolve_runtime_base_command_source,
+    stop_base_command,
+)
 from teleop.control_flow.arm_command_pipeline import build_arm_command
 from teleop.control_flow.operator_state import OperatorStateFlow, rebase_xr_takeover_after_provider_switch
 from teleop.control_flow.end_effector_command import (
@@ -374,6 +378,10 @@ if __name__ == '__main__':
             args.offline_replay_arm_source,
         )
 
+    def publish_ui_payload(payload) -> None:
+        if ui_state_store is not None:
+            ui_state_store.update(payload)
+
     try:
         initialize_dds(args)
         listen_keyboard_thread = start_keyboard_listener()
@@ -417,18 +425,24 @@ if __name__ == '__main__':
         gripper_ctrl = components.ee.gripper_ctrl
         loco_wrapper = components.loco_wrapper
         agv_bridge = components.agv_bridge
-        base_stop_state = {"latched": True}
+        base_stop_state = {"latched": True, "fault": False, "error": ""}
 
-        def stop_base_once(reason: str) -> None:
+        def stop_base_once(reason: str) -> bool:
             if base_stop_state["latched"]:
-                return
-            stop_base_command(
+                return True
+            stop_result = stop_base_command(
                 args=args,
                 loco_wrapper=loco_wrapper,
                 agv_bridge=agv_bridge,
             )
-            base_stop_state["latched"] = True
-            logger_mp.info("[BASE_CTRL] stopped: %s", reason)
+            base_stop_state["latched"] = stop_result.confirmed
+            base_stop_state["fault"] = not stop_result.confirmed
+            base_stop_state["error"] = stop_result.error
+            if stop_result.confirmed:
+                logger_mp.info("[BASE_CTRL] stop confirmed: %s", reason)
+                return True
+            logger_mp.error("[BASE_CTRL] STOP not confirmed (%s): %s", reason, stop_result.error)
+            return False
 
         recorder = components.recorder
         recording_flow = components.recording_flow
@@ -448,6 +462,7 @@ if __name__ == '__main__':
                     stopping=STOP,
                     provider_status=provider_runtime.status(),
                     base_state_receiver=base_state_receiver,
+                    base_stop_state=base_stop_state,
                 )
             )
             ui_server = TeleopUiServer(
@@ -515,7 +530,7 @@ if __name__ == '__main__':
                             log=logger_mp,
                         )
             if ui_state_store is not None:
-                ui_state_store.update(
+                publish_ui_payload(
                     build_runtime_web_payload(
                         args=args,
                         recorder=recorder,
@@ -526,6 +541,7 @@ if __name__ == '__main__':
                         stopping=STOP,
                         provider_status=provider_runtime.status(),
                         base_state_receiver=base_state_receiver,
+                        base_stop_state=base_stop_state,
                     )
                 )
             time.sleep(0.033)
@@ -651,7 +667,7 @@ if __name__ == '__main__':
                 elif provider_runtime.active_provider_kind == ActiveProviderKind.RAW_REPLAY:
                     provider_runtime.note_raw_replay_execution_trace(latency_tracker.get_snapshot())
             if ui_state_store is not None:
-                ui_state_store.update(
+                publish_ui_payload(
                     build_runtime_web_payload(
                         args=args,
                         recorder=recorder,
@@ -668,6 +684,7 @@ if __name__ == '__main__':
                         stopping=STOP,
                         provider_status=provider_runtime.status(),
                         base_state_receiver=base_state_receiver,
+                        base_stop_state=base_stop_state,
                     )
                 )
             current_left_wrist_pose, current_right_wrist_pose = get_robot_wrist_poses(arm_ik, current_lr_arm_q)
@@ -1007,9 +1024,16 @@ if __name__ == '__main__':
                 base_intent=getattr(sample, "base_intent", None),
                 base_provider_active=active_input_provider in {"lerobot_offline", "online_inference"},
                 base_stop_latched=base_stop_state["latched"],
-                base_command_source="provider" if raw_replay_base_source == "action" else None,
+                base_stop_fault=base_stop_state["fault"],
+                base_command_source=resolve_runtime_base_command_source(
+                    active_input_provider=active_input_provider,
+                    is_ui_raw_replay=is_ui_raw_replay,
+                    raw_replay_base_source=raw_replay_base_source,
+                ),
             )
             base_stop_state["latched"] = base_result.base_stop_latched
+            base_stop_state["fault"] = base_result.base_stop_fault
+            base_stop_state["error"] = base_result.base_stop_error
             base_control_mode = base_result.base_control_mode
             base_control_ms = base_result.base_control_ms
             base_move_ms = base_result.base_move_ms
@@ -1040,6 +1064,10 @@ if __name__ == '__main__':
                 stop_base_once("controller_stop")
                 START = False
                 STOP = True
+            if base_result.base_stop_fault:
+                logger_mp.error("[BASE_CTRL] base stop fault; retrying STOP: %s", base_result.base_stop_error)
+                time.sleep(control_dt)
+                continue
             if base_result.should_continue_frame:
                 continue
 
@@ -1279,7 +1307,7 @@ if __name__ == '__main__':
                 RECORD_RUNNING = frame_recording.record_running
                 READY = frame_recording.ready
                 if ui_state_store is not None:
-                    ui_state_store.update(
+                    publish_ui_payload(
                         build_runtime_web_payload(
                             args=args,
                             recorder=recorder,
@@ -1296,6 +1324,7 @@ if __name__ == '__main__':
                             stopping=STOP,
                             provider_status=provider_runtime.status(),
                             base_state_receiver=base_state_receiver,
+                            base_stop_state=base_stop_state,
                         )
                     )
                 if frame_recording.should_continue_frame:

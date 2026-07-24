@@ -12,6 +12,7 @@ SRC_G1D_DIR = SRC_G1D_COMPILED_XML.parent
 SRC_G1_DEX1_COMPILED_XML = ASSETS_ROOT / ".generated" / "g1_29dof_mode_15_with_dex1_1_compiled.xml"
 GENERATED_DIR = ASSETS_ROOT / ".generated"
 GENERATED_G1D_MOBILE_XML = GENERATED_DIR / "g1_d_mobile_scene.xml"
+GENERATED_G1D_MESH_DIR = "../g1_d"
 
 WHEEL_RADIUS = 0.0848
 WHEEL_HALF_WIDTH = 0.0341
@@ -107,10 +108,9 @@ def prepare_g1d_mobile_scene(force_rebuild: bool = False, use_dex1: bool = True)
     )
     generated_path_is_current = False
     if GENERATED_G1D_MOBILE_XML.exists():
-        try:
-            generated_path_is_current = str(SRC_G1D_DIR) in GENERATED_G1D_MOBILE_XML.read_text(encoding="utf-8")
-        except OSError:
-            generated_path_is_current = False
+        generated_path_is_current = (
+            f'meshdir="{GENERATED_G1D_MESH_DIR}"' in GENERATED_G1D_MOBILE_XML.read_text(encoding="utf-8")
+        )
     if (
         GENERATED_G1D_MOBILE_XML.exists()
         and not force_rebuild
@@ -127,7 +127,7 @@ def prepare_g1d_mobile_scene(force_rebuild: bool = False, use_dex1: bool = True)
     compiler = src_root.find("compiler")
     if compiler is not None:
         compiler_new = copy.deepcopy(compiler)
-        compiler_new.attrib["meshdir"] = str(SRC_G1D_DIR)
+        compiler_new.attrib["meshdir"] = GENERATED_G1D_MESH_DIR
         new_root.append(compiler_new)
 
     ET.SubElement(

@@ -38,6 +38,7 @@ def build_runtime_recording_status(
     recording_flow: Any,
     record_running: bool,
     base_state_receiver: Any | None = None,
+    base_stop_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     task_root = Path(str(args.task_dir)) / str(args.task_name)
     flow_state = getattr(recording_flow, "state", None)
@@ -65,6 +66,9 @@ def build_runtime_recording_status(
         "height_topic": str(getattr(args, "base_height_topic", "") or ""),
         "state_max_age_ms": float(getattr(args, "base_state_max_age_ms", 0.0) or 0.0),
         "action_max_age_ms": float(getattr(args, "base_action_max_age_ms", 0.0) or 0.0),
+        "stop_confirmed": bool((base_stop_state or {}).get("latched", True)),
+        "control_fault": bool((base_stop_state or {}).get("fault", False)),
+        "fault_reason": str((base_stop_state or {}).get("error", "") or ""),
     }
     return {
         "is_recording": active,
@@ -121,6 +125,7 @@ def build_runtime_web_payload(
     stopping: bool = False,
     provider_status: dict[str, Any] | None = None,
     base_state_receiver: Any | None = None,
+    base_stop_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     left_q_fb = None
     right_q_fb = None
@@ -165,6 +170,7 @@ def build_runtime_web_payload(
             recording_flow=recording_flow,
             record_running=record_running,
             base_state_receiver=base_state_receiver,
+            base_stop_state=base_stop_state,
         ),
         active_root_dir=str(Path(str(args.task_dir)) / str(args.task_name)),
         playback_status={"state": "disabled", "error": "playback is not implemented in xr_teleoperate UI"},
