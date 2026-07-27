@@ -132,6 +132,13 @@ class BaseStateReceiver:
             base_height_history = deque(self._base_height_history, maxlen=self.history_size)
         return base_state_history, base_height_history
 
+    def snapshot_latest(self):
+        """Return the newest measured odometry and column samples without interpolation."""
+        with self._lock:
+            odom = dict(self._base_state_history[-1]) if self._base_state_history else None
+            height = dict(self._base_height_history[-1]) if self._base_height_history else None
+        return odom, height
+
     def _handle_odom(self, msg) -> None:
         host_monotonic_ns = int(time.monotonic_ns())
         header = _field(msg, "header")

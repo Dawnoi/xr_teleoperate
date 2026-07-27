@@ -20,6 +20,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='Arm DDS publish frequency in Hz. Use 500 to test lower ctrl_wait.')
     parser.add_argument('--home-return-speed', type=float, default=0.6,
                         help='Dedicated arm joint speed limit in rad/s used only while returning to the ready/home pose via left Y.')
+    parser.add_argument('--mobile-manipulation-mode', choices=['direct_ik', 'mobile_ik_qp'], default='direct_ik',
+                        help='direct_ik preserves the legacy path; mobile_ik_qp coordinates G1D base, column, torso yaw, and legacy arm IK.')
+    parser.add_argument('--mobile-state-timeout-sec', type=float, default=0.50,
+                        help='Maximum age of required odom/column measurements in mobile_ik_qp mode.')
+    parser.add_argument('--mobile-height-raw-minimum', type=float, default=-0.032287,
+                        help='Raw rt/hispeed_state.y value for fully lowered G1D column.')
+    parser.add_argument('--mobile-height-raw-maximum', type=float, default=0.398077,
+                        help='Raw rt/hispeed_state.y value for fully raised G1D column.')
+    parser.add_argument('--mobile-column-travel-m', type=float, default=0.42,
+                        help='Total physical G1D column travel used by mobile_ik_qp.')
+    parser.add_argument('--mobile-max-torso-yaw-rate', type=float, default=0.50,
+                        help='Maximum torso yaw rate in rad/s used by mobile_ik_qp.')
     parser.add_argument('--base-max-vx', type=float, default=0.3,
                         help='Maximum commanded chassis x velocity in m/s from the left thumbstick Y axis.')
     parser.add_argument('--base-max-vy', type=float, default=0.3,
@@ -202,6 +214,13 @@ def parse_args(argv=None):
         args.headless = True
     if args.base_motion and args.base_controller == 'none':
         raise ValueError('--base-motion requires --base-controller loco or g1d_agv')
+    if args.mobile_manipulation_mode == 'mobile_ik_qp':
+        if args.arm != 'G1_29' or args.base_controller != 'g1d_agv' or not args.base_motion:
+            raise ValueError('mobile_ik_qp requires --arm G1_29 --base-controller g1d_agv --base-motion')
+        if args.mobile_state_timeout_sec <= 0.0 or args.mobile_column_travel_m <= 0.0:
+            raise ValueError('mobile_ik_qp state timeout and column travel must be positive')
+        if args.mobile_height_raw_maximum <= args.mobile_height_raw_minimum:
+            raise ValueError('mobile_ik_qp raw height limits must be ordered')
     if args.record_base and not args.record:
         raise ValueError("--record-base requires --record")
     if args.record_base and float(args.base_state_max_age_ms) <= 0.0:

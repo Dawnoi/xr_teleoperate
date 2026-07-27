@@ -34,6 +34,8 @@ import pinocchio as pin
 from teleop.real.args import parse_args
 from data_pipeline.recording.alignment import append_timed_sample
 from core.input.online_inference_provider import create_online_inference_provider
+from core.input.base import BaseCommandIntent
+from core.control.workspace_governor import WorkspaceGovernor, WorkspaceGovernorConfig
 from core.input.teleop_input_provider import validate_lerobot_offline_episode
 from teleop.debug.inference_pose_debug import wrist_pose_to_debug_sample
 from teleop.debug.timing_debugger import TimingDebugger
@@ -47,8 +49,15 @@ from teleop.real.setup import (
 from teleop.runtime.operator_runtime import OperatorRuntime
 from teleop.control_flow.base_command import (
     apply_base_command,
+    map_base_command,
+    map_manual_torso_yaw_rate,
     resolve_runtime_base_command_source,
     stop_base_command,
+)
+from teleop.control_flow.mobile_manipulation_coordinator import (
+    G1DIkFrameKinematics,
+    MobileManipulationCoordinator,
+    MobileStateSample,
 )
 from teleop.control_flow.arm_command_pipeline import build_arm_command
 from teleop.control_flow.operator_state import OperatorStateFlow, rebase_xr_takeover_after_provider_switch
@@ -425,7 +434,83 @@ if __name__ == '__main__':
         gripper_ctrl = components.ee.gripper_ctrl
         loco_wrapper = components.loco_wrapper
         agv_bridge = components.agv_bridge
+        base_state_receiver = components.base_state_receiver
         base_stop_state = {"latched": True, "fault": False, "error": ""}
+        mobile_coordinator = None
+        mobile_kinematics = None
+        if args.mobile_manipulation_mode == "mobile_ik_qp":
+            if base_state_receiver is None:
+                raise RuntimeError("mobile_ik_qp requires the G1D odometry and height receiver")
+            mobile_governor = WorkspaceGovernor(
+                WorkspaceGovernorConfig(
+                    mode=workspace_mode,
+                    workspace_min=workspace_min.copy(),
+                    workspace_max=workspace_max.copy(),
+                    tapered=dict(tapered_workspace_params),
+                    max_forward_speed=float(args.base_max_vx),
+                    max_base_yaw_rate=float(args.base_max_wz),
+                    max_column_command=float(args.base_max_z),
+                    column_speed_mps=0.10,
+                    max_torso_yaw_rate=float(args.mobile_max_torso_yaw_rate),
+                    column_minimum=0.0,
+                    column_maximum=float(args.mobile_column_travel_m),
+                )
+            )
+            mobile_coordinator = MobileManipulationCoordinator(
+                mobile_governor,
+                state_timeout_sec=float(args.mobile_state_timeout_sec),
+            )
+            mobile_kinematics = G1DIkFrameKinematics(
+                torso_from_ik=np.array([
+                    [1.0, 0.0, 0.0, 0.00396],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, -0.044],
+                    [0.0, 0.0, 0.0, 1.0],
+                ])
+            )
+            logger_mp.info("[MOBILE_IK_QP] enabled: 4D base/column/torso governor with legacy G1_29 IK")
+
+        def current_mobile_state() -> MobileStateSample:
+            odom_sample, height_sample = base_state_receiver.snapshot_latest()
+            if odom_sample is None or height_sample is None:
+                raise RuntimeError("MOBILE_STATE_MISSING")
+            now_monotonic_ns = time.monotonic_ns()
+            odom_age_ms = (now_monotonic_ns - int(odom_sample["t_ns"])) / 1e6
+            height_age_ms = (now_monotonic_ns - int(height_sample["t_ns"])) / 1e6
+            timeout_ms = float(args.mobile_state_timeout_sec) * 1e3
+            if odom_age_ms > timeout_ms or height_age_ms > timeout_ms:
+                raise RuntimeError(
+                    "MOBILE_STATE_STALE "
+                    f"odom_age_ms={odom_age_ms:.1f} height_age_ms={height_age_ms:.1f} "
+                    f"timeout_ms={timeout_ms:.1f}"
+                )
+            pose = odom_sample["world_pose"]
+            yaw = float(pose["yaw"])
+            cosine, sine = float(np.cos(yaw)), float(np.sin(yaw))
+            odom_world_from_agv = np.array([
+                [cosine, -sine, 0.0, float(pose["x"])],
+                [sine, cosine, 0.0, float(pose["y"])],
+                [0.0, 0.0, 1.0, float(pose["z"])],
+                [0.0, 0.0, 0.0, 1.0],
+            ])
+            raw_height = float(height_sample["height"]["z"])
+            raw_minimum = float(args.mobile_height_raw_minimum)
+            raw_maximum = float(args.mobile_height_raw_maximum)
+            if raw_height < raw_minimum or raw_height > raw_maximum:
+                raise RuntimeError("MOBILE_COLUMN_STATE_OUT_OF_RANGE")
+            column_position = float(args.mobile_column_travel_m) * (raw_height - raw_minimum) / (raw_maximum - raw_minimum)
+            torso_yaw = arm_ctrl.get_current_waist_yaw()
+            global_from_ik = mobile_kinematics.global_from_ik(
+                odom_world_from_agv=odom_world_from_agv,
+                column_position=column_position,
+                torso_yaw=torso_yaw,
+            )
+            return MobileStateSample(
+                global_from_ik=global_from_ik,
+                monotonic_ns=min(int(odom_sample["t_ns"]), int(height_sample["t_ns"])),
+                column_position=column_position,
+                torso_yaw=torso_yaw,
+            )
 
         def stop_base_once(reason: str) -> bool:
             if base_stop_state["latched"]:
@@ -762,6 +847,18 @@ if __name__ == '__main__':
                                 args.base_controller,
                             )
                             continue
+                        replay_arm_source = str(payload.get("arm_source", "action") or "action")
+                        if args.mobile_manipulation_mode == "mobile_ik_qp" and replay_arm_source not in {"action", "state"}:
+                            stop_base_once("raw_replay_rejected_mobile_motion_repr")
+                            provider_runtime.fail_raw_replay(
+                                "mobile_ik_qp raw replay requires arm_source=action or state; "
+                                "fk_cmd_pose would invoke IK"
+                            )
+                            logger_mp.error(
+                                "[UI_REPLAY] rejected: mobile_ik_qp raw replay requires joint action/state, got %s.",
+                                replay_arm_source,
+                            )
+                            continue
                         current_hold_q = current_lr_arm_q.copy()
                         current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
                         home_return_active = False
@@ -774,7 +871,7 @@ if __name__ == '__main__':
                             dataset_root=str(payload.get("dataset_root", "")),
                             episode_index=int(payload.get("episode_index", -1)),
                             episode_name=str(payload.get("episode_name", "")),
-                            arm_source=str(payload.get("arm_source", "action")),
+                            arm_source=replay_arm_source,
                             base_source=replay_base_source,
                             speed_scale=float(payload.get("speed_scale", 1.0)),
                         )
@@ -786,10 +883,14 @@ if __name__ == '__main__':
                             "[UI_REPLAY] started raw replay: root=%s episode=%s arm_source=%s base_source=%s speed_scale=%.3f",
                             payload.get("dataset_root", ""),
                             payload.get("episode_name", ""),
-                            payload.get("arm_source", "action"),
+                            replay_arm_source,
                             replay_base_source,
                             float(payload.get("speed_scale", 1.0)),
                         )
+                        if args.mobile_manipulation_mode == "mobile_ik_qp":
+                            logger_mp.info(
+                                "[UI_REPLAY] mobile_ik_qp bypassed: replaying recorded joint/base actions without QP or IK."
+                            )
                 elif command.name == UiCommandName.STOP_RAW_REPLAY:
                     current_hold_q = current_lr_arm_q.copy()
                     current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
@@ -1013,7 +1114,58 @@ if __name__ == '__main__':
             )
             end_effector_command_ms = (time.perf_counter() - end_effector_start) * 1000.0
 
-            # high level base control
+            # The direct path preserves legacy behavior. The mobile path forms one
+            # coordinated body target before the existing hardware dispatch.
+            runtime_base_source = resolve_runtime_base_command_source(
+                active_input_provider=active_input_provider,
+                is_ui_raw_replay=is_ui_raw_replay,
+                raw_replay_base_source=raw_replay_base_source,
+            )
+            if args.mobile_manipulation_mode == "mobile_ik_qp" and not is_ui_raw_replay:
+                nominal_source = runtime_base_source or "controller"
+                nominal_intent = map_base_command(
+                    args=args,
+                    tele_data=tele_data,
+                    home_return_active=home_return_active,
+                    base_intent=getattr(sample, "base_intent", None),
+                    base_command_source=nominal_source,
+                )
+                manual_torso_yaw_rate = map_manual_torso_yaw_rate(
+                    args=args,
+                    tele_data=tele_data,
+                    home_return_active=home_return_active,
+                )
+                coordinated = mobile_coordinator.step(
+                    motion_intent=motion_intent,
+                    enabled={"left": left_arm_enabled, "right": right_arm_enabled},
+                    rising={"left": left_takeover_rising_edge, "right": right_takeover_rising_edge},
+                    nominal_body_command=np.array([
+                        nominal_intent.vx,
+                        nominal_intent.wz,
+                        nominal_intent.z,
+                        manual_torso_yaw_rate,
+                    ]),
+                    mobile_state=current_mobile_state(),
+                    now_monotonic_ns=time.monotonic_ns(),
+                    dt=control_dt,
+                    home_active=home_return_active,
+                    stop_active=STOP,
+                )
+                motion_intent = coordinated.motion_intent_for_ik
+                arm_ctrl.set_waist_yaw_target(coordinated.waist_yaw_target)
+                final_base_intent = BaseCommandIntent(
+                    vx=float(coordinated.final_body_command[0]),
+                    vy=0.0,
+                    wz=float(coordinated.final_body_command[1]),
+                    z=float(coordinated.final_body_command[2]),
+                    source="mobile_ik_qp",
+                )
+                runtime_base_source = "provider"
+                base_intent = final_base_intent
+                base_provider_active = True
+            else:
+                base_intent = getattr(sample, "base_intent", None)
+                base_provider_active = active_input_provider in {"lerobot_offline", "online_inference"} or is_ui_raw_replay
             base_result = apply_base_command(
                 args=args,
                 tele_data=tele_data,
@@ -1021,15 +1173,11 @@ if __name__ == '__main__':
                 loco_wrapper=loco_wrapper,
                 agv_bridge=agv_bridge,
                 timing_debugger=timing_debugger,
-                base_intent=getattr(sample, "base_intent", None),
-                base_provider_active=active_input_provider in {"lerobot_offline", "online_inference"},
+                base_intent=base_intent,
+                base_provider_active=base_provider_active,
                 base_stop_latched=base_stop_state["latched"],
                 base_stop_fault=base_stop_state["fault"],
-                base_command_source=resolve_runtime_base_command_source(
-                    active_input_provider=active_input_provider,
-                    is_ui_raw_replay=is_ui_raw_replay,
-                    raw_replay_base_source=raw_replay_base_source,
-                ),
+                base_command_source=runtime_base_source,
             )
             base_stop_state["latched"] = base_result.base_stop_latched
             base_stop_state["fault"] = base_result.base_stop_fault

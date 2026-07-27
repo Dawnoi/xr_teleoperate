@@ -235,6 +235,7 @@ class G1_29_ArmController:
         logger_mp.info("Initialize G1_29_ArmController...")
         self.q_target = np.zeros(14)
         self.tauff_target = np.zeros(14)
+        self.waist_yaw_target = None
         self.motion_mode = motion_mode
         self.simulation_mode = simulation_mode
         self.kp_high = 300.0
@@ -305,6 +306,7 @@ class G1_29_ArmController:
         logger_mp.info("Lock OK!")
         self.q_target = self.get_current_dual_arm_q().copy()
         self.tauff_target = np.zeros_like(self.q_target)
+        self.waist_yaw_target = self.get_current_waist_yaw()
 
         # initialize publish thread
         self.publish_thread = threading.Thread(target=self._ctrl_motor_state)
@@ -350,6 +352,7 @@ class G1_29_ArmController:
                 trace_seq = self._pending_trace_seq
                 cmd_version = self._pending_cmd_version
                 target_set_ns = self._pending_target_set_ns
+                waist_yaw_target = self.waist_yaw_target
 
             if self.simulation_mode:
                 cliped_arm_q_target = arm_q_target
@@ -360,6 +363,9 @@ class G1_29_ArmController:
                 self.msg.motor_cmd[id].q = cliped_arm_q_target[idx]
                 self.msg.motor_cmd[id].dq = 0
                 self.msg.motor_cmd[id].tau = arm_tauff_target[idx]   
+            self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].q = waist_yaw_target
+            self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].dq = 0.0
+            self.msg.motor_cmd[G1_29_JointIndex.kWaistYaw].tau = 0.0
 
             self.msg.crc = self.crc.Crc(self.msg)
             write_start_ns = time.perf_counter_ns()
@@ -411,6 +417,18 @@ class G1_29_ArmController:
             self._pending_trace_seq = 0 if trace_seq is None else int(trace_seq)
             self._pending_cmd_version += 1
             self._pending_target_set_ns = time.perf_counter_ns()
+
+    def set_waist_yaw_target(self, target_q: float) -> None:
+        target_q = float(target_q)
+        if not np.isfinite(target_q):
+            raise ValueError("waist yaw target must be finite")
+        if target_q < -2.7053 or target_q > 2.7053:
+            raise ValueError("waist yaw target exceeds hardware limits")
+        with self.ctrl_lock:
+            self.waist_yaw_target = target_q
+
+    def get_current_waist_yaw(self) -> float:
+        return float(self.lowstate_buffer.GetData().motor_state[G1_29_JointIndex.kWaistYaw].q)
 
     def get_mode_machine(self):
         '''Return current dds mode machine.'''

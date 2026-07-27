@@ -169,6 +169,38 @@ def _base_intent_for_source(
     raise ValueError(f"unsupported base_command_source: {source}")
 
 
+def map_base_command(
+    *,
+    args: Any,
+    tele_data: Any,
+    home_return_active: bool,
+    base_intent: BaseCommandIntent | None,
+    base_command_source: str,
+) -> BaseCommandIntent:
+    """Map one input frame to a nominal body command without sending hardware I/O."""
+    intent = _base_intent_for_source(
+        args=args,
+        source=base_command_source,
+        tele_data=tele_data,
+        home_return_active=home_return_active,
+        base_intent=base_intent,
+    )
+    return BaseCommandIntent(source="none") if intent is None else intent
+
+
+def map_manual_torso_yaw_rate(*, args: Any, tele_data: Any, home_return_active: bool) -> float:
+    """Map the right controller X axis to a bounded manual torso yaw rate."""
+    if home_return_active:
+        return 0.0
+    if str(getattr(args, "input_mode", "hand")) != "controller":
+        return 0.0
+    right_stick_x = _apply_deadzone(
+        float(tele_data.right_ctrl_thumbstickValue[0]),
+        float(args.base_stick_deadzone),
+    )
+    return -right_stick_x * float(args.mobile_max_torso_yaw_rate)
+
+
 def apply_base_command(
     *,
     args: Any,

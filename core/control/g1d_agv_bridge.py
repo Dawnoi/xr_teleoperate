@@ -363,6 +363,8 @@ class G1DAgvBridge:
                     expected_generation=target_generation,
                 )
                 if not self._ack_is_success("MOVE", move_ack):
+                    if self._target_was_superseded_without_fault(target_generation):
+                        continue
                     return
                 move_ms = (time.perf_counter_ns() - start_ns) / 1e6
                 self._last_sent_move = move_tuple
@@ -375,6 +377,8 @@ class G1DAgvBridge:
                     expected_generation=target_generation,
                 )
                 if not self._ack_is_success("HEIGHT", height_ack):
+                    if self._target_was_superseded_without_fault(target_generation):
+                        continue
                     return
                 height_ms = (time.perf_counter_ns() - start_ns) / 1e6
                 self._last_sent_height = height_value
@@ -387,6 +391,13 @@ class G1DAgvBridge:
                 self._cycle_ms.append(float(cycle_ms))
                 self._queue_delay_ms.append(float(queue_delay_ms))
                 self._send_count += 1
+
+    def _target_was_superseded_without_fault(self, target_generation: int) -> bool:
+        with self._cmd_lock:
+            return (
+                int(target_generation) != self._command_generation
+                and not bool(self._fault_reason)
+            )
 
     def _should_send_move(self, move_tuple) -> bool:
         prev = self._last_sent_move

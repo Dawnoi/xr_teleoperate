@@ -397,7 +397,8 @@ def setup_cameras(args, log) -> CameraRuntime:
 
 
 def setup_base_state_receiver(args, log):
-    if not bool(getattr(args, "record_base", False)):
+    mobile_mode = str(getattr(args, "mobile_manipulation_mode", "direct_ik")) == "mobile_ik_qp"
+    if not bool(getattr(args, "record_base", False)) and not mobile_mode:
         return None
     receiver = BaseStateReceiver(
         odom_topic=args.base_odom_topic,
@@ -406,19 +407,19 @@ def setup_base_state_receiver(args, log):
         network_interface=args.network_interface,
     )
     receiver.start()
-    if not receiver.wait_until_ready(args.base_startup_timeout_sec):
+    timeout_sec = float(args.base_startup_timeout_sec)
+    if not receiver.wait_until_ready(timeout_sec):
         receiver.close()
         raise RuntimeError(
             "[BASE_RECORD] failed to receive initial base data within "
-            f"{float(args.base_startup_timeout_sec):.1f}s "
+            f"{timeout_sec:.1f}s "
             f"(odom_topic={args.base_odom_topic!r}, height_topic={args.base_height_topic!r})"
         )
     log.info(
-        "[BASE_RECORD] enabled: odom_topic=%s, height_topic=%s, max_state_age_ms=%.1f, max_action_age_ms=%.1f",
+        "[BASE_STATE] enabled: odom_topic=%s, height_topic=%s, mobile_ik_qp=%s",
         args.base_odom_topic,
         args.base_height_topic or "<disabled>",
-        float(args.base_state_max_age_ms),
-        float(args.base_action_max_age_ms),
+        mobile_mode,
     )
     return receiver
 
