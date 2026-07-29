@@ -35,7 +35,7 @@ exec python "${REAL_TELEOP_ENTRY}" \
   --max-arm-joint-speed 5.0 \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \

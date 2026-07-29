@@ -172,12 +172,12 @@ def parse_args():
         "--arm-workspace-max",
         type=float,
         nargs=3,
-        default=[0.45, 0.32, 0.42],
+        default=[0.45, 0.32, 0.292],
         metavar=("XMAX", "YMAX", "ZMAX"),
         help="Forward box workspace upper bound in the arm IK/base frame, applied before IK.",
     )
     parser.add_argument("--arm-workspace-z-min", type=float, default=-0.05, help="Tapered workspace lower z bound in the arm IK/base frame.")
-    parser.add_argument("--arm-workspace-z-max", type=float, default=0.45, help="Tapered workspace upper z bound in the arm IK/base frame.")
+    parser.add_argument("--arm-workspace-z-max", type=float, default=0.292, help="Tapered workspace upper z bound in the arm IK/base frame. 0.292 m is shoulder-joint height relative to the legacy IK origin.")
     parser.add_argument("--arm-workspace-x-min", type=float, default=0.10, help="Tapered workspace minimum forward x bound.")
     parser.add_argument("--arm-workspace-x-max-low", type=float, default=0.38, help="Tapered workspace forward x upper bound at z_min.")
     parser.add_argument("--arm-workspace-x-max-high", type=float, default=0.52, help="Tapered workspace forward x upper bound at z_max.")

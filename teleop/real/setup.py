@@ -21,6 +21,7 @@ from data_pipeline.audit.episode_validation_manager import EpisodeValidationMana
 from data_pipeline.recording.base_state_receiver import BaseStateReceiver
 from data_pipeline.recording.episode_writer import EpisodeWriter, ZMQRawCameraReceiver
 from data_pipeline.recording.teleop_recording_flow import TeleopRecordingFlow
+from teleop.control_flow.dex1_tcp_fk import Dex1TcpFkProvider
 from teleop.debug.latency_setup import setup_latency_tracker
 from teleop.robot_control.robot_arm import (
     G1_23_ArmController,
@@ -93,6 +94,7 @@ class RealTeleopComponents:
     validation_manager: object | None = None
     cameras: CameraRuntime = field(default_factory=CameraRuntime)
     latency_tracker: object | None = None
+    dex1_tcp_fk: object | None = None
 
 
 MOBILE_HAND_EE = {"dex3", "inspire_dfx", "inspire_ftp", "brainco"}
@@ -111,9 +113,21 @@ def initialize_dds(args):
         ChannelFactoryInitialize(0, networkInterface=args.network_interface)
 
 
-def log_workspace_config(args, *, workspace_limit_enabled, workspace_mode, workspace_min, workspace_max, tapered_workspace_params, log):
+def log_workspace_config(args, *, workspace_limit_enabled, workspace_mode, workspace_min, workspace_max, tapered_workspace_params, side_workspaces, log):
     if workspace_limit_enabled:
-        if workspace_mode == "box":
+        if args.arm_workspace_layout == "per_arm":
+            for side in ("left", "right"):
+                workspace = side_workspaces[side]
+                if workspace_mode == "box":
+                    log.info("[ARM_WORKSPACE][%s] box min=%s max=%s", side, workspace["workspace_min"], workspace["workspace_max"])
+                else:
+                    tapered = workspace["tapered"]
+                    log.info(
+                        "[ARM_WORKSPACE][%s] tapered z=[%.3f, %.3f] x=[%.3f, %.3f->%.3f] y(low)=[%.3f, %.3f] y(high)=[%.3f, %.3f]",
+                        side, tapered["z_min"], tapered["z_max"], tapered["x_min"], tapered["x_max_low"], tapered["x_max_high"],
+                        tapered["y_min_low"], tapered["y_max_low"], tapered["y_min_high"], tapered["y_max_high"],
+                    )
+        elif workspace_mode == "box":
             log.info(
                 "[ARM_WORKSPACE] enabled: forward box, min=(%.3f, %.3f, %.3f), max=(%.3f, %.3f, %.3f)",
                 workspace_min[0], workspace_min[1], workspace_min[2],
@@ -147,6 +161,7 @@ def setup_real_teleop_components(args, *, log, components: RealTeleopComponents 
     setup_sim(args, components)
     components.validation_manager = EpisodeValidationManager() if args.record else None
     components.recorder = setup_recorder(args, components.validation_manager)
+    setup_dex1_tcp_fk(args, components, log)
     components.cameras = setup_cameras(args, log)
     components.base_state_receiver = setup_base_state_receiver(args, log)
     components.recording_flow = setup_recording_flow(args, components, log)
@@ -361,6 +376,41 @@ def setup_recorder(args, validation_manager=None):
     )
 
 
+def setup_dex1_tcp_fk(args, components: RealTeleopComponents, log) -> None:
+    if not bool(getattr(args, "record_mobile_training_state", False)):
+        return
+    if not bool(getattr(args, "record", False)):
+        raise ValueError("--record-mobile-training-state requires --record")
+    if str(getattr(args, "arm", "")) != "G1_29":
+        raise ValueError("Dex1 TCP recording requires --arm G1_29")
+    if str(getattr(args, "ee", "")) != "dex1" or bool(getattr(args, "no_gripper", False)):
+        raise ValueError("Dex1 TCP recording requires --ee dex1 without --no-gripper")
+    repo_root = Path(__file__).resolve().parents[2]
+    components.dex1_tcp_fk = Dex1TcpFkProvider(
+        repo_root / "assets/g1_d/g1_d.urdf",
+        repo_root / "assets/dex1_1/dex1_1.urdf",
+    )
+    apply_dex1_tcp_episode_metadata(components)
+    metadata = components.dex1_tcp_fk.metadata()
+    log.info("[DEX1_TCP_FK] G1D FK URDF: %s", metadata["robot_fk_urdf"])
+    log.info("[DEX1_TCP_FK] Dex1.1 model URDF: %s", metadata["eef_model_urdf"])
+    log.info(
+        "[DEX1_TCP_FK] base_link == G1D URDF AGV_link; left wrist->tcp xyz=%s rpy=%s; right wrist->tcp xyz=%s rpy=%s",
+        metadata["left_wrist_to_tcp_xyz_m"],
+        metadata["left_wrist_to_tcp_rpy_rad"],
+        metadata["right_wrist_to_tcp_xyz_m"],
+        metadata["right_wrist_to_tcp_rpy_rad"],
+    )
+
+
+def apply_dex1_tcp_episode_metadata(components: RealTeleopComponents) -> None:
+    if components.dex1_tcp_fk is None:
+        return
+    if components.recorder is None:
+        raise RuntimeError("Dex1 TCP recording metadata requires an EpisodeWriter")
+    components.recorder.update_episode_info(components.dex1_tcp_fk.metadata())
+
+
 def switch_recording_root(args, components: RealTeleopComponents, root_dir: str | Path, log) -> None:
     """Replace an idle writer so subsequent episodes use one exact root directory."""
     if not args.record:
@@ -380,6 +430,7 @@ def switch_recording_root(args, components: RealTeleopComponents, root_dir: str 
     args.task_dir = str(root.parent)
     args.task_name = root.name
     components.recorder = setup_recorder(args, validation_manager)
+    apply_dex1_tcp_episode_metadata(components)
     components.recording_flow = setup_recording_flow(args, components, log)
     log.info("[RECORD_ROOT] switched recording root to %s", root)
 
@@ -405,6 +456,10 @@ def setup_base_state_receiver(args, log):
         height_topic=args.base_height_topic,
         history_size=args.base_history_size,
         network_interface=args.network_interface,
+        record_slam_map_pose=args.record_slam_map_pose,
+        slam_pose_source_frame=args.slam_pose_source_frame,
+        base_velocity_frame=args.base_velocity_frame,
+        slam_chain_max_skew_ms=args.slam_chain_max_skew_ms,
     )
     receiver.start()
     timeout_sec = float(args.base_startup_timeout_sec)
@@ -416,9 +471,10 @@ def setup_base_state_receiver(args, log):
             f"(odom_topic={args.base_odom_topic!r}, height_topic={args.base_height_topic!r})"
         )
     log.info(
-        "[BASE_STATE] enabled: odom_topic=%s, height_topic=%s, mobile_ik_qp=%s",
+        "[BASE_STATE] enabled: odom_topic=%s, height_topic=%s, slam_pose_source_frame=%s, mobile_ik_qp=%s",
         args.base_odom_topic,
         args.base_height_topic or "<disabled>",
+        args.slam_pose_source_frame if args.record_slam_map_pose else "<disabled>",
         mobile_mode,
     )
     return receiver

@@ -49,16 +49,19 @@ from teleop.real.setup import (
 from teleop.runtime.operator_runtime import OperatorRuntime
 from teleop.control_flow.base_command import (
     apply_base_command,
+    integrate_manual_torso_yaw_target,
     map_base_command,
     map_manual_torso_yaw_rate,
     resolve_runtime_base_command_source,
     stop_base_command,
 )
 from teleop.control_flow.mobile_manipulation_coordinator import (
+    column_position_from_raw_height,
     G1DIkFrameKinematics,
     MobileManipulationCoordinator,
     MobileStateSample,
 )
+from teleop.control_flow.arm_workspace_config import build_arm_side_workspaces
 from teleop.control_flow.arm_command_pipeline import build_arm_command
 from teleop.control_flow.operator_state import OperatorStateFlow, rebase_xr_takeover_after_provider_switch
 from teleop.control_flow.end_effector_command import (
@@ -264,11 +267,24 @@ def cleanup_real_teleop_resources(
     if ui_server is not None:
         ui_server.stop()
 
-    stop_base_command(
-        args=args,
-        loco_wrapper=loco_wrapper,
-        agv_bridge=agv_bridge,
-    )
+    if args.base_motion:
+        base_controller = str(args.base_controller)
+        backend_ready = (
+            (base_controller == "loco" and loco_wrapper is not None)
+            or (base_controller == "g1d_agv" and agv_bridge is not None)
+        )
+        if backend_ready:
+            stop_base_command(
+                args=args,
+                loco_wrapper=loco_wrapper,
+                agv_bridge=agv_bridge,
+            )
+        elif base_controller != "none":
+            logger_mp.error(
+                "[EXIT] base STOP skipped because %s backend was not initialized; "
+                "startup failed before this process owned the base command path.",
+                base_controller,
+            )
 
     try:
         if arm_ctrl is not None:
@@ -372,6 +388,13 @@ if __name__ == '__main__':
         "y_max_low": float(args.arm_workspace_y_max_low),
         "y_max_high": float(args.arm_workspace_y_max_high),
     }
+    side_workspaces = build_arm_side_workspaces(
+        args,
+        workspace_mode=workspace_mode,
+        workspace_min=workspace_min,
+        workspace_max=workspace_max,
+        tapered_workspace_params=tapered_workspace_params,
+    )
     timing_debugger = TimingDebugger(enabled=args.timing_debug, interval_sec=args.timing_debug_interval)
     state_history_size = max(32, int(args.frequency * 6))
     action_history_size = max(32, int(args.frequency * 6))
@@ -401,6 +424,7 @@ if __name__ == '__main__':
             workspace_min=workspace_min,
             workspace_max=workspace_max,
             tapered_workspace_params=tapered_workspace_params,
+            side_workspaces=side_workspaces,
             log=logger_mp,
         )
 
@@ -436,8 +460,23 @@ if __name__ == '__main__':
         agv_bridge = components.agv_bridge
         base_state_receiver = components.base_state_receiver
         base_stop_state = {"latched": True, "fault": False, "error": ""}
+        manual_waist_yaw_limit_state = {"active": False}
         mobile_coordinator = None
         mobile_kinematics = None
+        dex1_tcp_fk = components.dex1_tcp_fk
+        need_g1d_kinematics = (
+            args.mobile_manipulation_mode == "mobile_ik_qp"
+            or bool(args.record_mobile_training_state)
+        )
+        if need_g1d_kinematics:
+            mobile_kinematics = G1DIkFrameKinematics(
+                torso_from_ik=np.array([
+                    [1.0, 0.0, 0.0, 0.00396],
+                    [0.0, 1.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0, -0.044],
+                    [0.0, 0.0, 0.0, 1.0],
+                ])
+            )
         if args.mobile_manipulation_mode == "mobile_ik_qp":
             if base_state_receiver is None:
                 raise RuntimeError("mobile_ik_qp requires the G1D odometry and height receiver")
@@ -447,6 +486,7 @@ if __name__ == '__main__':
                     workspace_min=workspace_min.copy(),
                     workspace_max=workspace_max.copy(),
                     tapered=dict(tapered_workspace_params),
+                    side_workspaces=side_workspaces,
                     max_forward_speed=float(args.base_max_vx),
                     max_base_yaw_rate=float(args.base_max_wz),
                     max_column_command=float(args.base_max_z),
@@ -460,15 +500,9 @@ if __name__ == '__main__':
                 mobile_governor,
                 state_timeout_sec=float(args.mobile_state_timeout_sec),
             )
-            mobile_kinematics = G1DIkFrameKinematics(
-                torso_from_ik=np.array([
-                    [1.0, 0.0, 0.0, 0.00396],
-                    [0.0, 1.0, 0.0, 0.0],
-                    [0.0, 0.0, 1.0, -0.044],
-                    [0.0, 0.0, 0.0, 1.0],
-                ])
-            )
             logger_mp.info("[MOBILE_IK_QP] enabled: 4D base/column/torso governor with legacy G1_29 IK")
+        elif args.record_mobile_training_state:
+            logger_mp.info("[MOBILE_RECORD] enabled: base_link-local EEF pose and SLAM map base state")
 
         def current_mobile_state() -> MobileStateSample:
             odom_sample, height_sample = base_state_receiver.snapshot_latest()
@@ -493,12 +527,12 @@ if __name__ == '__main__':
                 [0.0, 0.0, 1.0, float(pose["z"])],
                 [0.0, 0.0, 0.0, 1.0],
             ])
-            raw_height = float(height_sample["height"]["z"])
-            raw_minimum = float(args.mobile_height_raw_minimum)
-            raw_maximum = float(args.mobile_height_raw_maximum)
-            if raw_height < raw_minimum or raw_height > raw_maximum:
-                raise RuntimeError("MOBILE_COLUMN_STATE_OUT_OF_RANGE")
-            column_position = float(args.mobile_column_travel_m) * (raw_height - raw_minimum) / (raw_maximum - raw_minimum)
+            column_position = column_position_from_raw_height(
+                raw_height=float(height_sample["height"]["z"]),
+                raw_minimum=float(args.mobile_height_raw_minimum),
+                raw_maximum=float(args.mobile_height_raw_maximum),
+                column_travel_m=float(args.mobile_column_travel_m),
+            )
             torso_yaw = arm_ctrl.get_current_waist_yaw()
             global_from_ik = mobile_kinematics.global_from_ik(
                 odom_world_from_agv=odom_world_from_agv,
@@ -510,6 +544,26 @@ if __name__ == '__main__':
                 monotonic_ns=min(int(odom_sample["t_ns"]), int(height_sample["t_ns"])),
                 column_position=column_position,
                 torso_yaw=torso_yaw,
+            )
+
+        def get_robot_wrist_poses_base_link(arm_ik_obj, arm_q, column_height_m, waist_yaw):
+            if mobile_kinematics is None:
+                raise RuntimeError("base_link wrist kinematics is not initialized")
+            # Current collection calibration explicitly defines base_link == AGV_link.
+            base_link_from_ik = mobile_kinematics.agv_from_ik(
+                column_position=float(column_height_m),
+                torso_yaw=float(waist_yaw),
+            )
+            left_ik_pose, right_ik_pose = get_robot_wrist_poses(arm_ik_obj, arm_q)
+            return base_link_from_ik @ left_ik_pose, base_link_from_ik @ right_ik_pose
+
+        def get_robot_dex1_tcp_poses_base_link(arm_q, column_height_m, waist_yaw):
+            if dex1_tcp_fk is None:
+                raise RuntimeError("Dex1 TCP FK is not initialized")
+            return dex1_tcp_fk.compute_tcp_poses(
+                arm_q,
+                column_height_m,
+                waist_yaw,
             )
 
         def stop_base_once(reason: str) -> bool:
@@ -718,6 +772,7 @@ if __name__ == '__main__':
             state_read_t0_ns = time.monotonic_ns()
             current_lr_arm_q  = arm_ctrl.get_current_dual_arm_q()
             current_lr_arm_dq = arm_ctrl.get_current_dual_arm_dq()
+            current_waist_yaw = arm_ctrl.get_current_waist_yaw()
             state_read_t1_ns = time.monotonic_ns()
             current_state_sample_ns = int((state_read_t0_ns + state_read_t1_ns) // 2)
             append_timed_sample(
@@ -725,6 +780,7 @@ if __name__ == '__main__':
                 current_state_sample_ns,
                 q=current_lr_arm_q.copy(),
                 dq=current_lr_arm_dq.copy(),
+                waist_yaw=float(current_waist_yaw),
             )
             (
                 left_gripper_feedback_q,
@@ -1081,7 +1137,7 @@ if __name__ == '__main__':
                     normalized_head_mode=normalized_head_mode,
                     tv_wrapper=tv_wrapper,
                     arm_ik=arm_ik,
-                    current_hold_q=current_hold_q,
+                    current_lr_arm_q=current_lr_arm_q,
                     reset_arm_ik_state=reset_arm_ik_state,
                     timer=time.perf_counter,
                 )
@@ -1089,6 +1145,9 @@ if __name__ == '__main__':
                 left_arm_enabled = operator_state.left_arm_enabled
                 right_arm_enabled = operator_state.right_arm_enabled
                 home_return_active = operator_state.home_return_active
+                if operator_state.home_return_interrupted:
+                    current_hold_q = current_lr_arm_q.copy()
+                    current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
                 post_home_takeover_armed = operator_state.post_home_takeover_armed or post_home_takeover_armed
                 left_takeover_settle_frames = operator_state.left_takeover_settle_frames
                 right_takeover_settle_frames = operator_state.right_takeover_settle_frames
@@ -1121,6 +1180,11 @@ if __name__ == '__main__':
                 is_ui_raw_replay=is_ui_raw_replay,
                 raw_replay_base_source=raw_replay_base_source,
             )
+            manual_torso_yaw_rate = map_manual_torso_yaw_rate(
+                args=args,
+                tele_data=tele_data,
+                home_return_active=home_return_active,
+            )
             if args.mobile_manipulation_mode == "mobile_ik_qp" and not is_ui_raw_replay:
                 nominal_source = runtime_base_source or "controller"
                 nominal_intent = map_base_command(
@@ -1129,11 +1193,6 @@ if __name__ == '__main__':
                     home_return_active=home_return_active,
                     base_intent=getattr(sample, "base_intent", None),
                     base_command_source=nominal_source,
-                )
-                manual_torso_yaw_rate = map_manual_torso_yaw_rate(
-                    args=args,
-                    tele_data=tele_data,
-                    home_return_active=home_return_active,
                 )
                 coordinated = mobile_coordinator.step(
                     motion_intent=motion_intent,
@@ -1164,6 +1223,21 @@ if __name__ == '__main__':
                 base_intent = final_base_intent
                 base_provider_active = True
             else:
+                if not is_ui_raw_replay:
+                    if arm_ctrl.waist_yaw_target is None:
+                        raise RuntimeError("manual waist yaw requires an initialized waist yaw target")
+                    waist_yaw_target, waist_yaw_saturated = integrate_manual_torso_yaw_target(
+                        current_target_rad=float(arm_ctrl.waist_yaw_target),
+                        yaw_rate_radps=manual_torso_yaw_rate,
+                        dt=control_dt,
+                    )
+                    arm_ctrl.set_waist_yaw_target(waist_yaw_target)
+                    if waist_yaw_saturated and not manual_waist_yaw_limit_state["active"]:
+                        logger_mp.warning(
+                            "[WAIST_YAW] manual target saturated at %.4f rad (limit=[-2.7053, 2.7053])",
+                            waist_yaw_target,
+                        )
+                    manual_waist_yaw_limit_state["active"] = waist_yaw_saturated
                 base_intent = getattr(sample, "base_intent", None)
                 base_provider_active = active_input_provider in {"lerobot_offline", "online_inference"} or is_ui_raw_replay
             base_result = apply_base_command(
@@ -1205,6 +1279,7 @@ if __name__ == '__main__':
                     vy_cmd=float(base_vy),
                     wz_cmd=float(base_wz),
                     z_cmd=float(base_z),
+                    frame_id="base_link",
                     source=base_action_source,
                     base_control_mode=base_control_mode,
                 )
@@ -1243,6 +1318,7 @@ if __name__ == '__main__':
                     workspace_max=workspace_max,
                     tapered_workspace_params=tapered_workspace_params,
                     compute_arm_gravity_tauff=compute_arm_gravity_tauff,
+                    side_workspaces=side_workspaces,
                     timing_debugger=timing_debugger,
                     any_zero_takeover_this_frame=any_zero_takeover_this_frame,
                     left_zero_takeover_this_frame=left_zero_takeover_this_frame,
@@ -1366,11 +1442,15 @@ if __name__ == '__main__':
 
             action_history_start = time.perf_counter()
             action_command_monotonic_ns = int(time.monotonic_ns())
+            waist_yaw_target = arm_ctrl.waist_yaw_target
+            if args.record_mobile_training_state and waist_yaw_target is None:
+                raise RuntimeError("mobile training state requires an initialized waist yaw target")
             append_timed_sample(
                 action_history,
                 action_command_monotonic_ns,
                 q=sol_q.copy(),
                 tauff=sol_tauff.copy(),
+                waist_yaw_target=(None if waist_yaw_target is None else float(waist_yaw_target)),
             )
             action_history_append_ms = (time.perf_counter() - action_history_start) * 1000.0
             if trace_seq is not None:
@@ -1433,12 +1513,14 @@ if __name__ == '__main__':
             if recording_flow is not None:
                 base_state_history_snapshot = None
                 base_height_history_snapshot = None
+                slam_tf_history_snapshot = None
                 if args.record_base:
                     if base_state_receiver is None:
                         raise RuntimeError("--record-base is enabled but base_state_receiver is not initialized")
                     if not base_state_receiver.is_alive():
                         raise RuntimeError("--record-base receiver thread is not alive")
                     base_state_history_snapshot, base_height_history_snapshot = base_state_receiver.snapshot_histories()
+                    slam_tf_history_snapshot = base_state_receiver.snapshot_slam_tf_history()
                 frame_recording = recording_flow.process_frame(
                     record_running=RECORD_RUNNING,
                     camera_sources=camera_sources,
@@ -1447,10 +1529,21 @@ if __name__ == '__main__':
                     teleop_input_perf_counter_ns=tele_data_recv_ts_ns,
                     arm_ik=arm_ik,
                     get_wrist_poses=get_robot_wrist_poses,
+                    get_wrist_poses_base_link=(
+                        get_robot_wrist_poses_base_link
+                        if args.record_mobile_training_state
+                        else None
+                    ),
+                    get_dex1_tcp_poses_base_link=(
+                        get_robot_dex1_tcp_poses_base_link
+                        if args.record_mobile_training_state
+                        else None
+                    ),
                     sim_state_subscriber=sim_state_subscriber,
                     base_state_history=base_state_history_snapshot,
                     base_height_history=base_height_history_snapshot,
                     base_action_history=base_action_history if args.record_base else None,
+                    slam_tf_history=slam_tf_history_snapshot,
                 )
                 RECORD_RUNNING = frame_recording.record_running
                 READY = frame_recording.ready

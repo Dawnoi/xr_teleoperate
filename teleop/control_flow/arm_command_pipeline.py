@@ -18,6 +18,7 @@ import numpy as np
 from core.control.arm_target_safety import limit_arm_joint_target_velocity
 from core.control.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_box,
+    clamp_dual_wrist_poses_to_side_workspaces,
     clamp_dual_wrist_poses_to_tapered_workspace,
 )
 from inference.online_session import online_inference_speed_limit_delta
@@ -118,6 +119,7 @@ def _solve_pose_target(
     workspace_min: np.ndarray,
     workspace_max: np.ndarray,
     tapered_workspace_params: Mapping[str, float],
+    side_workspaces: Optional[Mapping[str, Mapping[str, Any]]],
     is_online_inference: bool,
     timing_debugger: Any,
     log: Any,
@@ -129,7 +131,13 @@ def _solve_pose_target(
     if workspace_limit_enabled:
         original_left_pose = np.asarray(left_target_pose, dtype=float).copy()
         original_right_pose = np.asarray(right_target_pose, dtype=float).copy()
-        if workspace_mode == "box":
+        if side_workspaces is not None:
+            left_target_pose, right_target_pose, workspace_was_clamped = clamp_dual_wrist_poses_to_side_workspaces(
+                left_target_pose,
+                right_target_pose,
+                dict(side_workspaces),
+            )
+        elif workspace_mode == "box":
             left_target_pose, right_target_pose, workspace_was_clamped = clamp_dual_wrist_poses_to_box(
                 left_target_pose,
                 right_target_pose,
@@ -185,6 +193,7 @@ def _solve_motion_target(
     workspace_min: np.ndarray,
     workspace_max: np.ndarray,
     tapered_workspace_params: Mapping[str, float],
+    side_workspaces: Optional[Mapping[str, Mapping[str, Any]]],
     is_online_inference: bool,
     timing_debugger: Any,
     log: Any,
@@ -201,6 +210,7 @@ def _solve_motion_target(
             workspace_min=workspace_min,
             workspace_max=workspace_max,
             tapered_workspace_params=tapered_workspace_params,
+            side_workspaces=side_workspaces,
             is_online_inference=is_online_inference,
             timing_debugger=timing_debugger,
             log=log,
@@ -329,6 +339,7 @@ def build_arm_command(
     workspace_max: Any,
     tapered_workspace_params: Mapping[str, float],
     compute_arm_gravity_tauff: Callable[[Any, np.ndarray], np.ndarray],
+    side_workspaces: Optional[Mapping[str, Mapping[str, Any]]] = None,
     timing_debugger: Any = None,
     any_zero_takeover_this_frame: bool = False,
     left_zero_takeover_this_frame: bool = False,
@@ -394,6 +405,7 @@ def build_arm_command(
                 workspace_min=workspace_min,
                 workspace_max=workspace_max,
                 tapered_workspace_params=tapered_workspace_params,
+                side_workspaces=side_workspaces,
                 is_online_inference=is_online_inference,
                 timing_debugger=timing_debugger,
                 log=log,

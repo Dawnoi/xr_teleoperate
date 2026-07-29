@@ -155,6 +155,55 @@ def clamp_point_to_tapered_workspace(
     return clamped, bool(np.any(np.abs(clamped - point) > 1e-12))
 
 
+def clamp_point_to_asymmetric_tapered_workspace(
+    point,
+    z_min,
+    z_max,
+    x_min,
+    x_max_low,
+    x_max_high,
+    y_min_low,
+    y_min_high,
+    y_max_low,
+    y_max_high,
+):
+    """Clamp into a tapered prism with independently configurable y bounds.
+
+    ``y_min`` and ``y_max`` are interpolated over z independently.  This is
+    required for a cross-body workspace: for example, the left wrist may have
+    more room towards negative y than towards positive y.
+    """
+    point = np.asarray(point, dtype=float).reshape(3)
+    values = np.array(
+        [z_min, z_max, x_min, x_max_low, x_max_high, y_min_low, y_min_high, y_max_low, y_max_high],
+        dtype=float,
+    )
+    if not np.all(np.isfinite(values)):
+        raise ValueError("asymmetric tapered workspace parameters must be finite")
+    if z_max <= z_min:
+        raise ValueError("asymmetric tapered workspace requires z_max > z_min")
+
+    z = float(np.clip(point[2], z_min, z_max))
+    t = (z - float(z_min)) / (float(z_max) - float(z_min))
+    x_max = _lerp(x_max_low, x_max_high, t)
+    y_min = _lerp(y_min_low, y_min_high, t)
+    y_max = _lerp(y_max_low, y_max_high, t)
+    if x_max < float(x_min):
+        raise ValueError("asymmetric tapered workspace has x_max below x_min")
+    if y_max < y_min:
+        raise ValueError("asymmetric tapered workspace has y_max below y_min")
+
+    clamped = np.array(
+        [
+            np.clip(float(point[0]), float(x_min), x_max),
+            np.clip(float(point[1]), y_min, y_max),
+            z,
+        ],
+        dtype=float,
+    )
+    return clamped, bool(np.any(np.abs(clamped - point) > 1e-12))
+
+
 def clamp_wrist_pose_to_tapered_workspace(
     pose,
     z_min,
@@ -178,6 +227,81 @@ def clamp_wrist_pose_to_tapered_workspace(
     )
     clamped_pose[:3, 3] = clamped_point
     return clamped_pose, was_clamped
+
+
+def clamp_wrist_pose_to_asymmetric_tapered_workspace(
+    pose,
+    z_min,
+    z_max,
+    x_min,
+    x_max_low,
+    x_max_high,
+    y_min_low,
+    y_min_high,
+    y_max_low,
+    y_max_high,
+):
+    clamped_pose = np.asarray(pose, dtype=float).copy()
+    if clamped_pose.shape != (4, 4) or not np.all(np.isfinite(clamped_pose)):
+        raise ValueError("workspace pose must be a finite 4x4 matrix")
+    clamped_point, was_clamped = clamp_point_to_asymmetric_tapered_workspace(
+        clamped_pose[:3, 3],
+        z_min,
+        z_max,
+        x_min,
+        x_max_low,
+        x_max_high,
+        y_min_low,
+        y_min_high,
+        y_max_low,
+        y_max_high,
+    )
+    clamped_pose[:3, 3] = clamped_point
+    return clamped_pose, was_clamped
+
+
+def clamp_wrist_pose_to_workspace(pose, workspace):
+    """Clamp one wrist pose using one explicit workspace specification.
+
+    Required schema:
+      ``{mode, workspace_min, workspace_max, tapered}``
+
+    Tapered workspaces require independent ``y_min_low/high`` and
+    ``y_max_low/high`` values.  Shared legacy workspaces are normalized to
+    this schema before reaching this function.
+    """
+    if not isinstance(workspace, dict):
+        raise ValueError("workspace specification must be a dict")
+    mode = str(workspace.get("mode", ""))
+    if mode == "box":
+        if "workspace_min" not in workspace or "workspace_max" not in workspace:
+            raise ValueError("box workspace requires workspace_min and workspace_max")
+        return clamp_wrist_pose_to_box(pose, workspace["workspace_min"], workspace["workspace_max"])
+    if mode != "tapered":
+        raise ValueError("workspace mode must be box or tapered")
+    tapered = workspace.get("tapered")
+    if not isinstance(tapered, dict):
+        raise ValueError("tapered workspace requires a tapered parameter dict")
+    names = (
+        "z_min", "z_max", "x_min", "x_max_low", "x_max_high",
+        "y_min_low", "y_min_high", "y_max_low", "y_max_high",
+    )
+    missing = [name for name in names if name not in tapered]
+    if missing:
+        raise ValueError(f"tapered workspace is missing parameters: {missing}")
+    return clamp_wrist_pose_to_asymmetric_tapered_workspace(
+        pose,
+        *(float(tapered[name]) for name in names),
+    )
+
+
+def clamp_dual_wrist_poses_to_side_workspaces(left_pose, right_pose, side_workspaces):
+    """Clamp each wrist with its own explicit workspace definition."""
+    if not isinstance(side_workspaces, dict) or set(side_workspaces) != {"left", "right"}:
+        raise ValueError("side workspaces must contain exactly left and right")
+    left_clamped_pose, left_clamped = clamp_wrist_pose_to_workspace(left_pose, side_workspaces["left"])
+    right_clamped_pose, right_clamped = clamp_wrist_pose_to_workspace(right_pose, side_workspaces["right"])
+    return left_clamped_pose, right_clamped_pose, (left_clamped or right_clamped)
 
 
 def clamp_dual_wrist_poses_to_tapered_workspace(

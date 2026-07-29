@@ -15,10 +15,15 @@ unset PYTHONPATH || true
 
 RECORD_SLAM_MAP_POSE=0
 for arg in "$@"; do
-  if [[ "${arg}" == "--record-slam-map-pose" ]]; then
-    RECORD_SLAM_MAP_POSE=1
-    break
-  fi
+  case "${arg}" in
+    --record-slam-map-pose)
+      RECORD_SLAM_MAP_POSE=1
+      ;;
+    --mobile-manipulation-mode|--mobile-manipulation-mode=*)
+      echo "[START] this script fixes --mobile-manipulation-mode direct_ik; use start_real_robot_wired_3cams_zmq.sh for mobile_ik_qp" >&2
+      exit 2
+      ;;
+  esac
 done
 if [[ "${RECORD_SLAM_MAP_POSE}" == "1" ]]; then
   ROS_SETUP="/opt/ros/humble/setup.bash"
@@ -49,6 +54,7 @@ cd "${REPO_DIR}"
 
 echo "[START] real teleop entry: ${REAL_TELEOP_ENTRY}"
 echo "[START] network interface: ${NETWORK_INTERFACE}"
+echo "[START] motion mode: direct_ik; legacy shared workspace"
 
 exec python "${REAL_TELEOP_ENTRY}" \
   --input-mode controller \
@@ -56,24 +62,23 @@ exec python "${REAL_TELEOP_ENTRY}" \
   --ee dex1 \
   --network-interface "${NETWORK_INTERFACE}" \
   --base-controller g1d_agv \
+  --mobile-manipulation-mode direct_ik \
   --controller-deadman grip \
   --head-reference-mode fixed_per_grip \
   --controller-mapping-mode anchored_safe \
   --controller-orientation-mode relative \
   --max-arm-joint-speed 5.0 \
   --arm-workspace-mode tapered \
-  --arm-workspace-z-min -0.055 \
-  --arm-workspace-z-max 0.245 \
-  --arm-workspace-x-min 0.154 \
+  --arm-workspace-layout shared \
+  --arm-workspace-z-min -0.05 \
+  --arm-workspace-z-max 0.45 \
+  --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
-  --arm-workspace-y-max-low 0.20 \
-  --arm-workspace-y-max-high 0.28 \
-  --arm-workspace-layout per_arm \
-  --left-arm-workspace-tapered -0.055 0.245 0.154 0.38 0.52 0.00 0.00 0.20 0.28 \
-  --right-arm-workspace-tapered -0.055 0.245 0.154 0.38 0.52 -0.20 -0.28 0.00 0.00 \
-  --base-max-vx 0.20 \
-  --base-max-wz 0.60 \
+  --arm-workspace-y-max-low 0.24 \
+  --arm-workspace-y-max-high 0.38 \
+  --base-max-vx 0.10 \
+  --base-max-wz 0.35 \
   --base-max-z 1.0 \
   --base-stick-deadzone 0.10 \
   --record \

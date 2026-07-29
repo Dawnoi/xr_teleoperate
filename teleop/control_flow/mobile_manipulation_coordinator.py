@@ -49,10 +49,8 @@ class G1DIkFrameKinematics:
         if self._torso_from_ik.shape != (4, 4) or not np.all(np.isfinite(self._torso_from_ik)):
             raise ValueError("torso_from_ik must be a finite 4x4 transform")
 
-    def global_from_ik(self, *, odom_world_from_agv: np.ndarray, column_position: float, torso_yaw: float) -> np.ndarray:
-        odom_world_from_agv = np.asarray(odom_world_from_agv, dtype=float)
-        if odom_world_from_agv.shape != (4, 4) or not np.all(np.isfinite(odom_world_from_agv)):
-            raise ValueError("odom_world_from_agv must be a finite 4x4 transform")
+    def agv_from_ik(self, *, column_position: float, torso_yaw: float) -> np.ndarray:
+        """Return AGV_link from the legacy G1_29 IK pelvis frame."""
         if not np.isfinite(column_position) or not np.isfinite(torso_yaw):
             raise ValueError("column position and torso yaw must be finite")
         q = np.zeros(self._model.nq)
@@ -62,10 +60,47 @@ class G1DIkFrameKinematics:
         self._pin.forwardKinematics(self._model, self._data, q)
         self._pin.updateFramePlacements(self._model, self._data)
         agv_from_torso = self._data.oMf[self._agv_frame].inverse() * self._data.oMf[self._torso_frame]
-        torso = np.eye(4)
-        torso[:3, :3] = agv_from_torso.rotation
-        torso[:3, 3] = agv_from_torso.translation
-        return odom_world_from_agv @ torso @ self._torso_from_ik
+        agv_from_ik = np.eye(4)
+        agv_from_ik[:3, :3] = agv_from_torso.rotation
+        agv_from_ik[:3, 3] = agv_from_torso.translation
+        return agv_from_ik @ self._torso_from_ik
+
+    def global_from_ik(self, *, odom_world_from_agv: np.ndarray, column_position: float, torso_yaw: float) -> np.ndarray:
+        odom_world_from_agv = np.asarray(odom_world_from_agv, dtype=float)
+        if odom_world_from_agv.shape != (4, 4) or not np.all(np.isfinite(odom_world_from_agv)):
+            raise ValueError("odom_world_from_agv must be a finite 4x4 transform")
+        return odom_world_from_agv @ self.agv_from_ik(
+            column_position=column_position,
+            torso_yaw=torso_yaw,
+        )
+
+
+def column_position_from_raw_height(
+    *,
+    raw_height: float,
+    raw_minimum: float,
+    raw_maximum: float,
+    column_travel_m: float,
+) -> float:
+    """Map the calibrated DDS height reading to physical column travel in metres."""
+    values = {
+        "raw_height": raw_height,
+        "raw_minimum": raw_minimum,
+        "raw_maximum": raw_maximum,
+        "column_travel_m": column_travel_m,
+    }
+    for name, value in values.items():
+        if not np.isfinite(value):
+            raise ValueError(f"{name} must be finite")
+    if raw_maximum <= raw_minimum:
+        raise ValueError("raw_maximum must be greater than raw_minimum")
+    if column_travel_m <= 0.0:
+        raise ValueError("column_travel_m must be positive")
+    if raw_height < raw_minimum or raw_height > raw_maximum:
+        raise RuntimeError("MOBILE_COLUMN_STATE_OUT_OF_RANGE")
+    return float(column_travel_m) * (float(raw_height) - float(raw_minimum)) / (
+        float(raw_maximum) - float(raw_minimum)
+    )
 
 
 class MobileManipulationCoordinator:

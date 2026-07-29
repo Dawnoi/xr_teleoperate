@@ -13,6 +13,9 @@ import time
 from core.input.base import BaseCommandIntent
 
 
+WAIST_YAW_MINIMUM_RAD = -2.7053
+WAIST_YAW_MAXIMUM_RAD = 2.7053
+
 @dataclass
 class BaseCommandResult:
     base_control_mode: str = "none"
@@ -189,7 +192,12 @@ def map_base_command(
 
 
 def map_manual_torso_yaw_rate(*, args: Any, tele_data: Any, home_return_active: bool) -> float:
-    """Map the right controller X axis to a bounded manual torso yaw rate."""
+    """Map the right controller X axis to a bounded manual torso yaw rate.
+
+    This is an independent waist-motor command. It does not participate in
+    arm IK and does not share an axis with the G1D base yaw, which uses the
+    left controller X axis.
+    """
     if home_return_active:
         return 0.0
     if str(getattr(args, "input_mode", "hand")) != "controller":
@@ -199,6 +207,28 @@ def map_manual_torso_yaw_rate(*, args: Any, tele_data: Any, home_return_active: 
         float(args.base_stick_deadzone),
     )
     return -right_stick_x * float(args.mobile_max_torso_yaw_rate)
+
+
+def integrate_manual_torso_yaw_target(
+    *,
+    current_target_rad: float,
+    yaw_rate_radps: float,
+    dt: float,
+) -> tuple[float, bool]:
+    """Integrate the independent waist command and enforce hardware limits."""
+    values = {
+        "current_target_rad": current_target_rad,
+        "yaw_rate_radps": yaw_rate_radps,
+        "dt": dt,
+    }
+    for name, value in values.items():
+        if not math.isfinite(float(value)):
+            raise ValueError(f"{name} must be finite")
+    if float(dt) <= 0.0:
+        raise ValueError("dt must be positive")
+    raw_target = float(current_target_rad) + float(yaw_rate_radps) * float(dt)
+    target = min(max(raw_target, WAIST_YAW_MINIMUM_RAD), WAIST_YAW_MAXIMUM_RAD)
+    return target, not math.isclose(target, raw_target, abs_tol=1e-12)
 
 
 def apply_base_command(

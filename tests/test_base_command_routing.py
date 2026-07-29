@@ -14,7 +14,14 @@ import data_pipeline.recording
 import teleop.debug
 import teleop.robot_control
 
-from teleop.control_flow.base_command import apply_base_command, resolve_runtime_base_command_source
+from teleop.control_flow.base_command import (
+    WAIST_YAW_MAXIMUM_RAD,
+    WAIST_YAW_MINIMUM_RAD,
+    apply_base_command,
+    integrate_manual_torso_yaw_target,
+    map_manual_torso_yaw_rate,
+    resolve_runtime_base_command_source,
+)
 from teleop.real.args import parse_args
 
 
@@ -105,6 +112,55 @@ def _tele_data():
         left_ctrl_thumbstickValue=(0.2, 0.4),
         right_ctrl_thumbstickValue=(0.1, 0.5),
     )
+
+
+def test_right_stick_x_controls_waist_while_left_stick_x_controls_g1d_base_yaw():
+    args = _args(base_controller="g1d_agv", motion=False, base_motion=True)
+    args.mobile_max_torso_yaw_rate = 0.5
+    args.base_stick_deadzone = 0.0
+    tele_data = _tele_data()
+
+    result = apply_base_command(
+        args=args,
+        tele_data=tele_data,
+        home_return_active=False,
+        agv_bridge=Mock(get_timing_snapshot=Mock(return_value={})),
+    )
+    manual_waist_rate = map_manual_torso_yaw_rate(
+        args=args,
+        tele_data=tele_data,
+        home_return_active=False,
+    )
+
+    assert result.base_wz == pytest.approx(-0.2 * args.base_max_wz)
+    assert manual_waist_rate == pytest.approx(-0.1 * args.mobile_max_torso_yaw_rate)
+
+
+def test_manual_waist_target_integrates_and_reports_hardware_limit_saturation():
+    target, saturated = integrate_manual_torso_yaw_target(
+        current_target_rad=0.2,
+        yaw_rate_radps=-0.5,
+        dt=0.04,
+    )
+    assert target == pytest.approx(0.18)
+    assert saturated is False
+
+    target, saturated = integrate_manual_torso_yaw_target(
+        current_target_rad=WAIST_YAW_MAXIMUM_RAD - 0.001,
+        yaw_rate_radps=0.5,
+        dt=0.04,
+    )
+    assert target == WAIST_YAW_MAXIMUM_RAD
+    assert saturated is True
+
+    with pytest.raises(ValueError, match="dt must be positive"):
+        integrate_manual_torso_yaw_target(
+            current_target_rad=0.0,
+            yaw_rate_radps=0.0,
+            dt=0.0,
+        )
+
+    assert WAIST_YAW_MINIMUM_RAD == pytest.approx(-WAIST_YAW_MAXIMUM_RAD)
 
 
 def test_parser_exposes_explicit_base_controller_backends():

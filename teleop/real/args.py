@@ -31,7 +31,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--mobile-column-travel-m', type=float, default=0.42,
                         help='Total physical G1D column travel used by mobile_ik_qp.')
     parser.add_argument('--mobile-max-torso-yaw-rate', type=float, default=0.50,
-                        help='Maximum torso yaw rate in rad/s used by mobile_ik_qp.')
+                        help='Maximum independent waist-yaw rate in rad/s from the right thumbstick X axis.')
     parser.add_argument('--base-max-vx', type=float, default=0.3,
                         help='Maximum commanded chassis x velocity in m/s from the left thumbstick Y axis.')
     parser.add_argument('--base-max-vy', type=float, default=0.3,
@@ -116,26 +116,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='Disable wrist workspace clamping before IK.')
     parser.add_argument('--arm-workspace-mode', type=str, choices=['tapered', 'box'], default='tapered',
                         help='Workspace shape before IK. "tapered" = lower narrow / upper wide inverted-trapezoid prism. "box" = fixed rectangular box.')
-    parser.add_argument('--arm-workspace-min', type=float, nargs=3, default=[0.10, -0.32, -0.08],
+    parser.add_argument('--arm-workspace-layout', choices=['shared', 'per_arm'], default='shared',
+                        help='shared uses one workspace for both wrists. per_arm requires explicit left/right workspace arguments and lets either gripped wrist independently drive mobile_ik_qp.')
+    parser.add_argument('--arm-workspace-min', type=float, nargs=3, default=[0.10, -0.28, -0.055],
                         metavar=('XMIN', 'YMIN', 'ZMIN'),
                         help='Forward box workspace lower bound in the arm IK/base frame, applied before IK when --arm-workspace-mode box.')
-    parser.add_argument('--arm-workspace-max', type=float, nargs=3, default=[0.45, 0.32, 0.42],
+    parser.add_argument('--arm-workspace-max', type=float, nargs=3, default=[0.45, 0.28, 0.245],
                         metavar=('XMAX', 'YMAX', 'ZMAX'),
                         help='Forward box workspace upper bound in the arm IK/base frame, applied before IK when --arm-workspace-mode box.')
-    parser.add_argument('--arm-workspace-z-min', type=float, default=-0.05,
-                        help='Tapered workspace lower z bound in the arm IK/base frame.')
-    parser.add_argument('--arm-workspace-z-max', type=float, default=0.45,
-                        help='Tapered workspace upper z bound in the arm IK/base frame.')
-    parser.add_argument('--arm-workspace-x-min', type=float, default=0.10,
-                        help='Tapered workspace minimum forward x bound.')
+    parser.add_argument('--arm-workspace-z-min', type=float, default=-0.055,
+                        help='Tapered workspace lower z bound in the arm IK/base frame. Default is the G1D URDF zero-pose Dex1 TCP height (0.095226 m) minus 0.15 m.')
+    parser.add_argument('--arm-workspace-z-max', type=float, default=0.245,
+                        help='Tapered workspace upper z bound in the arm IK/base frame. Default is the G1D URDF zero-pose Dex1 TCP height (0.095226 m) plus 0.15 m.')
+    parser.add_argument('--arm-workspace-x-min', type=float, default=0.154,
+                        help='Tapered workspace minimum forward x bound. Default is the G1D URDF zero-pose J6 wrist-pitch joint center (0.153778 m in the arm IK frame), rounded to millimetres.')
     parser.add_argument('--arm-workspace-x-max-low', type=float, default=0.38,
                         help='Tapered workspace forward x upper bound at z_min.')
     parser.add_argument('--arm-workspace-x-max-high', type=float, default=0.52,
                         help='Tapered workspace forward x upper bound at z_max.')
-    parser.add_argument('--arm-workspace-y-max-low', type=float, default=0.24,
+    parser.add_argument('--arm-workspace-y-max-low', type=float, default=0.20,
                         help='Tapered workspace lateral |y| bound at z_min.')
-    parser.add_argument('--arm-workspace-y-max-high', type=float, default=0.38,
+    parser.add_argument('--arm-workspace-y-max-high', type=float, default=0.28,
                         help='Tapered workspace lateral |y| bound at z_max.')
+    parser.add_argument('--left-arm-workspace-min', type=float, nargs=3, default=None,
+                        metavar=('XMIN', 'YMIN', 'ZMIN'),
+                        help='Required left box workspace lower bound when --arm-workspace-layout per_arm --arm-workspace-mode box.')
+    parser.add_argument('--left-arm-workspace-max', type=float, nargs=3, default=None,
+                        metavar=('XMAX', 'YMAX', 'ZMAX'),
+                        help='Required left box workspace upper bound when --arm-workspace-layout per_arm --arm-workspace-mode box.')
+    parser.add_argument('--right-arm-workspace-min', type=float, nargs=3, default=None,
+                        metavar=('XMIN', 'YMIN', 'ZMIN'),
+                        help='Required right box workspace lower bound when --arm-workspace-layout per_arm --arm-workspace-mode box.')
+    parser.add_argument('--right-arm-workspace-max', type=float, nargs=3, default=None,
+                        metavar=('XMAX', 'YMAX', 'ZMAX'),
+                        help='Required right box workspace upper bound when --arm-workspace-layout per_arm --arm-workspace-mode box.')
+    parser.add_argument('--left-arm-workspace-tapered', type=float, nargs=9, default=None,
+                        metavar=('ZMIN', 'ZMAX', 'XMIN', 'XMAXLOW', 'XMAXHIGH', 'YMINLOW', 'YMINHIGH', 'YMAXLOW', 'YMAXHIGH'),
+                        help='Required left tapered workspace when layout=per_arm: z_min z_max x_min x_max_low x_max_high y_min_low y_min_high y_max_low y_max_high.')
+    parser.add_argument('--right-arm-workspace-tapered', type=float, nargs=9, default=None,
+                        metavar=('ZMIN', 'ZMAX', 'XMIN', 'XMAXLOW', 'XMAXHIGH', 'YMINLOW', 'YMINHIGH', 'YMAXLOW', 'YMAXHIGH'),
+                        help='Required right tapered workspace when layout=per_arm: z_min z_max x_min x_max_low x_max_high y_min_low y_min_high y_max_low y_max_high.')
     parser.add_argument('--timing-debug', action='store_true',
                         help='Enable periodic timing / staleness logs for diagnosing wireless lag and runtime stalls.')
     parser.add_argument('--timing-debug-interval', type=float, default=2.0,
@@ -180,10 +200,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='Unitree DDS odometry topic used for recorded base world pose and velocity.')
     parser.add_argument('--base-height-topic', type=str, default='rt/hispeed_state',
                         help='Unitree DDS Point32 topic used for recorded base height. Set empty string to disable height recording.')
-    parser.add_argument('--base-state-max-age-ms', type=float, default=150.0,
-                        help='Maximum allowed base state/height timestamp delta from the camera sample in milliseconds.')
-    parser.add_argument('--base-action-max-age-ms', type=float, default=500.0,
-                        help='Maximum allowed hold-last base command age in milliseconds.')
+    parser.add_argument('--record-slam-map-pose', action='store_true',
+                        help='Record SLAM map pose from ROS2 /tf. Fails startup when slamware_map->--slam-pose-source-frame is unavailable.')
+    parser.add_argument('--slam-pose-source-frame', type=str, default='laser',
+                        help='TF source mode for map pose. Use odom to compose slamware_map->odom->base_link; other values record direct slamware_map->source under an explicit identity-extrinsic assumption.')
+    parser.add_argument('--slam-chain-max-skew-ms', type=float, default=75.0,
+                        help='Maximum TF header timestamp skew when --slam-pose-source-frame odom composes map->odom with odom->base_link.')
+    parser.add_argument('--record-mobile-training-state', action='store_true',
+                        help='Add base_link-local EEF poses plus calibrated column/waist state for the mobile-manipulation training schema.')
+    parser.add_argument('--base-velocity-frame', choices=['base_link', 'world'], default=None,
+                        help='Coordinate frame of rt/agv/odom vx/vy/wz. Required for --record-mobile-training-state.')
+    parser.add_argument('--base-state-max-age-ms', type=float, default=131.578947,
+                        help='Maximum base odometry timestamp delta from the camera sample in milliseconds (2.5 periods at 19 Hz).')
+    parser.add_argument('--slam-tf-max-age-ms', type=float, default=125.0,
+                        help='Maximum composed SLAM TF timestamp delta from the camera sample in milliseconds (2.5 periods at 20 Hz).')
     parser.add_argument('--base-history-size', type=int, default=512,
                         help='Maximum number of base state/action samples retained for timestamp alignment.')
     parser.add_argument('--base-startup-timeout-sec', type=float, default=3.0,
@@ -225,10 +255,25 @@ def parse_args(argv=None):
         raise ValueError("--record-base requires --record")
     if args.record_base and float(args.base_state_max_age_ms) <= 0.0:
         raise ValueError("--base-state-max-age-ms must be positive")
-    if args.record_base and float(args.base_action_max_age_ms) <= 0.0:
-        raise ValueError("--base-action-max-age-ms must be positive")
+    if args.record_slam_map_pose and float(args.slam_tf_max_age_ms) <= 0.0:
+        raise ValueError("--slam-tf-max-age-ms must be positive")
     if args.record_base and int(args.base_history_size) <= 0:
         raise ValueError("--base-history-size must be positive")
     if args.record_base and float(args.base_startup_timeout_sec) <= 0.0:
         raise ValueError("--base-startup-timeout-sec must be positive")
+    if args.record_slam_map_pose and not args.record_base:
+        raise ValueError("--record-slam-map-pose requires --record-base")
+    if args.record_slam_map_pose and not str(args.slam_pose_source_frame or "").strip():
+        raise ValueError("--slam-pose-source-frame must not be empty with --record-slam-map-pose")
+    if args.record_slam_map_pose and float(args.slam_chain_max_skew_ms) <= 0.0:
+        raise ValueError("--slam-chain-max-skew-ms must be positive")
+    if args.record_mobile_training_state:
+        if not args.record_base:
+            raise ValueError("--record-mobile-training-state requires --record-base")
+        if not args.record_slam_map_pose:
+            raise ValueError("--record-mobile-training-state requires --record-slam-map-pose")
+        if not str(args.base_height_topic or "").strip():
+            raise ValueError("--record-mobile-training-state requires --base-height-topic")
+        if args.base_velocity_frame is None:
+            raise ValueError("--record-mobile-training-state requires --base-velocity-frame base_link or world")
     return args

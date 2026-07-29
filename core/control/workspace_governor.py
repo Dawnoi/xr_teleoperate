@@ -9,8 +9,7 @@ from typing import Mapping
 import numpy as np
 
 from core.control.arm_workspace_safety import (
-    clamp_wrist_pose_to_box,
-    clamp_wrist_pose_to_tapered_workspace,
+    clamp_wrist_pose_to_workspace,
 )
 
 
@@ -32,6 +31,7 @@ class WorkspaceGovernorConfig:
     column_maximum: float = 0.42
     torso_minimum: float = -2.60
     torso_maximum: float = 2.60
+    side_workspaces: Mapping[str, Mapping[str, object]] | None = None
 
 
 @dataclass(frozen=True)
@@ -117,7 +117,7 @@ def workspace_command_delta(command, *, dt: float, column_speed_mps: float) -> n
 
 
 class WorkspaceGovernor:
-    """Keep enabled wrist targets inside a shared comfortable IK workspace."""
+    """Keep enabled wrist targets inside their configured comfortable IK workspace."""
 
     def __init__(self, config: WorkspaceGovernorConfig) -> None:
         self.config = config
@@ -139,26 +139,65 @@ class WorkspaceGovernor:
             raise ValueError("column limits must be ordered")
         if self.config.torso_minimum >= self.config.torso_maximum:
             raise ValueError("torso limits must be ordered")
+        if self.config.side_workspaces is not None:
+            if set(self.config.side_workspaces) != {"left", "right"}:
+                raise ValueError("side_workspaces must contain exactly left and right")
+            for side in ("left", "right"):
+                self._clamp_position(np.zeros(3), 0.0, side=side)
 
     def reset(self) -> None:
         self._active = False
         self._last_command[:] = 0.0
 
-    def _clamp_position(self, position: np.ndarray, margin: float) -> np.ndarray:
+    def _workspace_for_side(self, side: str) -> Mapping[str, object]:
+        if side not in ("left", "right"):
+            raise ValueError(f"unsupported arm side: {side}")
+        if self.config.side_workspaces is not None:
+            workspace = self.config.side_workspaces.get(side)
+            if workspace is None:
+                raise ValueError(f"missing {side} workspace")
+            return workspace
+        tapered = {name: float(value) for name, value in self.config.tapered.items()}
+        if self.config.mode == "tapered":
+            for name in ("z_min", "z_max", "x_min", "x_max_low", "x_max_high", "y_max_low", "y_max_high"):
+                if name not in tapered:
+                    raise ValueError(f"shared tapered workspace is missing {name}")
+            tapered["y_min_low"] = -tapered["y_max_low"]
+            tapered["y_min_high"] = -tapered["y_max_high"]
+        return {
+            "mode": self.config.mode,
+            "workspace_min": self.config.workspace_min,
+            "workspace_max": self.config.workspace_max,
+            "tapered": tapered,
+        }
+
+    def _clamp_position(self, position: np.ndarray, margin: float, *, side: str) -> np.ndarray:
         pose = np.eye(4)
         pose[:3, 3] = _finite_vector(position, 3, "workspace target")
-        if self.config.mode == "box":
-            minimum = _finite_vector(self.config.workspace_min, 3, "workspace minimum") + margin
-            maximum = _finite_vector(self.config.workspace_max, 3, "workspace maximum") - margin
+        workspace = dict(self._workspace_for_side(side))
+        mode = str(workspace.get("mode", ""))
+        if mode == "box":
+            minimum = _finite_vector(workspace.get("workspace_min"), 3, f"{side} workspace minimum") + margin
+            maximum = _finite_vector(workspace.get("workspace_max"), 3, f"{side} workspace maximum") - margin
             if np.any(maximum <= minimum):
                 raise ValueError("workspace margin collapses the box workspace")
-            return clamp_wrist_pose_to_box(pose, minimum, maximum)[0][:3, 3]
-        parameters = {name: float(value) for name, value in self.config.tapered.items()}
+            workspace["workspace_min"] = minimum
+            workspace["workspace_max"] = maximum
+            return clamp_wrist_pose_to_workspace(pose, workspace)[0][:3, 3]
+        if mode != "tapered":
+            raise ValueError("workspace mode must be box or tapered")
+        tapered = workspace.get("tapered")
+        if not isinstance(tapered, Mapping):
+            raise ValueError("tapered workspace requires a parameter mapping")
+        parameters = {name: float(value) for name, value in tapered.items()}
         for name in ("z_min", "x_min"):
             parameters[name] += margin
         for name in ("z_max", "x_max_low", "x_max_high", "y_max_low", "y_max_high"):
             parameters[name] -= margin
-        return clamp_wrist_pose_to_tapered_workspace(pose, **parameters)[0][:3, 3]
+        for name in ("y_min_low", "y_min_high"):
+            parameters[name] += margin
+        workspace["tapered"] = parameters
+        return clamp_wrist_pose_to_workspace(pose, workspace)[0][:3, 3]
 
     def step(self, targets, enabled, nominal_command, *, column_position: float, torso_yaw: float, dt: float) -> WorkspaceGovernorResult:
         nominal = _finite_vector(nominal_command, 4, "nominal body command")
@@ -172,11 +211,17 @@ class WorkspaceGovernor:
             self.reset()
             self._last_command[:] = nominal
             return WorkspaceGovernorResult(nominal.copy(), False, True, 0.0)
-        deltas = [self._clamp_position(point, self.config.comfort_margin) - point for point in active.values()]
+        deltas = [
+            self._clamp_position(point, self.config.comfort_margin, side=side) - point
+            for side, point in active.items()
+        ]
         if not self._active and any(np.linalg.norm(delta) > 1e-9 for delta in deltas):
             self._active = True
         recovery_margin = self.config.comfort_margin + self.config.hysteresis
-        recovery = [self._clamp_position(point, recovery_margin) - point for point in active.values()]
+        recovery = [
+            self._clamp_position(point, recovery_margin, side=side) - point
+            for side, point in active.items()
+        ]
         if self._active and not any(np.linalg.norm(delta) > 1e-9 for delta in recovery):
             self._active = False
         if not self._active:

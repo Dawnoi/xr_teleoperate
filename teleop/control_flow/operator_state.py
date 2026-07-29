@@ -27,6 +27,7 @@ class OperatorStateResult:
     right_arm_enabled: bool
     home_return_active: bool
     home_wait_grip_release: bool
+    home_return_interrupted: bool
     post_home_takeover_armed: bool
     left_takeover_settle_frames: int
     right_takeover_settle_frames: int
@@ -64,7 +65,7 @@ class OperatorStateFlow:
         normalized_head_mode: str,
         tv_wrapper,
         arm_ik,
-        current_hold_q,
+        current_lr_arm_q,
         reset_arm_ik_state: Callable[[Any, Any], None],
         timer,
         ) -> OperatorStateResult:
@@ -77,6 +78,14 @@ class OperatorStateFlow:
 
         home_return_active = self._apply_home_button(tele_data, home_return_active)
         left_arm_enabled, right_arm_enabled = self._resolve_enabled_arms(args, tele_data, motion_intent)
+        home_return_active, home_return_interrupted = self._interrupt_home_on_grip(
+            home_return_active=home_return_active,
+            tele_data=tele_data,
+            tv_wrapper=tv_wrapper,
+            arm_ik=arm_ik,
+            current_lr_arm_q=current_lr_arm_q,
+            reset_arm_ik_state=reset_arm_ik_state,
+        )
         left_arm_enabled, right_arm_enabled, post_home_takeover_armed = self._apply_home_release_gate(
             left_arm_enabled=left_arm_enabled,
             right_arm_enabled=right_arm_enabled,
@@ -84,7 +93,7 @@ class OperatorStateFlow:
             normalized_head_mode=normalized_head_mode,
             tv_wrapper=tv_wrapper,
             arm_ik=arm_ik,
-            current_hold_q=current_hold_q,
+            current_lr_arm_q=current_lr_arm_q,
             reset_arm_ik_state=reset_arm_ik_state,
         )
         self._log_deadman_change(args, left_arm_enabled, right_arm_enabled)
@@ -102,6 +111,7 @@ class OperatorStateFlow:
             right_arm_enabled=right_arm_enabled,
             home_return_active=home_return_active,
             home_wait_grip_release=self.home_wait_grip_release,
+            home_return_interrupted=home_return_interrupted,
             post_home_takeover_armed=post_home_takeover_armed,
             left_takeover_settle_frames=self.left_takeover_settle_frames,
             right_takeover_settle_frames=self.right_takeover_settle_frames,
@@ -143,6 +153,42 @@ class OperatorStateFlow:
             right_arm_enabled = right_arm_enabled and ("right" in provider_enabled_set)
         return left_arm_enabled, right_arm_enabled
 
+    def _interrupt_home_on_grip(
+        self,
+        *,
+        home_return_active: bool,
+        tele_data,
+        tv_wrapper,
+        arm_ik,
+        current_lr_arm_q,
+        reset_arm_ik_state: Callable[[Any, Any], None],
+    ) -> tuple[bool, bool]:
+        """Cancel an in-progress home return before its next arm command is built."""
+
+        if not home_return_active:
+            return False, False
+
+        left_grip = bool(tele_data.left_ctrl_squeeze)
+        right_grip = bool(tele_data.right_ctrl_squeeze)
+        if not left_grip and not right_grip:
+            return True, False
+
+        sides = "/".join(
+            side for side, pressed in (("left", left_grip), ("right", right_grip)) if pressed
+        )
+        self.home_wait_grip_release = False
+        rebase_xr_takeover_after_provider_switch(
+            tv_wrapper=tv_wrapper,
+            arm_ik=arm_ik,
+            current_arm_q=current_lr_arm_q,
+            reset_arm_ik_state=reset_arm_ik_state,
+        )
+        self.log.info(
+            "[HOME] canceled by %s grip; holding current pose and re-anchoring XR/IK before takeover.",
+            sides,
+        )
+        return False, True
+
     def _apply_home_release_gate(
         self,
         *,
@@ -152,7 +198,7 @@ class OperatorStateFlow:
         normalized_head_mode: str,
         tv_wrapper,
         arm_ik,
-        current_hold_q,
+        current_lr_arm_q,
         reset_arm_ik_state: Callable[[Any, Any], None],
     ) -> tuple[bool, bool, bool]:
         if not self.home_wait_grip_release:
@@ -164,7 +210,7 @@ class OperatorStateFlow:
         if normalized_head_mode in {"head_coupled", "hybrid"}:
             tv_wrapper.sync_reference_to_current_live_pose(require_live=False)
             self.log.info("[HOME] reference synced to current live pose after home return.")
-        reset_arm_ik_state(arm_ik, current_hold_q)
+        reset_arm_ik_state(arm_ik, current_lr_arm_q)
         self.log.info("[HOME] IK state reset at current home pose.")
         self.log.info("[HOME] grip released -> teleop re-enabled.")
         return left_arm_enabled, right_arm_enabled, True
