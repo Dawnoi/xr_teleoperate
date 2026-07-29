@@ -58,6 +58,7 @@ from teleop.control_flow.base_command import (
 from teleop.control_flow.mobile_manipulation_coordinator import (
     column_position_from_raw_height,
     G1DIkFrameKinematics,
+    legacy_g1_29_torso_from_ik_urdf,
     MobileManipulationCoordinator,
     MobileStateSample,
 )
@@ -439,7 +440,12 @@ if __name__ == '__main__':
             inference_args.online_inference_base_url = (
                 str(getattr(args, "online_inference_base_url", "") or "").strip() or "http://127.0.0.1:18027"
             )
-            inference_args.online_inference_protocol_profile = "pi05_dual_arm_20d"
+            configured_profile = str(
+                getattr(args, "online_inference_protocol_profile", "") or ""
+            ).strip()
+            inference_args.online_inference_protocol_profile = (
+                "mobile_tcp23" if configured_profile == "mobile_tcp23" else "pi05_dual_arm_20d"
+            )
             inference_args.online_inference_arm_side = "both"
             inference_args.online_inference_prompt = str(prompt)
             inference_args.online_inference_enable_motion = True
@@ -461,21 +467,18 @@ if __name__ == '__main__':
         base_state_receiver = components.base_state_receiver
         base_stop_state = {"latched": True, "fault": False, "error": ""}
         manual_waist_yaw_limit_state = {"active": False}
+        online_mobile_tcp23 = str(getattr(args, "online_inference_protocol_profile", "")) == "mobile_tcp23"
         mobile_coordinator = None
         mobile_kinematics = None
         dex1_tcp_fk = components.dex1_tcp_fk
         need_g1d_kinematics = (
             args.mobile_manipulation_mode == "mobile_ik_qp"
             or bool(args.record_mobile_training_state)
+            or online_mobile_tcp23
         )
         if need_g1d_kinematics:
             mobile_kinematics = G1DIkFrameKinematics(
-                torso_from_ik=np.array([
-                    [1.0, 0.0, 0.0, 0.00396],
-                    [0.0, 1.0, 0.0, 0.0],
-                    [0.0, 0.0, 1.0, -0.044],
-                    [0.0, 0.0, 0.0, 1.0],
-                ])
+                torso_from_ik=legacy_g1_29_torso_from_ik_urdf(),
             )
         if args.mobile_manipulation_mode == "mobile_ik_qp":
             if base_state_receiver is None:
@@ -565,6 +568,84 @@ if __name__ == '__main__':
                 column_height_m,
                 waist_yaw,
             )
+
+        def current_online_mobile_inputs(arm_q):
+            if not online_mobile_tcp23:
+                raise RuntimeError("mobile TCP online state requested while mobile_tcp23 is disabled")
+            if base_state_receiver is None or dex1_tcp_fk is None or mobile_kinematics is None:
+                raise RuntimeError("mobile_tcp23 requires initialized base state, TCP FK, and G1D kinematics")
+            if not base_state_receiver.is_alive():
+                raise RuntimeError("mobile_tcp23 base state receiver is not alive")
+            odom_sample, height_sample = base_state_receiver.snapshot_latest()
+            slam_history = base_state_receiver.snapshot_slam_tf_history()
+            if odom_sample is None or height_sample is None or slam_history is None or not slam_history:
+                raise RuntimeError("MOBILE_TCP23_STATE_MISSING")
+            slam_sample = dict(slam_history[-1])
+            now_ns = time.monotonic_ns()
+            timeout_ns = int(float(args.mobile_state_timeout_sec) * 1e9)
+            ages = {
+                "odom": now_ns - int(odom_sample["t_ns"]),
+                "height": now_ns - int(height_sample["t_ns"]),
+                "slam_tf": now_ns - int(slam_sample["t_ns"]),
+            }
+            stale = {name: age for name, age in ages.items() if age < 0 or age > timeout_ns}
+            if stale:
+                raise RuntimeError(
+                    "MOBILE_TCP23_STATE_STALE "
+                    + " ".join(f"{name}_age_ms={age / 1e6:.1f}" for name, age in stale.items())
+                    + f" timeout_ms={timeout_ns / 1e6:.1f}"
+                )
+            if str(slam_sample.get("frame_id")) != "slamware_map" or str(slam_sample.get("child_frame_id")) != "base_link":
+                raise RuntimeError(
+                    "MOBILE_TCP23_SLAM_FRAME_INVALID "
+                    f"frame_id={slam_sample.get('frame_id')!r} child_frame_id={slam_sample.get('child_frame_id')!r}"
+                )
+            velocity = odom_sample.get("velocity")
+            if not isinstance(velocity, dict) or str(velocity.get("frame_id")) != "base_link":
+                raise RuntimeError("MOBILE_TCP23_BASE_VELOCITY_FRAME_INVALID: expected base_link")
+            column_height = column_position_from_raw_height(
+                raw_height=float(height_sample["height"]["z"]),
+                raw_minimum=float(args.mobile_height_raw_minimum),
+                raw_maximum=float(args.mobile_height_raw_maximum),
+                column_travel_m=float(args.mobile_column_travel_m),
+            )
+            waist_yaw = float(arm_ctrl.get_current_waist_yaw())
+            left_tcp, right_tcp = get_robot_dex1_tcp_poses_base_link(
+                arm_q,
+                column_height,
+                waist_yaw,
+            )
+            base_link_from_ik = mobile_kinematics.agv_from_ik(
+                column_position=column_height,
+                torso_yaw=waist_yaw,
+            )
+            ik_from_base_link = np.linalg.inv(base_link_from_ik)
+
+            def tcp_target_to_ik_wrist(side, tcp_target):
+                legacy_ee_base_link = dex1_tcp_fk.legacy_g1_29_ik_ee_pose_from_tcp_target(
+                    side,
+                    tcp_target,
+                )
+                legacy_ee_ik = ik_from_base_link @ legacy_ee_base_link
+                if legacy_ee_ik.shape != (4, 4) or not np.all(np.isfinite(legacy_ee_ik)):
+                    raise RuntimeError(f"MOBILE_TCP23_IK_EE_TARGET_INVALID: side={side}")
+                return legacy_ee_ik
+
+            map_pose = np.asarray(
+                [slam_sample["x"], slam_sample["y"], slam_sample["yaw"]],
+                dtype=float,
+            )
+            base_velocity = np.asarray([velocity["vx"], velocity["wz"]], dtype=float)
+            if not np.all(np.isfinite(map_pose)) or not np.all(np.isfinite(base_velocity)):
+                raise RuntimeError("MOBILE_TCP23_BASE_STATE_NONFINITE")
+            return {
+                "current_left_robot_tcp_pose_base_link": left_tcp,
+                "current_right_robot_tcp_pose_base_link": right_tcp,
+                "current_map_base_pose": map_pose,
+                "current_base_velocity_base_link": base_velocity,
+                "current_column_height_m": column_height,
+                "mobile_tcp_to_wrist_transformer": tcp_target_to_ik_wrist,
+            }
 
         def stop_base_once(reason: str) -> bool:
             if base_stop_state["latched"]:
@@ -1029,6 +1110,11 @@ if __name__ == '__main__':
                 "camera_sources": camera_sources,
                 "dt": control_dt,
             }
+            if active_input_provider == "online_inference":
+                active_session = getattr(active_provider, "session", None)
+                active_profile = str(getattr(getattr(active_session, "config", None), "protocol_profile", ""))
+                if active_profile == "mobile_tcp23":
+                    provider_get_sample_kwargs.update(current_online_mobile_inputs(current_lr_arm_q))
             if is_ui_raw_replay and ui_command_bus is not None:
                 provider_get_sample_kwargs["raw_replay_stop_requested"] = ui_command_bus.raw_replay_stop_requested
             sample = active_provider.get_sample(

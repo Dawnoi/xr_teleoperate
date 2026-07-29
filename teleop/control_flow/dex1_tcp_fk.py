@@ -28,6 +28,9 @@ COLUMN_JOINT_NAMES = ("LZ_mt_Joint", "LZ_it_Joint")
 WAIST_YAW_JOINT_NAME = "torso_Joint"
 TCP_TRANSLATION_M = np.array([0.1201, 0.0, 0.0], dtype=float)
 TCP_RPY_RAD = np.zeros(3, dtype=float)
+# G1_29_ArmIK does not optimize the physical wrist flange directly. Its
+# L_ee/R_ee operational frames are fixed at wrist_yaw_link local +X 0.05 m.
+LEGACY_G1_29_IK_EE_TRANSLATION_M = np.array([0.05, 0.0, 0.0], dtype=float)
 
 
 class Dex1TcpFkProvider:
@@ -75,6 +78,37 @@ class Dex1TcpFkProvider:
         return (
             _validated_matrix4x4(left_tcp, "left base_link->Dex1 TCP"),
             _validated_matrix4x4(right_tcp, "right base_link->Dex1 TCP"),
+        )
+
+    def wrist_pose_from_tcp_target(self, side: str, tcp_target: np.ndarray) -> np.ndarray:
+        """Convert a calibrated ``base_link -> TCP`` target back to wrist flange pose."""
+        normalized_side = str(side).strip().lower()
+        if normalized_side not in {"left", "right"}:
+            raise ValueError(f"TCP target side must be 'left' or 'right', got {side!r}")
+        tcp_target = _validated_matrix4x4(
+            tcp_target,
+            f"{normalized_side} base_link->Dex1 TCP target",
+        )
+        wrist_target = tcp_target @ np.linalg.inv(self._wrist_from_tcp)
+        return _validated_matrix4x4(
+            wrist_target,
+            f"{normalized_side} base_link->wrist target",
+        )
+
+    def legacy_g1_29_ik_ee_pose_from_tcp_target(self, side: str, tcp_target: np.ndarray) -> np.ndarray:
+        """Convert ``base_link -> Dex1 TCP`` into the legacy G1_29 ``L_ee/R_ee`` target.
+
+        This deliberately keeps :meth:`wrist_pose_from_tcp_target` semantically
+        exact: that method returns ``wrist_yaw_link``. The legacy G1_29 solver
+        instead optimizes an operational frame 0.05 m along the wrist local X.
+        """
+        wrist_target = self.wrist_pose_from_tcp_target(side, tcp_target)
+        wrist_from_legacy_ee = np.eye(4, dtype=float)
+        wrist_from_legacy_ee[:3, 3] = LEGACY_G1_29_IK_EE_TRANSLATION_M
+        legacy_ee_target = wrist_target @ wrist_from_legacy_ee
+        return _validated_matrix4x4(
+            legacy_ee_target,
+            f"{str(side).strip().lower()} base_link->legacy G1_29 IK end-effector target",
         )
 
     def metadata(self) -> dict[str, object]:

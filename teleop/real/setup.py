@@ -377,9 +377,10 @@ def setup_recorder(args, validation_manager=None):
 
 
 def setup_dex1_tcp_fk(args, components: RealTeleopComponents, log) -> None:
-    if not bool(getattr(args, "record_mobile_training_state", False)):
+    mobile_tcp23 = str(getattr(args, "online_inference_protocol_profile", "")) == "mobile_tcp23"
+    if not bool(getattr(args, "record_mobile_training_state", False)) and not mobile_tcp23:
         return
-    if not bool(getattr(args, "record", False)):
+    if bool(getattr(args, "record_mobile_training_state", False)) and not bool(getattr(args, "record", False)):
         raise ValueError("--record-mobile-training-state requires --record")
     if str(getattr(args, "arm", "")) != "G1_29":
         raise ValueError("Dex1 TCP recording requires --arm G1_29")
@@ -390,7 +391,8 @@ def setup_dex1_tcp_fk(args, components: RealTeleopComponents, log) -> None:
         repo_root / "assets/g1_d/g1_d.urdf",
         repo_root / "assets/dex1_1/dex1_1.urdf",
     )
-    apply_dex1_tcp_episode_metadata(components)
+    if bool(getattr(args, "record_mobile_training_state", False)):
+        apply_dex1_tcp_episode_metadata(components)
     metadata = components.dex1_tcp_fk.metadata()
     log.info("[DEX1_TCP_FK] G1D FK URDF: %s", metadata["robot_fk_urdf"])
     log.info("[DEX1_TCP_FK] Dex1.1 model URDF: %s", metadata["eef_model_urdf"])
@@ -449,14 +451,15 @@ def setup_cameras(args, log) -> CameraRuntime:
 
 def setup_base_state_receiver(args, log):
     mobile_mode = str(getattr(args, "mobile_manipulation_mode", "direct_ik")) == "mobile_ik_qp"
-    if not bool(getattr(args, "record_base", False)) and not mobile_mode:
+    mobile_tcp23 = str(getattr(args, "online_inference_protocol_profile", "")) == "mobile_tcp23"
+    if not bool(getattr(args, "record_base", False)) and not mobile_mode and not mobile_tcp23:
         return None
     receiver = BaseStateReceiver(
         odom_topic=args.base_odom_topic,
         height_topic=args.base_height_topic,
         history_size=args.base_history_size,
         network_interface=args.network_interface,
-        record_slam_map_pose=args.record_slam_map_pose,
+        record_slam_map_pose=bool(args.record_slam_map_pose or mobile_tcp23),
         slam_pose_source_frame=args.slam_pose_source_frame,
         base_velocity_frame=args.base_velocity_frame,
         slam_chain_max_skew_ms=args.slam_chain_max_skew_ms,
@@ -474,7 +477,7 @@ def setup_base_state_receiver(args, log):
         "[BASE_STATE] enabled: odom_topic=%s, height_topic=%s, slam_pose_source_frame=%s, mobile_ik_qp=%s",
         args.base_odom_topic,
         args.base_height_topic or "<disabled>",
-        args.slam_pose_source_frame if args.record_slam_map_pose else "<disabled>",
+        args.slam_pose_source_frame if (args.record_slam_map_pose or mobile_tcp23) else "<disabled>",
         mobile_mode,
     )
     return receiver

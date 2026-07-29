@@ -74,6 +74,48 @@ class G1DIkFrameKinematics:
             torso_yaw=torso_yaw,
         )
 
+def legacy_g1_29_torso_from_ik_urdf() -> np.ndarray:
+    """Read the fixed ``torso_link <- pelvis`` registration used by G1_29 IK."""
+    import pinocchio as pin
+
+    repo_root = Path(__file__).resolve().parents[2]
+    legacy_urdf_path = repo_root / "assets" / "g1" / "g1_body29_hand14.urdf"
+    if not legacy_urdf_path.is_file():
+        raise RuntimeError(f"missing legacy G1_29 IK model: {legacy_urdf_path}")
+    legacy_model = pin.buildModelFromUrdf(str(legacy_urdf_path))
+    legacy_data = legacy_model.createData()
+    pin.framesForwardKinematics(legacy_model, legacy_data, pin.neutral(legacy_model))
+    pin.updateFramePlacements(legacy_model, legacy_data)
+    pelvis_frame = _required_frame_id(legacy_model, "pelvis", "legacy G1_29 IK")
+    torso_frame = _required_frame_id(legacy_model, "torso_link", "legacy G1_29 IK")
+    pelvis_from_torso = legacy_data.oMf[pelvis_frame].inverse() * legacy_data.oMf[torso_frame]
+    torso_from_pelvis = pelvis_from_torso.inverse()
+    transform = np.eye(4, dtype=float)
+    transform[:3, :3] = np.asarray(torso_from_pelvis.rotation, dtype=float)
+    transform[:3, 3] = np.asarray(torso_from_pelvis.translation, dtype=float)
+    return _validated_rigid_transform(transform, "legacy G1_29 torso_link<-pelvis")
+
+
+def _required_frame_id(model, frame_name: str, model_label: str) -> int:
+    frame_id = int(model.getFrameId(frame_name))
+    if frame_id >= int(model.nframes) or model.frames[frame_id].name != frame_name:
+        raise RuntimeError(f"{model_label} is missing required frame: {frame_name}")
+    return frame_id
+
+
+def _validated_rigid_transform(value: np.ndarray, label: str) -> np.ndarray:
+    transform = np.asarray(value, dtype=float)
+    if transform.shape != (4, 4) or not np.all(np.isfinite(transform)):
+        raise ValueError(f"{label} must be a finite 4x4 transform")
+    if not np.allclose(transform[3], np.array([0.0, 0.0, 0.0, 1.0]), atol=1e-12, rtol=0.0):
+        raise ValueError(f"{label} has invalid homogeneous bottom row")
+    rotation = transform[:3, :3]
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-8, rtol=0.0):
+        raise ValueError(f"{label} rotation is not orthonormal")
+    if not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-8, rtol=0.0):
+        raise ValueError(f"{label} rotation determinant must be +1")
+    return transform.copy()
+
 
 def column_position_from_raw_height(
     *,
