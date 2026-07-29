@@ -32,6 +32,7 @@ const state = {
   episodes: [],
   convertStatus: {},
   inferenceStatus: {},
+  inferenceProfiles: [],
   exportConfig: {},
   exportSelected: new Set(),
   exportRangeInput: "",
@@ -909,6 +910,21 @@ function renderInference() {
   const availableNames = new Set(streams.map((stream) => String(stream.camera_name || "")));
   const missingNames = requiredNames.filter((name) => !availableNames.has(name));
   const prompt = String(localStorage.inferencePrompt || inference.prompt || "");
+  const profiles = Array.isArray(state.inferenceProfiles) ? state.inferenceProfiles : [];
+  const sessionProfile = String(inference.protocol_profile || debug.protocol_profile || "");
+  const activeProfile = active ? sessionProfile : "";
+  const storedProfile = String(localStorage.inferenceProtocolProfile || "");
+  const selectedProfile = activeProfile || storedProfile || String(profiles.find((profile) => profile.available)?.id || "");
+  const selectedProfileInfo = profiles.find((profile) => String(profile.id) === selectedProfile);
+  const profileUnavailableReason = selectedProfileInfo && !selectedProfileInfo.available
+    ? String(selectedProfileInfo.reason || "当前运行条件不满足该协议")
+    : "";
+  const profileOptions = profiles.map((profile) => {
+    const id = String(profile.id || "");
+    const label = String(profile.label || id);
+    const reason = !profile.available ? ` (${String(profile.reason || "不可用")})` : "";
+    return `<option value="${esc(id)}" ${id === selectedProfile ? "selected" : ""} ${profile.available ? "" : "disabled"}>${esc(label + reason)}</option>`;
+  }).join("");
   const phase = String(debug.status || inference.state || "idle");
   const latestObservation = debug.last_observation || {};
   const latestAction = debug.last_action || {};
@@ -935,11 +951,12 @@ function renderInference() {
   }).join("");
   return `<div class="grid">
     <div class="card hero full"><div class="card-head"><div><div class="eyebrow">HTTP pi0.5</div><div class="headline">真机推理</div><div class="subline">当前 provider=${esc(provider.active_provider || "hold")} · ${esc(phase)}</div></div>${badge(active ? "running" : inference.state || "idle", active ? "RUNNING" : inference.state || "IDLE")}</div>
-      <div class="form"><label class="full">任务描述 / prompt<input id="inferencePrompt" value="${esc(prompt)}" placeholder="例如：pick up the cube" oninput="localStorage.inferencePrompt=this.value"></label></div>
-      <p class="row"><button class="danger" onclick="startInference()" ${active || missingNames.length ? "disabled" : ""}>启动真机推理</button><button class="secondary" onclick="stopInference()" ${active ? "" : "disabled"}>停止并 HOLD</button><button class="secondary" onclick="restoreXrInput()" ${active ? "disabled" : ""}>恢复 XR</button></p>
+      <div class="form"><label>推理协议<select id="inferenceProtocolProfile" onchange="setInferenceProtocolProfile(this.value)" ${active ? "disabled" : ""}>${profileOptions || '<option value="" selected>无可用协议</option>'}</select></label><label class="full">任务描述 / prompt<input id="inferencePrompt" value="${esc(prompt)}" placeholder="例如：pick up the cube" oninput="localStorage.inferencePrompt=this.value"></label></div>
+      <p class="row"><button class="danger" onclick="startInference()" ${active || missingNames.length || !selectedProfileInfo || !selectedProfileInfo.available ? "disabled" : ""}>启动真机推理</button><button class="secondary" onclick="stopInference()" ${active ? "" : "disabled"}>停止并 HOLD</button><button class="secondary" onclick="restoreXrInput()" ${active ? "disabled" : ""}>恢复 XR</button></p>
       ${missingNames.length ? `<p class="err-text">缺少推理相机：${esc(missingNames.join(", "))}</p>` : ""}
+      ${profileUnavailableReason ? `<p class="err-text">${esc(profileUnavailableReason)}</p>` : ""}
       ${inference.error ? `<p class="err-text">${esc(inference.error)}</p>` : ""}</div>
-    <div class="card"><div class="card-head"><h2>会话状态</h2>${badge(phase)}</div><div class="kv"><span class="muted">阶段</span><span>${esc(phase)}</span><span class="muted">协议</span><span>${esc(debug.protocol_profile || "pi05_dual_arm_20d")}</span><span class="muted">手臂</span><span>${esc(debug.arm_side || "both")}</span><span class="muted">动作块</span><span>${chunkIndex >= 0 ? `${chunkIndex + 1}/${chunkSize || "?"}` : "-"}</span>${phase === "post_action_delay" ? `<span class="muted">延迟剩余</span><span>${Number(postActionDelay.remaining_ms ?? 0).toFixed(1)} ms</span>` : ""}</div></div>
+    <div class="card"><div class="card-head"><h2>会话状态</h2>${badge(phase)}</div><div class="kv"><span class="muted">阶段</span><span>${esc(phase)}</span><span class="muted">协议</span><span>${esc(sessionProfile || selectedProfile || "-")}</span><span class="muted">手臂</span><span>${esc(debug.arm_side || "both")}</span><span class="muted">动作块</span><span>${chunkIndex >= 0 ? `${chunkIndex + 1}/${chunkSize || "?"}` : "-"}</span>${phase === "post_action_delay" ? `<span class="muted">延迟剩余</span><span>${Number(postActionDelay.remaining_ms ?? 0).toFixed(1)} ms</span>` : ""}</div></div>
     <div class="card"><div class="card-head"><h2>最近推理数据</h2><span class="mini">HTTP 18027</span></div><div class="kv"><span class="muted">观测序号</span><span>${esc(latestObservation.observation_seq ?? "-")}</span><span class="muted">动作块序号</span><span>${esc(latestAction.chunk_seq ?? "-")}</span><span class="muted">实际发送 prompt</span><span>${esc(latestObservation.prompt || "-")}</span><span class="muted">错误</span><span class="${inference.error ? "err-text" : ""}">${esc(inference.error || debug.error || "-")}</span></div></div>
     <div class="card full"><div class="card-head"><div><h2>推理闭环延迟</h2><p class="mini">HTTP 从 observation 发出到 action 收到；其余是同一轮主控制循环的实测耗时。</p></div><span class="pill">${esc(runtimeDebug.updated_monotonic_ns ? "live" : "waiting")}</span></div><div class="metric-grid"><div class="metric"><span>HTTP 往返</span><b>${ms(latency.http_roundtrip_ms)}</b></div><div class="metric"><span>读取输入</span><b>${ms(latency.tele_fetch_ms)}</b></div><div class="metric"><span>IK</span><b>${ms(latency.ik_ms)}</b></div><div class="metric"><span>安全限幅</span><b>${ms(latency.safety_ms)}</b></div><div class="metric"><span>重力补偿</span><b>${ms(latency.gravity_ms)}</b></div><div class="metric"><span>反馈上报</span><b>${ms(latency.provider_feedback_ms)}</b></div><div class="metric"><span>目标下发</span><b>${ms(latency.target_submit_ms)}</b><small class="mini">仅表示 ctrl_dual_arm 调用完成</small></div></div></div>
     <div class="card full"><div class="card-head"><div><h2>执行 trace</h2><p class="mini">DDS 发布后的反馈运动由低层状态线程按 q/dq 阈值检测，不表示已到达最终目标。</p></div>${badge(pendingTrace ? "running" : trace.status || "idle", traceState)}</div><div class="metric-grid"><div class="metric"><span>上传到 DDS 发布</span><b>${traceMs("online_obs_send_to_publish_ms")}</b></div><div class="metric"><span>action 到 DDS 发布</span><b>${traceMs("online_action_recv_to_publish_ms")}</b></div><div class="metric"><span>DDS 发布到线程反馈运动</span><b>${traceMs("pub_to_exec_thread_ms")}</b></div><div class="metric"><span>上传到线程反馈运动</span><b>${traceMs("online_obs_send_to_exec_thread_ms")}</b></div><div class="metric"><span>控制线程排队</span><b>${traceMs("enqueue_to_publish_ms")}</b></div><div class="metric"><span>DDS 写入</span><b>${traceMs("dds_write_ms")}</b></div><div class="metric"><span>线程触发关节差</span><b>${Number(trace.q_delta_thread_trigger || 0).toFixed(4)} rad</b><small class="mini">dq ${Number(trace.dq_peak_thread_trigger || 0).toFixed(4)} rad/s</small></div></div></div>
@@ -1256,6 +1273,7 @@ async function refreshAll() {
   await refreshEpisodes();
   try { state.convertStatus = await api("/convert/status", { allowApplicationError: true }); } catch (_) {}
   state.inferenceStatus = await api("/inference/status");
+  state.inferenceProfiles = (await api("/inference/profiles")).profiles || [];
   render();
 }
 
@@ -1782,11 +1800,21 @@ function startInference() {
     showBanner("请填写任务描述。", "error");
     return;
   }
+  const protocolProfile = String(input("inferenceProtocolProfile") || "").trim();
+  if (!protocolProfile) {
+    showBanner("请选择推理协议。", "error");
+    return;
+  }
   localStorage.inferencePrompt = prompt;
-  api("/inference/start?" + qs({ prompt })).then(() => refreshAll()).then(() => {
+  localStorage.inferenceProtocolProfile = protocolProfile;
+  api("/inference/start?" + qs({ prompt, protocol_profile: protocolProfile })).then(() => refreshAll()).then(() => {
     showBanner("真机推理启动指令已进入控制循环", "warning");
     render();
   });
+}
+function setInferenceProtocolProfile(protocolProfile) {
+  localStorage.inferenceProtocolProfile = String(protocolProfile || "");
+  render();
 }
 function stopInference() {
   api("/inference/stop").then(() => refreshAll()).then(() => {

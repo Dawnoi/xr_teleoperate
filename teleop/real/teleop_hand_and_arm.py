@@ -433,48 +433,19 @@ if __name__ == '__main__':
         arm_ik = components.arm_ik
         arm_ctrl = components.arm_ctrl
         tv_wrapper = components.tv_wrapper
-        def create_ui_online_provider(*, prompt: str):
-            inference_args = copy(args)
-            inference_args.input_provider = "online_inference"
-            inference_args.online_inference_transport = "http"
-            inference_args.online_inference_base_url = (
-                str(getattr(args, "online_inference_base_url", "") or "").strip() or "http://127.0.0.1:18027"
-            )
-            configured_profile = str(
-                getattr(args, "online_inference_protocol_profile", "") or ""
-            ).strip()
-            inference_args.online_inference_protocol_profile = (
-                "mobile_tcp23" if configured_profile == "mobile_tcp23" else "pi05_dual_arm_20d"
-            )
-            inference_args.online_inference_arm_side = "both"
-            inference_args.online_inference_prompt = str(prompt)
-            inference_args.online_inference_enable_motion = True
-            inference_args.online_inference_dry_run = False
-            inference_args.online_inference_transform_config = (
-                str(getattr(args, "online_inference_transform_config", "") or "").strip()
-                or "configs/inference/unitree_dual_arm_identity_transform.json"
-            )
-            return create_online_inference_provider(inference_args)
-
-        provider_runtime = TeleopProviderRuntime(
-            live_provider=tv_wrapper,
-            live_provider_name=args.input_provider,
-            online_provider_factory=create_ui_online_provider,
-        )
         gripper_ctrl = components.ee.gripper_ctrl
         loco_wrapper = components.loco_wrapper
         agv_bridge = components.agv_bridge
         base_state_receiver = components.base_state_receiver
         base_stop_state = {"latched": True, "fault": False, "error": ""}
         manual_waist_yaw_limit_state = {"active": False}
-        online_mobile_tcp23 = str(getattr(args, "online_inference_protocol_profile", "")) == "mobile_tcp23"
         mobile_coordinator = None
         mobile_kinematics = None
         dex1_tcp_fk = components.dex1_tcp_fk
         need_g1d_kinematics = (
             args.mobile_manipulation_mode == "mobile_ik_qp"
             or bool(args.record_mobile_training_state)
-            or online_mobile_tcp23
+            or dex1_tcp_fk is not None
         )
         if need_g1d_kinematics:
             mobile_kinematics = G1DIkFrameKinematics(
@@ -570,8 +541,6 @@ if __name__ == '__main__':
             )
 
         def current_online_mobile_inputs(arm_q):
-            if not online_mobile_tcp23:
-                raise RuntimeError("mobile TCP online state requested while mobile_tcp23 is disabled")
             if base_state_receiver is None or dex1_tcp_fk is None or mobile_kinematics is None:
                 raise RuntimeError("mobile_tcp23 requires initialized base state, TCP FK, and G1D kinematics")
             if not base_state_receiver.is_alive():
@@ -647,6 +616,83 @@ if __name__ == '__main__':
                 "mobile_tcp_to_wrist_transformer": tcp_target_to_ik_wrist,
             }
 
+        def mobile_tcp23_runtime_error() -> str:
+            missing: list[str] = []
+            if str(args.arm) != "G1_29":
+                missing.append("--arm G1_29")
+            if str(args.ee) != "dex1" or bool(args.no_gripper):
+                missing.append("--ee dex1 without --no-gripper")
+            if args.mobile_manipulation_mode != "direct_ik":
+                missing.append("--mobile-manipulation-mode direct_ik")
+            if args.base_controller != "g1d_agv" or not args.base_motion:
+                missing.append("--base-controller g1d_agv --base-motion")
+            if args.base_velocity_frame != "base_link":
+                missing.append("--base-velocity-frame base_link")
+            if not args.record_slam_map_pose:
+                missing.append("--record-slam-map-pose")
+            if dex1_tcp_fk is None:
+                missing.append("Dex1 TCP FK")
+            if mobile_kinematics is None:
+                missing.append("G1D base_link kinematics")
+            if base_state_receiver is None:
+                missing.append("base state receiver (--record-base)")
+            elif not base_state_receiver.is_alive():
+                missing.append("live base state receiver")
+            if missing:
+                return "mobile_tcp23 unavailable: requires " + ", ".join(missing)
+            return ""
+
+        def ui_inference_profiles() -> list[dict[str, object]]:
+            mobile_error = mobile_tcp23_runtime_error()
+            return [
+                {
+                    "id": "pi05_dual_arm_20d",
+                    "label": "pi0.5 双臂 20D",
+                    "available": True,
+                    "reason": "",
+                },
+                {
+                    "id": "mobile_tcp23",
+                    "label": "移动操作 TCP23",
+                    "available": not bool(mobile_error),
+                    "reason": mobile_error,
+                },
+            ]
+
+        def ui_inference_profile_error(protocol_profile: str) -> str:
+            selected = str(protocol_profile or "").strip()
+            for profile in ui_inference_profiles():
+                if selected == profile["id"]:
+                    return "" if bool(profile["available"]) else str(profile["reason"])
+            return f"unknown UI online inference protocol_profile: {selected!r}"
+
+        def create_ui_online_provider(*, prompt: str, protocol_profile: str):
+            profile_error = ui_inference_profile_error(protocol_profile)
+            if profile_error:
+                raise RuntimeError(profile_error)
+            inference_args = copy(args)
+            inference_args.input_provider = "online_inference"
+            inference_args.online_inference_transport = "http"
+            inference_args.online_inference_base_url = (
+                str(getattr(args, "online_inference_base_url", "") or "").strip() or "http://127.0.0.1:18027"
+            )
+            inference_args.online_inference_protocol_profile = str(protocol_profile)
+            inference_args.online_inference_arm_side = "both"
+            inference_args.online_inference_prompt = str(prompt)
+            inference_args.online_inference_enable_motion = True
+            inference_args.online_inference_dry_run = False
+            inference_args.online_inference_transform_config = (
+                str(getattr(args, "online_inference_transform_config", "") or "").strip()
+                or "configs/inference/unitree_dual_arm_identity_transform.json"
+            )
+            return create_online_inference_provider(inference_args)
+
+        provider_runtime = TeleopProviderRuntime(
+            live_provider=tv_wrapper,
+            live_provider_name=args.input_provider,
+            online_provider_factory=create_ui_online_provider,
+        )
+
         def stop_base_once(reason: str) -> bool:
             if base_stop_state["latched"]:
                 return True
@@ -690,6 +736,7 @@ if __name__ == '__main__':
                 state_store=ui_state_store,
                 camera_status_getter=lambda: build_runtime_camera_status(components.cameras),
                 camera_frame_getter=lambda camera_id: get_camera_frame_by_id(components.cameras, camera_id),
+                inference_profiles_getter=ui_inference_profiles,
                 host=args.ui_host,
                 port=args.ui_port,
                 publish_rate_hz=args.ui_preview_fps,
@@ -1048,8 +1095,14 @@ if __name__ == '__main__':
                         provider_runtime.fail_online_inference("raw replay is active; stop replay before starting online inference")
                         logger_mp.error("[UI_INFERENCE] rejected: raw replay is active.")
                     else:
+                        protocol_profile = str(payload.get("protocol_profile", "")).strip()
+                        profile_error = ui_inference_profile_error(protocol_profile)
                         missing_cameras = missing_online_inference_camera_names(components.cameras)
-                        if missing_cameras:
+                        if profile_error:
+                            stop_base_once("online_inference_rejected_protocol")
+                            provider_runtime.fail_online_inference(profile_error)
+                            logger_mp.error("[UI_INFERENCE] rejected: %s", profile_error)
+                        elif missing_cameras:
                             stop_base_once("online_inference_rejected_missing_cameras")
                             provider_runtime.fail_online_inference(
                                 "missing required online inference cameras: " + ", ".join(missing_cameras)
@@ -1063,11 +1116,14 @@ if __name__ == '__main__':
                             stop_base_once("online_inference_start")
                             if provider_runtime.active_provider_kind != ActiveProviderKind.HOLD:
                                 provider_runtime.set_hold(reason="online_inference_start_sync_hold")
-                            provider_runtime.start_online_inference(prompt=str(payload.get("prompt", "")))
+                            provider_runtime.start_online_inference(
+                                prompt=str(payload.get("prompt", "")),
+                                protocol_profile=protocol_profile,
+                            )
                             set_online_inference_gripper_mode(gripper_ctrl, True)
                             START = True
                             operator_state_flow = OperatorStateFlow(takeover_settle_frames=0, log=logger_mp)
-                            logger_mp.info("[UI_INFERENCE] started HTTP pi0.5 online inference.")
+                            logger_mp.info("[UI_INFERENCE] started HTTP pi0.5 online inference: protocol=%s", protocol_profile)
                 elif command.name == UiCommandName.STOP_ONLINE_INFERENCE:
                     current_hold_q = current_lr_arm_q.copy()
                     current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)

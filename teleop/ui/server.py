@@ -32,6 +32,7 @@ class TeleopUiServer:
         state_store: UiStateStore,
         camera_status_getter: Callable[[], dict[str, Any]] | None = None,
         camera_frame_getter: Callable[[int], tuple[Any, dict[str, Any] | None]] | None = None,
+        inference_profiles_getter: Callable[[], list[dict[str, Any]]] | None = None,
         web_root: str | Path | None = None,
         convert_manager: UiExportManager | None = None,
         host: str = "127.0.0.1",
@@ -42,6 +43,9 @@ class TeleopUiServer:
         self.state_store = state_store
         self.camera_status_getter = camera_status_getter if camera_status_getter is not None else self._empty_camera_status
         self.camera_frame_getter = camera_frame_getter if camera_frame_getter is not None else self._empty_camera_frame
+        self.inference_profiles_getter = (
+            inference_profiles_getter if inference_profiles_getter is not None else self._default_inference_profiles
+        )
         self.web_root = Path(web_root) if web_root is not None else Path(__file__).resolve().parent / "web"
         self.convert_manager = convert_manager if convert_manager is not None else UiExportManager()
         self.host = str(host)
@@ -182,6 +186,9 @@ class TeleopUiServer:
                     return
                 if path == "/inference/status":
                     owner._json_ok(self, owner._inference_status())
+                    return
+                if path == "/inference/profiles":
+                    owner._json_ok(self, {"ok": True, "profiles": owner._inference_profiles()})
                     return
                 if path == "/inference/start":
                     owner._handle_inference_start(self, parsed.query)
@@ -478,9 +485,25 @@ class TeleopUiServer:
         if not prompt:
             self._json_ok(handler, {"ok": False, "error": "inference prompt is required"}, status=400)
             return
+        protocol_profile = str(self._first_query_value(params, "protocol_profile") or "").strip()
+        if not protocol_profile:
+            self._json_ok(handler, {"ok": False, "error": "inference protocol_profile is required"}, status=400)
+            return
+        profiles = {str(profile["id"]): profile for profile in self._inference_profiles()}
+        profile = profiles.get(protocol_profile)
+        if profile is None:
+            self._json_ok(handler, {"ok": False, "error": f"unknown inference protocol_profile: {protocol_profile}"}, status=400)
+            return
+        if not bool(profile["available"]):
+            self._json_ok(
+                handler,
+                {"ok": False, "error": str(profile["reason"])},
+                status=400,
+            )
+            return
         command = self.command_bus.submit(
             UiCommandName.START_ONLINE_INFERENCE,
-            payload={"prompt": prompt},
+            payload={"prompt": prompt, "protocol_profile": protocol_profile},
         )
         self._json_ok(handler, {"ok": True, "queued": True, "command": command.name.value})
 
@@ -586,6 +609,55 @@ class TeleopUiServer:
         if not isinstance(online_inference, dict):
             online_inference = {"state": "disabled", "error": "missing online inference status"}
         return {"ok": True, "provider": provider, "online_inference": online_inference}
+
+    def _inference_profiles(self) -> list[dict[str, Any]]:
+        profiles = self.inference_profiles_getter()
+        if not isinstance(profiles, list):
+            raise RuntimeError("inference_profiles_getter must return a list")
+        normalized: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for index, profile in enumerate(profiles):
+            if not isinstance(profile, dict):
+                raise RuntimeError(f"inference profile at index {index} must be an object")
+            profile_id = str(profile.get("id", "")).strip()
+            label = str(profile.get("label", "")).strip()
+            available = profile.get("available")
+            reason = str(profile.get("reason", "")).strip()
+            if not profile_id or not label or not isinstance(available, bool):
+                raise RuntimeError(f"invalid inference profile at index {index}")
+            if profile_id in seen_ids:
+                raise RuntimeError(f"duplicate inference profile id: {profile_id}")
+            if not available and not reason:
+                raise RuntimeError(f"unavailable inference profile requires reason: {profile_id}")
+            seen_ids.add(profile_id)
+            normalized.append(
+                {
+                    "id": profile_id,
+                    "label": label,
+                    "available": available,
+                    "reason": reason,
+                }
+            )
+        if not normalized:
+            raise RuntimeError("inference_profiles_getter returned no profiles")
+        return normalized
+
+    @staticmethod
+    def _default_inference_profiles() -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "pi05_dual_arm_20d",
+                "label": "pi0.5 双臂 20D",
+                "available": True,
+                "reason": "",
+            },
+            {
+                "id": "mobile_tcp23",
+                "label": "移动操作 TCP23",
+                "available": False,
+                "reason": "mobile_tcp23 runtime is not configured",
+            },
+        ]
 
     @staticmethod
     def _episode_index_from_name(episode_name: str) -> tuple[int, str]:

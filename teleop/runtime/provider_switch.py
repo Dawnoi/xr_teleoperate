@@ -48,6 +48,7 @@ class RealReplayStatus:
 class OnlineInferenceStatus:
     state: str = "idle"
     prompt: str = ""
+    protocol_profile: str = ""
     error: str = ""
     reason: str = ""
     runtime_debug: dict[str, Any] | None = None
@@ -61,6 +62,7 @@ class OnlineInferenceStatus:
         return {
             "state": self.state,
             "prompt": self.prompt,
+            "protocol_profile": self.protocol_profile,
             "error": self.error,
             "reason": self.reason,
             "debug": debug,
@@ -196,7 +198,7 @@ class TeleopProviderRuntime:
             self._real_replay.state = "stopped"
         self._real_replay.reason = self._last_reason
 
-    def start_online_inference(self, *, prompt: str) -> None:
+    def start_online_inference(self, *, prompt: str, protocol_profile: str) -> None:
         if self._active_provider_kind != ActiveProviderKind.HOLD:
             raise RuntimeError("online inference can only start while active provider is hold")
         if self._online_provider_factory is None:
@@ -205,12 +207,16 @@ class TeleopProviderRuntime:
         text = str(prompt or "").strip()
         if not text:
             raise ValueError("online inference prompt is required")
-        provider = self._online_provider_factory(prompt=text)
+        profile = str(protocol_profile or "").strip()
+        if not profile:
+            raise ValueError("online inference protocol_profile is required")
+        provider = self._online_provider_factory(prompt=text, protocol_profile=profile)
         self._online_provider = provider
         self._active_provider_kind = ActiveProviderKind.ONLINE_INFERENCE
         self._online_inference = OnlineInferenceStatus(
             state="running",
             prompt=text,
+            protocol_profile=profile,
             reason="online_inference_start",
         )
         self._last_error = ""
