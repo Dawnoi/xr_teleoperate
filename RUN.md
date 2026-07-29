@@ -33,7 +33,7 @@ python teleop/real/teleop_hand_and_arm.py \
   --max-arm-joint-speed 5.0 \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
@@ -64,7 +64,7 @@ python teleop/real/teleop_hand_and_arm.py \
   --max-arm-joint-speed 5.0 \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
@@ -90,7 +90,7 @@ python teleop/real/teleop_hand_and_arm.py \
   --max-arm-joint-speed 5.0 \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
@@ -130,6 +130,18 @@ python teleop/real/teleop_hand_and_arm.py \
 - `--record-arm-repr qpos`：只录关节角（默认）
 - `--record-arm-repr pose`：只录左右腕位姿
 - `--record-arm-repr both`：同时录关节角和左右腕位姿
+
+移动操作训练采集必须同时启用以下参数：
+
+- `--record-base`：录制底盘 DDS 状态与最终下发命令。
+- `--record-slam-map-pose`：从 ROS2 `/tf` 录制 SLAM map 绝对位姿。
+- `--slam-pose-source-frame odom`：明确组合 `slamware_map -> odom -> base_link`，记录真实语义的 `slamware_map -> base_link`；两段 raw TF、header 时间戳和 chain skew 会一并写入。当前移动训练采集应使用此模式。
+- `--record-mobile-training-state`：新增 `base_link` 下的左右 EEF pose、Dex1.1 两爪中点 TCP pose、升降柱米制位置和腰部状态/目标；保留已有 `pelvis` pose 与 qpos 字段，不改变旧字段语义。该模式要求 `--arm G1_29 --ee dex1`，否则直接拒绝启动。
+- `--base-velocity-frame base_link`：声明 `rt/agv/odom` 的 `vx/vy/wz` 使用机体坐标。若上游发布的是世界系速度，必须显式改为 `world`，不能混用。移动训练采集不允许省略该声明。
+
+`--record-mobile-training-state` 强制要求前两个开关和 `--base-height-topic`，避免生成缺失坐标系或升降柱状态的伪完整样本。
+
+录制停止后，UI 会生成并展示 `validation.json`。只要 episode 含有 `states.base`，就必须满足完整 `mobile_tcp_v1`：每帧 `pose_base_link`、`pose_base_link_tcp`、SLAM map pose、底盘/升降柱/腰部状态与命令，以及顶层 Dex1 TCP metadata 都会校验；旧 base-only episode 会明确报错，不能被标记为移动训练可用。SLAM TF 作为独立 `/tf` 历史缓存；每个相机样本按自己的时间戳匹配最近 TF，而不是复用 odom 回调时的 TF。UI 分别校验相机到 base state、相机到 SLAM TF 的对齐误差，以及 TF 的 header 时间新鲜度。`odom` 模式不依赖 `laser == base_link` 假设。
 
 可选 Web UI 参数：
 
@@ -178,7 +190,7 @@ python teleop/real/teleop_hand_and_arm.py \
     --max-arm-joint-speed 5.0 \
     --arm-workspace-mode tapered \
     --arm-workspace-z-min -0.05 \
-    --arm-workspace-z-max 0.45 \
+    --arm-workspace-z-max 0.292 \
     --arm-workspace-x-min 0.10 \
     --arm-workspace-x-max-low 0.38 \
     --arm-workspace-x-max-high 0.52 \
@@ -369,6 +381,15 @@ bash scripts/start/start_real_robot_wired.sh \
   - `right_arm`
   - `left_ee`
   - `right_ee`
+- 使用 `--record-mobile-training-state` 时会额外写入：
+  - `states.left_arm.pose_base_link`、`states.right_arm.pose_base_link`：当前 EEF 在 `base_link` 下的 pose，字段内标明 `frame_id=base_link`。
+  - `actions.left_arm.pose_base_link`、`actions.right_arm.pose_base_link`：最终目标 EEF 在当前 `base_link` 下的 pose，字段内标明 `frame_id=base_link`。
+  - `states.left_arm.pose_base_link_tcp`、`states.right_arm.pose_base_link_tcp`：相机对齐后的真实 arm q、真实 waist yaw 和真实 column height 经 `assets/g1_d/g1_d.urdf` 完整 FK 得到的 Dex1.1 TCP。TCP 是两爪接触块中点，严格为 `base_link -> left/right_dex1_tcp`。
+  - `actions.left_arm.pose_base_link_tcp`、`actions.right_arm.pose_base_link_tcp`：相机对齐后的 arm target q、waist yaw target 和同一时刻 column height 得到的 TCP，严格为 `base_link -> left/right_dex1_tcp_target`。
+  - TCP 使用固定 `wrist_yaw_link -> tcp = xyz[0.1201, 0, 0] m, rpy[0, 0, 0] rad`。G1D FK URDF 根为 `AGV_link`；采集安装标定明确 `base_link == AGV_link`，不施加隐藏外参。每个 episode 的 `info` 会写入两份 URDF 路径、frame、单位和该外参。
+  - `states.base.slam_map_pose`：`slamware_map -> base_link` 的绝对 `x/y/z/yaw` 与四元数。`--slam-pose-source-frame odom` 时，`source_chain` 保留 `slamware_map -> odom`、`odom -> base_link` 两段 raw transform、header 时间戳和 `max_header_skew_ms`；`tf_header_stamp_ns`、`tf_lookup_wall_time_ns`、`tf_lookup_monotonic_ns` 和 `tf_age_ms` 用于审计最终 transform 是否陈旧。
+  - `states.base.column_height_m`、`states.base.waist_yaw`：升降柱米制位置和实际腰关节角。
+  - `actions.base.vx_cmd`、`actions.base.wz_cmd`、`actions.base.z_cmd`、`actions.base.waist_yaw_target`：最终下发的底盘、升降柱和腰部命令。其中 `z_cmd` 的单位明确为 `normalized`，并非 m/s；`waist_yaw_target` 是绝对关节角，并非角速度。
 - 其中 `left_arm/right_arm` 默认写 `qpos`；若设置 `--record-arm-repr pose/both`，会额外或仅写：
   - `pose.position`
   - `pose.rpy`
@@ -516,7 +537,7 @@ python teleop/real/teleop_hand_and_arm.py \
   --max-arm-joint-speed 5.0 \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
@@ -574,7 +595,7 @@ python teleop/real/teleop_hand_and_arm.py \
   --controller-orientation-mode relative \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
@@ -600,7 +621,7 @@ python teleop/real/teleop_hand_and_arm.py \
   --controller-orientation-mode relative \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
@@ -629,7 +650,7 @@ python teleop/real/teleop_hand_and_arm.py \
   --max-arm-joint-speed 5.0 \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
@@ -655,7 +676,7 @@ python teleop/real/teleop_hand_and_arm.py \
 ```bash
 --arm-workspace-mode tapered \
 --arm-workspace-z-min -0.05 \
---arm-workspace-z-max 0.45 \
+--arm-workspace-z-max 0.292 \
 --arm-workspace-x-min 0.10 \
 --arm-workspace-x-max-low 0.38 \
 --arm-workspace-x-max-high 0.52 \
@@ -671,7 +692,7 @@ python teleop/real/teleop_hand_and_arm.py \
 - 高位（抬臂后）更宽：
   - `x: [0.10, 0.52]`
   - `y: [-0.38, 0.38]`
-- `z: [-0.05, 0.45]`
+- `z: [-0.05, 0.292]`，上边界等于 G1D 肩关节中心相对原 G1_29 IK 原点的高度
 - `+z` 是抬臂方向
 
 ### 调参建议
@@ -686,20 +707,41 @@ python teleop/real/teleop_hand_and_arm.py \
 - 增大 `--arm-workspace-x-max-high`
 - 增大 `--arm-workspace-y-max-high`
 
-如果抬不够高：
-
-- 增大 `--arm-workspace-z-max`
+默认不允许法兰目标高于肩部。只有明确需要高举动作并完成安全验证时，才提高 `--arm-workspace-z-max`。
 
 如果太容易往下扎：
 
 - 增大 `--arm-workspace-z-min`
+
+### 真机双手独立空间与单手 QP 引导
+
+默认 `--arm-workspace-layout shared` 保持左右腕共用同一工作空间。要允许左手更深入右侧、右手更深入左侧，必须显式切换到 `per_arm` 并完整提供两侧参数；缺任意一侧时启动直接报错。
+
+每侧 tapered 参数的九个数依次为：
+
+```text
+z_min z_max x_min x_max_low x_max_high y_min_low y_min_high y_max_low y_max_high
+```
+
+下面是左右镜像的当前配置。`x_min=0.154` 对齐 G1D URDF 零位 J6（`wrist_pitch_joint`）中心，工作空间不会延伸到 J6 后方。
+
+```bash
+--mobile-manipulation-mode mobile_ik_qp \
+--arm-workspace-layout per_arm \
+--left-arm-workspace-tapered  -0.055 0.245 0.154 0.38 0.52  0.00 0.00  0.20 0.28 \
+--right-arm-workspace-tapered -0.055 0.245 0.154 0.38 0.52  -0.20 -0.28  0.00 0.00
+```
+
+左 grip 按住时，QP 只检查左手专属空间并为左手移动底盘；右手不按 grip，即使其目标越界也不会触发底盘。右 grip 同理。当前三相机有线启动脚本将跨身边界直接设为身体中线：在当前 G1 IK 坐标中，左手 `y_min=0`，右手 `y_max=0`。QP 的 `0.04 m` 舒适裕量会使底盘在手距中线约 `0.04 m` 时提前开始引导，法兰目标最终不会跨过中线。工作空间高度固定为 G1D URDF 全零位、升降柱零位、腰部零位时 Dex1 TCP 的 IK-frame 高度 `0.095226 m` 上下各 `0.15 m`，即 `z=[-0.055, 0.245] m`（参数保留至毫米）。该功能仍控制原始 G1_29 腕端/法兰目标，不改变 Dex1 TCP 的采集语义。
+
+当前没有完整的机械臂-躯干-另一机械臂自碰撞模型；不要把 `x_min` 继续减小，也不要将跨身区域用于高速真机运动。
 
 ### 固定 box 对比模式
 
 ```bash
 --arm-workspace-mode box \
 --arm-workspace-min 0.10 -0.32 -0.08 \
---arm-workspace-max 0.45 0.32 0.42
+--arm-workspace-max 0.45 0.32 0.292
 ```
 
 如果完全关闭工作空间限制：
@@ -729,7 +771,7 @@ python teleop/sim/xrobotics_mujoco.py \
   --home-return-speed 0.5 \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
@@ -759,7 +801,7 @@ python teleop/sim/xrobotics_mujoco.py \
   --home-return-speed 0.5 \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
@@ -789,7 +831,7 @@ python teleop/sim/xrobotics_mujoco.py \
   --home-return-speed 0.5 \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min 0.10 \
   --arm-workspace-x-max-low 0.38 \
   --arm-workspace-x-max-high 0.52 \
@@ -826,7 +868,7 @@ python teleop/sim/xrobotics_mujoco.py \
   --home-return-speed 0.5 \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.15 \
-  --arm-workspace-z-max 0.45 \
+  --arm-workspace-z-max 0.292 \
   --arm-workspace-x-min -0.15 \
   --arm-workspace-x-max-low 0.25 \
   --arm-workspace-x-max-high 0.65 \
@@ -891,7 +933,7 @@ python teleop/sim/xrobotics_mujoco.py \
   --controller-orientation-mode  \
   --arm-workspace-mode box \
   --arm-workspace-min 0.10 -0.32 -0.08 \
-  --arm-workspace-max 0.45 0.32 0.42 \
+  --arm-workspace-max 0.45 0.32 0.292 \
   --arm-workspace-show-targets \
   --ee dex1
 ```

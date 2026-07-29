@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -20,8 +21,15 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from data_pipeline.recording.lerobot_v2_writer import CAMERA_SLOTS, CHUNK_NAME, LeRobotV2Writer
+from data_pipeline.recording.lerobot_v2_writer import (
+    CAMERA_SLOTS,
+    CHUNK_NAME,
+    LeRobotV2Writer,
+    dex1_tcp_fk_from_raw_records,
+    dex1_tcp_pose6_from_record,
+)
 from data_pipeline.export.g1d_fk import G1DArmFkProvider
+from teleop.control_flow.dex1_tcp_fk import TCP_RPY_RAD, TCP_TRANSLATION_M
 
 
 SLOT_TO_RAW_CAMERA_KEY = {
@@ -45,6 +53,17 @@ STATE_ACTION_QPOS = (
     ("actions", "left_ee", 1),
     ("actions", "right_ee", 1),
 )
+DEX1_TCP_INFO_KEYS = (
+    "eef_pose_frame",
+    "eef_pose_parent_frame",
+    "eef_pose_unit",
+    "robot_fk_urdf",
+    "eef_model_urdf",
+    "left_wrist_to_tcp_xyz_m",
+    "left_wrist_to_tcp_rpy_rad",
+    "right_wrist_to_tcp_xyz_m",
+    "right_wrist_to_tcp_rpy_rad",
+)
 
 
 def parse_bool_flag(value: Any, label: str) -> bool:
@@ -65,8 +84,21 @@ def finite_vector(values: Any, expected_len: int, label: str) -> np.ndarray:
     return arr.copy()
 
 
-def load_raw_episode_data(episode_dir: Path) -> List[Dict[str, Any]]:
-    data_path = episode_dir / "data.json"
+def _finite(value: Any, label: str) -> float:
+    result = float(value)
+    if not np.isfinite(result):
+        raise ValueError(f"{label} must be finite, got {value!r}")
+    return result
+
+
+def episode_data_path(episode_dir: Path, episode_data_file: str) -> Path:
+    if not episode_data_file or Path(episode_data_file).name != episode_data_file:
+        raise ValueError(f"episode_data_file must be a filename, got {episode_data_file!r}")
+    return episode_dir / episode_data_file
+
+
+def load_raw_episode_data(episode_dir: Path, episode_data_file: str = "data.json") -> List[Dict[str, Any]]:
+    data_path = episode_data_path(episode_dir, episode_data_file)
     if not data_path.is_file():
         raise FileNotFoundError(f"data.json not found: {data_path}")
     payload = json.loads(data_path.read_text(encoding="utf-8"))
@@ -83,12 +115,58 @@ def load_raw_episode_data(episode_dir: Path) -> List[Dict[str, Any]]:
     return data
 
 
-def list_raw_episode_dirs(input_task_dir: Path) -> List[Path]:
+def load_raw_episode_info(episode_dir: Path, episode_data_file: str = "data.json") -> Mapping[str, Any]:
+    data_path = episode_data_path(episode_dir, episode_data_file)
+    if not data_path.is_file():
+        raise FileNotFoundError(f"data.json not found: {data_path}")
+    payload = json.loads(data_path.read_text(encoding="utf-8"))
+    info = payload.get("info")
+    if not isinstance(info, Mapping):
+        raise ValueError(f"data.json info must be an object: {data_path}")
+    return info
+
+
+def has_valid_dex1_tcp_metadata(episode_dir: Path, info: Mapping[str, Any]) -> bool:
+    present_keys = [key for key in DEX1_TCP_INFO_KEYS if key in info]
+    if not present_keys:
+        return False
+    missing_keys = [key for key in DEX1_TCP_INFO_KEYS if key not in info]
+    if missing_keys:
+        raise ValueError(f"{episode_dir.name} has incomplete Dex1 TCP metadata: missing={missing_keys}")
+    expected_scalars = {
+        "eef_pose_frame": "dex1_tcp",
+        "eef_pose_parent_frame": "base_link",
+        "eef_pose_unit": "m/rad",
+    }
+    for key, expected in expected_scalars.items():
+        if info[key] != expected:
+            raise ValueError(f"{episode_dir.name} info.{key} must be {expected!r}, got {info[key]!r}")
+    for key in ("robot_fk_urdf", "eef_model_urdf"):
+        value = info[key]
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{episode_dir.name} info.{key} must be a non-empty path")
+    expected_xyz = TCP_TRANSLATION_M
+    expected_rpy = TCP_RPY_RAD
+    for key, expected in (
+        ("left_wrist_to_tcp_xyz_m", expected_xyz),
+        ("left_wrist_to_tcp_rpy_rad", expected_rpy),
+        ("right_wrist_to_tcp_xyz_m", expected_xyz),
+        ("right_wrist_to_tcp_rpy_rad", expected_rpy),
+    ):
+        value = finite_vector(info[key], 3, f"{episode_dir.name} info.{key}")
+        if not np.allclose(value, expected, atol=1e-12, rtol=0.0):
+            raise ValueError(
+                f"{episode_dir.name} info.{key} must equal the calibrated Dex1 TCP external {expected.tolist()}"
+            )
+    return True
+
+
+def list_raw_episode_dirs(input_task_dir: Path, episode_data_file: str = "data.json") -> List[Path]:
     if not input_task_dir.is_dir():
         raise NotADirectoryError(f"input task dir not found: {input_task_dir}")
     episode_dirs = [
         path for path in input_task_dir.iterdir()
-        if path.is_dir() and path.name.startswith("episode_")
+        if path.is_dir() and path.name.startswith("episode_") and episode_data_path(path, episode_data_file).is_file()
     ]
     episode_dirs = sorted(episode_dirs, key=lambda path: path.name)
     if not episode_dirs:
@@ -169,6 +247,81 @@ def sample_monotonic_ns(item: Mapping[str, Any], frame_index: int) -> int:
     if value < 0:
         raise ValueError(f"frame {frame_index} timestamps.sample_monotonic_ns must be non-negative")
     return value
+
+
+MOBILE_STATE_VECTOR_SIZE = 26
+MOBILE_ACTION_VECTOR_SIZE = 23
+
+
+def _tcp_pose10(source: Mapping[str, Any], arm_key: str, ee_key: str, child_frame: str, label: str) -> np.ndarray:
+    """Return TCP xyz + the first two rotation-matrix columns + gripper qpos."""
+    arm = source.get(arm_key)
+    ee = source.get(ee_key)
+    if not isinstance(arm, Mapping) or not isinstance(ee, Mapping):
+        raise ValueError(f"{label} requires {arm_key} and {ee_key}")
+    record = arm.get("pose_base_link_tcp")
+    pose6 = dex1_tcp_pose6_from_record(record, f"{label}.{arm_key}.pose_base_link_tcp", child_frame)
+    rotation = np.asarray(record["rotation_matrix"], dtype=float)
+    if rotation.shape != (3, 3) or not np.all(np.isfinite(rotation)):
+        raise ValueError(f"{label}.{arm_key}.pose_base_link_tcp.rotation_matrix must be finite 3x3")
+    # The 6D representation is [R[:, 0], R[:, 1]], never a flattened 3x2 row-major array.
+    rot6d = np.concatenate((rotation[:, 0], rotation[:, 1]))
+    gripper = finite_vector(ee.get("qpos"), 1, f"{label}.{ee_key}.qpos")
+    return np.concatenate((np.asarray(pose6[:3], dtype=float), rot6d, gripper))
+
+
+def mobile_eef_base_vectors(item: Mapping[str, Any], frame_index: int) -> tuple[np.ndarray, np.ndarray]:
+    """Build OpenPI-ready EEF+base vectors from one offline-aligned raw frame."""
+    states = item.get("states")
+    actions = item.get("actions")
+    if not isinstance(states, Mapping) or not isinstance(actions, Mapping):
+        raise ValueError(f"frame {frame_index} requires states and actions")
+    state_base = states.get("base")
+    action_base = actions.get("base")
+    if not isinstance(state_base, Mapping) or not isinstance(action_base, Mapping):
+        raise ValueError(f"frame {frame_index} requires states.base and actions.base")
+    map_pose = state_base.get("slam_map_pose_interpolated")
+    velocity = state_base.get("velocity_interpolated")
+    height = state_base.get("height_interpolated")
+    mobile_action = action_base.get("interpolated")
+    if not isinstance(map_pose, Mapping) or not isinstance(velocity, Mapping) or not isinstance(height, Mapping):
+        raise ValueError(f"frame {frame_index} is missing offline-interpolated base state fields")
+    if not isinstance(mobile_action, Mapping):
+        raise ValueError(f"frame {frame_index} is missing actions.base.interpolated")
+    state = np.concatenate(
+        (
+            _tcp_pose10(states, "left_arm", "left_ee", "left_dex1_tcp", f"frame {frame_index} states"),
+            _tcp_pose10(states, "right_arm", "right_ee", "right_dex1_tcp", f"frame {frame_index} states"),
+            np.asarray(
+                [
+                    _finite(map_pose.get("x"), f"frame {frame_index} map.x"),
+                    _finite(map_pose.get("y"), f"frame {frame_index} map.y"),
+                    _finite(map_pose.get("yaw"), f"frame {frame_index} map.yaw"),
+                    _finite(velocity.get("vx"), f"frame {frame_index} velocity.vx"),
+                    _finite(velocity.get("wz"), f"frame {frame_index} velocity.wz"),
+                    _finite(height.get("z"), f"frame {frame_index} height.z"),
+                ],
+                dtype=float,
+            ),
+        )
+    )
+    action = np.concatenate(
+        (
+            _tcp_pose10(actions, "left_arm", "left_ee", "left_dex1_tcp_target", f"frame {frame_index} actions"),
+            _tcp_pose10(actions, "right_arm", "right_ee", "right_dex1_tcp_target", f"frame {frame_index} actions"),
+            np.asarray(
+                [
+                    _finite(mobile_action.get("vx_cmd"), f"frame {frame_index} base_action.vx_cmd"),
+                    _finite(mobile_action.get("wz_cmd"), f"frame {frame_index} base_action.wz_cmd"),
+                    _finite(mobile_action.get("z_cmd"), f"frame {frame_index} base_action.z_cmd"),
+                ],
+                dtype=float,
+            ),
+        )
+    )
+    if state.shape != (MOBILE_STATE_VECTOR_SIZE,) or action.shape != (MOBILE_ACTION_VECTOR_SIZE,):
+        raise RuntimeError(f"frame {frame_index} mobile vector shape mismatch: state={state.shape}, action={action.shape}")
+    return state, action
 
 
 def pose6_from_record(value: Any, label: str) -> List[float]:
@@ -415,12 +568,55 @@ def count_jsonl_rows(path: Path) -> int:
     return sum(1 for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
 
 
+def sha256_file(path: Path) -> str:
+    if not path.is_file():
+        raise FileNotFoundError(f"cannot hash missing file: {path}")
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def copy_raw_episode_sidecar(
+    output_root: Path,
+    episode_dir: Path,
+    episode_index: int,
+    episode_data_file: str,
+) -> Dict[str, str]:
+    """Copy the exact source JSON so exporter feature selection never destroys raw fields."""
+    source_path = episode_data_path(episode_dir, episode_data_file)
+    if not source_path.is_file():
+        raise FileNotFoundError(f"raw episode JSON not found: {source_path}")
+    destination_path = (
+        output_root
+        / "extras"
+        / "raw_episodes"
+        / CHUNK_NAME
+        / f"episode_{episode_index:06d}.{episode_data_file}"
+    )
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, destination_path)
+    source_sha256 = sha256_file(source_path)
+    destination_sha256 = sha256_file(destination_path)
+    if destination_sha256 != source_sha256:
+        raise RuntimeError(
+            f"raw episode sidecar SHA256 mismatch for {episode_dir.name}: "
+            f"source={source_sha256} destination={destination_sha256}"
+        )
+    return {
+        "path": str(destination_path.relative_to(output_root)),
+        "sha256": source_sha256,
+    }
+
+
 def verify_exported_episode(
     output_root: Path,
     episode_index: int,
     expected_rows: int,
     pose_sidecar: bool,
     export_fk: bool = False,
+    export_dex1_tcp: bool = False,
 ) -> Dict[str, Any]:
     return verify_exported_episode_with_options(
         output_root,
@@ -429,6 +625,7 @@ def verify_exported_episode(
         pose_sidecar,
         verify_video_frames=True,
         export_fk=export_fk,
+        export_dex1_tcp=export_dex1_tcp,
     )
 
 
@@ -439,6 +636,9 @@ def verify_exported_episode_with_options(
     pose_sidecar: bool,
     verify_video_frames: bool,
     export_fk: bool,
+    export_dex1_tcp: bool = False,
+    state_vector_size: int = 16,
+    action_vector_size: int = 16,
 ) -> Dict[str, Any]:
     parquet_path = output_root / "data" / CHUNK_NAME / f"episode_{episode_index:06d}.parquet"
     if not parquet_path.is_file():
@@ -450,14 +650,15 @@ def verify_exported_episode_with_options(
 
     rows = table.to_pydict()
     for row_index, values in enumerate(rows["observation.state"]):
-        finite_vector(values, 16, f"parquet observation.state[{row_index}]")
+        finite_vector(values, state_vector_size, f"parquet observation.state[{row_index}]")
     for row_index, values in enumerate(rows["action"]):
-        finite_vector(values, 16, f"parquet action[{row_index}]")
+        finite_vector(values, action_vector_size, f"parquet action[{row_index}]")
 
     fk_columns = [name for name in table.column_names if name.startswith("observation.fk.")]
     if export_fk:
-        if len(fk_columns) != 32:
-            raise RuntimeError(f"FK column count mismatch: {len(fk_columns)} != 32")
+        expected_fk_columns = 36 if export_dex1_tcp else 32
+        if len(fk_columns) != expected_fk_columns:
+            raise RuntimeError(f"FK column count mismatch: {len(fk_columns)} != {expected_fk_columns}")
         for column_name in fk_columns:
             for row_index, values in enumerate(rows[column_name]):
                 finite_vector(values, 6, f"parquet {column_name}[{row_index}]")
@@ -596,6 +797,9 @@ def export_raw_episode(
     verify_export: bool = True,
     verify_video_frames: bool = False,
     export_fk: bool = False,
+    export_dex1_tcp: bool = False,
+    mobile_eef_base: bool = False,
+    episode_data_file: str = "data.json",
 ) -> Dict[str, Any]:
     if not writer.create_episode():
         raise RuntimeError("LeRobotV2Writer refused to create a new episode")
@@ -628,12 +832,20 @@ def export_raw_episode(
         pose_row = pose_row_if_complete(item, episode_index, frame_index, timestamp_s, sample_ns)
         if pose_row is not None:
             pose_rows.append(pose_row)
+        if export_dex1_tcp:
+            dex1_tcp_fk_from_raw_records(item["states"], item["actions"])
+        state_vector = None
+        action_vector = None
+        if mobile_eef_base:
+            state_vector, action_vector = mobile_eef_base_vectors(item, frame_index)
 
         writer.add_item(
             colors=images,
             states=item["states"],
             actions=item["actions"],
             timestamps=item["timestamps"],
+            state_vector=state_vector,
+            action_vector=action_vector,
         )
         if progress_label and should_report_frame(frame_number, frame_count, frame_progress_every):
             print_progress(f"{progress_label} decode/write frame {frame_number}/{frame_count}")
@@ -645,6 +857,15 @@ def export_raw_episode(
         print_progress(f"{progress_label} saving episode_{episode_index:06d}")
     writer.save_episode()
     wait_for_writer(writer)
+
+    if progress_label:
+        print_progress(f"{progress_label} preserving raw episode sidecar")
+    raw_episode_sidecar = copy_raw_episode_sidecar(
+        output_root,
+        episode_dir,
+        episode_index,
+        episode_data_file,
+    )
 
     pose_missing_count = int(frame_count - len(pose_rows))
     pose_sidecar = pose_missing_count == 0
@@ -669,6 +890,9 @@ def export_raw_episode(
             pose_sidecar,
             verify_video_frames=verify_video_frames,
             export_fk=export_fk,
+            export_dex1_tcp=export_dex1_tcp,
+            state_vector_size=MOBILE_STATE_VECTOR_SIZE if mobile_eef_base else 16,
+            action_vector_size=MOBILE_ACTION_VECTOR_SIZE if mobile_eef_base else 16,
         )
 
     return {
@@ -679,6 +903,7 @@ def export_raw_episode(
         "pose_sidecar": pose_sidecar,
         "pose_missing_frame_count": int(pose_missing_count),
         "pose_skip_reason": pose_skip_reason,
+        "raw_episode_sidecar": raw_episode_sidecar,
         "precheck": {
             "complete_pose_count": int(episode_meta["complete_pose_count"]),
             "image_decode_prevalidated": bool(episode_meta.get("image_decode_prevalidated", False)),
@@ -710,6 +935,8 @@ def export_raw_task_dir(
     verify_video_frames: bool = False,
     export_fk: bool = False,
     urdf_path: str | Path | None = None,
+    episode_data_file: str = "data.json",
+    mobile_eef_base: bool = False,
 ) -> Dict[str, Any]:
     input_task_dir = Path(input_task_dir).resolve()
     output_root = Path(output_root).resolve()
@@ -726,9 +953,10 @@ def export_raw_task_dir(
     if frame_progress_every < 0:
         raise ValueError("frame_progress_every must be non-negative")
 
-    episode_dirs = list_raw_episode_dirs(input_task_dir)
+    episode_dirs = list_raw_episode_dirs(input_task_dir, episode_data_file)
     print_progress(f"found {len(episode_dirs)} episodes under {input_task_dir}")
     raw_episode_plan = []
+    dex1_tcp_flags = set()
     for episode_number, episode_dir in enumerate(episode_dirs, start=1):
         label = f"[{episode_number}/{len(episode_dirs)}] {episode_dir.name}"
         report_episode = progress_every > 0 and (
@@ -738,7 +966,12 @@ def export_raw_task_dir(
         )
         if report_episode:
             print_progress(f"{label} loading data.json")
-        raw_items = load_raw_episode_data(episode_dir)
+        raw_items = load_raw_episode_data(episode_dir, episode_data_file)
+        dex1_tcp_enabled = has_valid_dex1_tcp_metadata(
+            episode_dir,
+            load_raw_episode_info(episode_dir, episode_data_file),
+        )
+        dex1_tcp_flags.add(dex1_tcp_enabled)
         if report_episode:
             mode = "strict image validate" if strict_image_validate else "light precheck"
             print_progress(f"{label} {mode} {len(raw_items)} frames")
@@ -750,9 +983,23 @@ def export_raw_task_dir(
             decode_images=bool(strict_image_validate),
         )
         episode_meta["image_decode_prevalidated"] = bool(strict_image_validate)
+        if dex1_tcp_enabled:
+            for item in raw_items:
+                dex1_tcp_fk_from_raw_records(item["states"], item["actions"])
+            episode_meta["dex1_tcp_enabled"] = True
         raw_episode_plan.append((episode_dir, raw_items, episode_meta))
         if report_episode:
             print_progress(f"{label} precheck done")
+
+    if len(dex1_tcp_flags) != 1:
+        raise ValueError(
+            "cannot export a mixture of Dex1 TCP episodes and legacy episodes into one LeRobot dataset"
+        )
+    export_dex1_tcp = bool(next(iter(dex1_tcp_flags)))
+    if export_dex1_tcp and not export_fk:
+        raise ValueError("Dex1 TCP raw episodes require --export-fk=1 for LeRobot export")
+    if mobile_eef_base and not export_dex1_tcp:
+        raise ValueError("--mobile-eef-base requires Dex1 TCP raw episode metadata")
 
     fk_provider = None
     resolved_urdf_path = None
@@ -769,10 +1016,13 @@ def export_raw_task_dir(
     writer = LeRobotV2Writer(
         task_dir=str(output_root),
         fk_provider=fk_provider,
+        export_dex1_tcp=export_dex1_tcp,
         task_goal=task_text,
         frequency=frequency,
         rerun_log=False,
         verify_encoded_video=bool(verify_video_frames),
+        state_vector_size=MOBILE_STATE_VECTOR_SIZE if mobile_eef_base else 16,
+        action_vector_size=MOBILE_ACTION_VECTOR_SIZE if mobile_eef_base else 16,
     )
 
     episode_summaries: List[Dict[str, Any]] = []
@@ -797,6 +1047,9 @@ def export_raw_task_dir(
                 verify_export=bool(verify_export),
                 verify_video_frames=bool(verify_video_frames),
                 export_fk=bool(export_fk),
+                export_dex1_tcp=export_dex1_tcp,
+                mobile_eef_base=mobile_eef_base,
+                episode_data_file=episode_data_file,
             )
         )
         if report_episode:
@@ -812,7 +1065,12 @@ def export_raw_task_dir(
         "verify_export": bool(verify_export),
         "verify_video_frames": bool(verify_video_frames),
         "export_fk": bool(export_fk),
+        "export_dex1_tcp": export_dex1_tcp,
         "urdf_path": str(resolved_urdf_path) if resolved_urdf_path is not None else "",
+        "episode_data_file": episode_data_file,
+        "mobile_eef_base": bool(mobile_eef_base),
+        "state_vector_size": MOBILE_STATE_VECTOR_SIZE if mobile_eef_base else 16,
+        "action_vector_size": MOBILE_ACTION_VECTOR_SIZE if mobile_eef_base else 16,
         "episodes_total": len(episode_dirs),
         "episodes_exported": len(episode_summaries),
         "frames_total": int(sum(item["frame_count"] for item in episode_summaries)),
@@ -860,6 +1118,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--export-fk", default="0", help="Export G1D FK columns as xyz+rpy. Default 0.")
     parser.add_argument("--urdf-path", type=Path, help="G1D URDF required when --export-fk=1.")
+    parser.add_argument("--episode-data-file", default="data.json", help="Episode metadata filename, e.g. data.mobile_aligned.json.")
+    parser.add_argument(
+        "--mobile-eef-base",
+        default="0",
+        help="Export 26D Rot6D EEF+base state and 23D action (vx/wz only; no waist). Default 0.",
+    )
     return parser
 
 
@@ -878,6 +1142,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         verify_video_frames=parse_bool_flag(args.verify_video_frames, "--verify-video-frames"),
         export_fk=parse_bool_flag(args.export_fk, "--export-fk"),
         urdf_path=args.urdf_path,
+        episode_data_file=args.episode_data_file,
+        mobile_eef_base=parse_bool_flag(args.mobile_eef_base, "--mobile-eef-base"),
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

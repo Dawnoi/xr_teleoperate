@@ -18,6 +18,8 @@ FRAME_PROGRESS_EVERY="${FRAME_PROGRESS_EVERY:-100}"
 STRICT_IMAGE_VALIDATE="${STRICT_IMAGE_VALIDATE:-0}"
 VERIFY_EXPORT="${VERIFY_EXPORT:-1}"
 VERIFY_VIDEO_FRAMES="${VERIFY_VIDEO_FRAMES:-0}"
+EXPORT_FK="${EXPORT_FK:-0}"
+URDF_PATH="${URDF_PATH:-assets/g1_d/g1_d.urdf}"
 
 cd "${REPO_DIR}"
 
@@ -31,6 +33,7 @@ echo "[EXPORT_RAW_LEROBOT] frame_progress_every=${FRAME_PROGRESS_EVERY}"
 echo "[EXPORT_RAW_LEROBOT] strict_image_validate=${STRICT_IMAGE_VALIDATE}"
 echo "[EXPORT_RAW_LEROBOT] verify_export=${VERIFY_EXPORT}"
 echo "[EXPORT_RAW_LEROBOT] verify_video_frames=${VERIFY_VIDEO_FRAMES}"
+echo "[EXPORT_RAW_LEROBOT] export_fk=${EXPORT_FK}"
 
 if [[ ! -d "${RAW_ROOT}" ]]; then
   echo "[EXPORT_RAW_LEROBOT][ERROR] raw root not found: ${RAW_ROOT}" >&2
@@ -53,6 +56,9 @@ ARGS=(
 
 if [[ "${OVERWRITE}" == "1" ]]; then
   ARGS+=(--overwrite)
+fi
+if [[ "${EXPORT_FK}" == "1" ]]; then
+  ARGS+=(--export-fk 1 --urdf-path "${URDF_PATH}")
 fi
 
 echo "[EXPORT_RAW_LEROBOT] writing log to ${LOG_FILE}"

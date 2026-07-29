@@ -25,6 +25,7 @@ Python 实现位置：
 bash scripts/start/start_real_robot_wired.sh
 bash scripts/start/start_real_robot_wifi.sh
 bash scripts/start/start_real_robot_wired_3cams_zmq.sh
+bash scripts/start/start_real_robot_wired_3cams_zmq_direct_ik.sh
 bash scripts/start/start_real_robot_vla.sh
 ```
 
@@ -54,6 +55,41 @@ SENDER_IP=192.168.123.164 \
 TASK_DIR=./utils/data \
 TASK_NAME=multi_cam_record \
 bash scripts/start/start_real_robot_wired_3cams_zmq.sh
+```
+
+移动操作训练采集：
+
+```bash
+NETWORK_INTERFACE=enx9c69d3212b05 \
+TASK_DIR=./utils/data/multi_cam_record \
+TASK_NAME=base_collect_001 \
+bash scripts/start/start_real_robot_wired_3cams_zmq.sh \
+  --ui --ui-host 0.0.0.0 --ui-port 8085 \
+  --record-base --base-motion \
+  --record-slam-map-pose --record-mobile-training-state \
+  --slam-pose-source-frame odom \
+  --base-velocity-frame base_link
+```
+
+该模式会在脚本中加载 `/opt/ros/humble/setup.bash` 并要求 `/tf` 中已有 `slamware_map -> odom` 与 `odom -> base_link`。TF 独立缓存，每个相机样本会校验最近 TF、底盘状态和 TF header 的时间误差。未满足 TF 条件时程序不会开始录制。
+
+旧的直接 IK 采集使用 `start_real_robot_wired_3cams_zmq_direct_ik.sh`。该脚本固定 `--mobile-manipulation-mode direct_ik` 和原始共享 tapered 工作空间：`z=[-0.05, 0.45]`、`x=[0.10, 0.38 -> 0.52]`、`|y|=[0.24 -> 0.38]`；它不接受 `--mobile-manipulation-mode` 参数。需要移动操作 QP 时，必须使用 `start_real_robot_wired_3cams_zmq.sh` 并显式传入 `--mobile-manipulation-mode mobile_ik_qp`。
+
+## SLAM TF 路径比较
+
+在 `unitree001` 上运行以下独立诊断工具，可在终端实时显示候选路径涉及的五条原始 TF：`map -> odom`、`odom -> base_link`、`map -> robot_pose`、`robot_pose -> base_link` 与 `map -> laser`。它不做对齐、不做 transform 合成、不控制机器人，也不写 episode。
+
+```bash
+source /opt/ros/humble/setup.bash
+conda activate tv
+cd ~/programs/xr_teleoperate
+python scripts/debug/compare_slam_tf_paths.py
+```
+
+默认只显示这五条候选边。每条都会打印 header 时间戳、主机接收时间、`x/y/z`、四元数、yaw 和更新计数；`header_age_ms` 只显示观察值，不触发任何过滤。若需查看 `/tf` 中的所有边：
+
+```bash
+python scripts/debug/compare_slam_tf_paths.py --all-tf
 ```
 
 VLA / online inference 真机推理：

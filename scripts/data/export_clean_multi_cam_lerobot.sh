@@ -15,6 +15,8 @@ FRAME_PROGRESS_EVERY="${FRAME_PROGRESS_EVERY:-100}"
 STRICT_IMAGE_VALIDATE="${STRICT_IMAGE_VALIDATE:-0}"
 VERIFY_EXPORT="${VERIFY_EXPORT:-1}"
 VERIFY_VIDEO_FRAMES="${VERIFY_VIDEO_FRAMES:-0}"
+EXPORT_FK="${EXPORT_FK:-0}"
+URDF_PATH="${URDF_PATH:-assets/g1_d/g1_d.urdf}"
 
 cd "$(dirname "$0")/../.."
 
@@ -29,6 +31,7 @@ echo "[EXPORT_CLEAN] frame_progress_every=$FRAME_PROGRESS_EVERY"
 echo "[EXPORT_CLEAN] strict_image_validate=$STRICT_IMAGE_VALIDATE"
 echo "[EXPORT_CLEAN] verify_export=$VERIFY_EXPORT"
 echo "[EXPORT_CLEAN] verify_video_frames=$VERIFY_VIDEO_FRAMES"
+echo "[EXPORT_CLEAN] export_fk=$EXPORT_FK"
 
 python3 - "$RAW_ROOT" "$PROBLEM_FILE" "$VIEW_ROOT" "$OUTPUT_ROOT" <<'PY'
 import shutil
@@ -104,7 +107,7 @@ mkdir -p "$OUTPUT_ROOT"
 mkdir -p "$(dirname "$LOG_FILE")"
 echo "[EXPORT_CLEAN] writing log to $LOG_FILE"
 
-env -u PYTHONPATH "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" python -u data_pipeline/export/raw_to_lerobot_v2.py \
+ARGS=(
   --input-task-dir "$VIEW_ROOT" \
   --output-root "$OUTPUT_ROOT" \
   --task "$TASK" \
@@ -114,7 +117,14 @@ env -u PYTHONPATH "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" python -u
   --frame-progress-every "$FRAME_PROGRESS_EVERY" \
   --strict-image-validate "$STRICT_IMAGE_VALIDATE" \
   --verify-export "$VERIFY_EXPORT" \
-  --verify-video-frames "$VERIFY_VIDEO_FRAMES" 2>&1 | tee "$LOG_FILE"
+  --verify-video-frames "$VERIFY_VIDEO_FRAMES"
+)
+if [[ "$EXPORT_FK" == "1" ]]; then
+  ARGS+=(--export-fk 1 --urdf-path "$URDF_PATH")
+fi
+
+env -u PYTHONPATH "$CONDA_BIN" run --no-capture-output -n "$CONDA_ENV" python -u data_pipeline/export/raw_to_lerobot_v2.py \
+  "${ARGS[@]}" 2>&1 | tee "$LOG_FILE"
 
 echo "[EXPORT_CLEAN] done"
 echo "[EXPORT_CLEAN] summary=$OUTPUT_ROOT/export_summary.json"
