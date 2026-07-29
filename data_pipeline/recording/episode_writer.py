@@ -331,6 +331,16 @@ class EpisodeWriter():
                 "sim_state": ""
             }
 
+    def update_episode_info(self, metadata):
+        if not isinstance(metadata, dict) or not metadata:
+            raise ValueError("episode metadata must be a non-empty dict")
+        for key, value in metadata.items():
+            if not isinstance(key, str) or not key:
+                raise ValueError("episode metadata keys must be non-empty strings")
+            if key in self.info:
+                raise ValueError(f"episode metadata must not overwrite existing key: {key}")
+            self.info[key] = value
+
  
     def create_episode(self, *, enabled_cameras):
         """

@@ -9,12 +9,13 @@ import threading
 import time
 from collections import OrderedDict
 from queue import Empty, Queue
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 import cv2
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+from scipy.spatial.transform import Rotation
 
 import logging_mp
 
@@ -77,6 +78,13 @@ SIDE_GROUPS = ("left", "right")
 STATE_VECTOR_SIZE = 16
 ARM_VECTOR_SIZE = 14
 EE_VECTOR_SIZE = 1
+DEX1_TCP_LABEL = "dex1_tcp"
+DEX1_TCP_RECORD_PATHS = (
+    ("states", "left_arm", "fb", "left", "left_dex1_tcp"),
+    ("states", "right_arm", "fb", "right", "right_dex1_tcp"),
+    ("actions", "left_arm", "cmd", "left", "left_dex1_tcp_target"),
+    ("actions", "right_arm", "cmd", "right", "right_dex1_tcp_target"),
+)
 
 
 def _normalize_text(value: Any, fallback: str = "") -> str:
@@ -142,6 +150,59 @@ def _finite_list(values: Any, expected_len: int, label: str) -> np.ndarray:
     return arr
 
 
+def dex1_tcp_pose6_from_record(record: Any, label: str, expected_child_frame: str) -> List[float]:
+    """Validate one raw Dex1 TCP pose record and return xyz+rpy."""
+    if not isinstance(record, Mapping):
+        raise ValueError(f"{label} must be a pose mapping")
+    if record.get("frame_id") != "base_link":
+        raise ValueError(f"{label}.frame_id must be 'base_link', got {record.get('frame_id')!r}")
+    if record.get("child_frame_id") != expected_child_frame:
+        raise ValueError(
+            f"{label}.child_frame_id must be {expected_child_frame!r}, got {record.get('child_frame_id')!r}"
+        )
+    position = _finite_list(record.get("position"), 3, f"{label}.position")
+    rpy = _finite_list(record.get("rpy"), 3, f"{label}.rpy")
+    rotation = np.asarray(record.get("rotation_matrix"), dtype=float)
+    matrix4x4 = np.asarray(record.get("matrix4x4"), dtype=float)
+    if rotation.shape != (3, 3):
+        raise ValueError(f"{label}.rotation_matrix must have shape (3, 3), got {rotation.shape}")
+    if matrix4x4.shape != (4, 4):
+        raise ValueError(f"{label}.matrix4x4 must have shape (4, 4), got {matrix4x4.shape}")
+    if not np.all(np.isfinite(rotation)) or not np.all(np.isfinite(matrix4x4)):
+        raise ValueError(f"{label} rotation matrix contains NaN or Inf")
+    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-8, rtol=0.0):
+        raise ValueError(f"{label}.rotation_matrix is not orthonormal")
+    if not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-8, rtol=0.0):
+        raise ValueError(f"{label}.rotation_matrix determinant must be +1")
+    if not np.allclose(matrix4x4[3], np.array([0.0, 0.0, 0.0, 1.0]), atol=1e-12, rtol=0.0):
+        raise ValueError(f"{label}.matrix4x4 has an invalid homogeneous bottom row")
+    if not np.allclose(matrix4x4[:3, :3], rotation, atol=1e-8, rtol=0.0):
+        raise ValueError(f"{label}.rotation_matrix and matrix4x4 rotation disagree")
+    if not np.allclose(matrix4x4[:3, 3], position, atol=1e-8, rtol=0.0):
+        raise ValueError(f"{label}.position and matrix4x4 translation disagree")
+    if not np.allclose(Rotation.from_euler("xyz", rpy).as_matrix(), rotation, atol=1e-7, rtol=0.0):
+        raise ValueError(f"{label}.rpy and rotation_matrix disagree")
+    return [float(value) for value in np.concatenate((position, rpy))]
+
+
+def dex1_tcp_fk_from_raw_records(states: Any, actions: Any) -> Dict[str, List[float]]:
+    sources = {"states": states, "actions": actions}
+    result: Dict[str, List[float]] = {}
+    for source_name, arm_name, group, side, child_frame in DEX1_TCP_RECORD_PATHS:
+        source = sources[source_name]
+        if not isinstance(source, Mapping):
+            raise ValueError(f"{source_name} must be a mapping for Dex1 TCP export")
+        arm = source.get(arm_name)
+        if not isinstance(arm, Mapping):
+            raise ValueError(f"{source_name}.{arm_name} must be a mapping for Dex1 TCP export")
+        result[f"observation.fk.{group}.{side}.{DEX1_TCP_LABEL}"] = dex1_tcp_pose6_from_record(
+            arm.get("pose_base_link_tcp"),
+            f"{source_name}.{arm_name}.pose_base_link_tcp",
+            child_frame,
+        )
+    return result
+
+
 def _json_safe_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _json_safe_value(nested_value) for key, nested_value in value.items()}
@@ -156,28 +217,36 @@ def _json_safe_value(value: Any) -> Any:
     return value
 
 
-def _fk_feature_keys() -> List[str]:
+def _fk_feature_keys(*, export_dex1_tcp: bool = False) -> List[str]:
     keys = []
     for group in ARM_GROUPS:
         for side in SIDE_GROUPS:
             for label in ARM_JOINT_LABELS:
                 keys.append(f"observation.fk.{group}.{side}.{label}")
             keys.append(f"observation.fk.{group}.{side}.gripper_flange")
+            if export_dex1_tcp:
+                keys.append(f"observation.fk.{group}.{side}.{DEX1_TCP_LABEL}")
     return keys
 
 
-def _make_feature_spec(export_fk: bool) -> Dict[str, Dict[str, Any]]:
+def _make_feature_spec(
+    export_fk: bool,
+    *,
+    export_dex1_tcp: bool = False,
+    state_vector_size: int = STATE_VECTOR_SIZE,
+    action_vector_size: int = STATE_VECTOR_SIZE,
+) -> Dict[str, Dict[str, Any]]:
     features: Dict[str, Dict[str, Any]] = OrderedDict()
     features["timestamp"] = {"dtype": "float64", "shape": []}
     features["frame_index"] = {"dtype": "int64", "shape": []}
     features["episode_index"] = {"dtype": "int64", "shape": []}
     features["index"] = {"dtype": "int64", "shape": []}
     features["task_index"] = {"dtype": "int64", "shape": []}
-    features["observation.state"] = {"dtype": "list<float64>", "length": STATE_VECTOR_SIZE}
-    features["action"] = {"dtype": "list<float64>", "length": STATE_VECTOR_SIZE}
+    features["observation.state"] = {"dtype": "list<float64>", "length": int(state_vector_size)}
+    features["action"] = {"dtype": "list<float64>", "length": int(action_vector_size)}
 
     if export_fk:
-        for key in _fk_feature_keys():
+        for key in _fk_feature_keys(export_dex1_tcp=export_dex1_tcp):
             features[key] = {"dtype": "list<float64>", "length": 6}
 
     for slot in CAMERA_SLOTS:
@@ -191,7 +260,13 @@ def _make_feature_spec(export_fk: bool) -> Dict[str, Dict[str, Any]]:
     return features
 
 
-def _build_parquet_schema(export_fk: bool) -> pa.Schema:
+def _build_parquet_schema(
+    export_fk: bool,
+    *,
+    export_dex1_tcp: bool = False,
+    state_vector_size: int = STATE_VECTOR_SIZE,
+    action_vector_size: int = STATE_VECTOR_SIZE,
+) -> pa.Schema:
     fields: List[pa.Field] = [
         pa.field("timestamp", pa.float64()),
         pa.field("frame_index", pa.int64()),
@@ -202,7 +277,7 @@ def _build_parquet_schema(export_fk: bool) -> pa.Schema:
         pa.field("action", pa.list_(pa.float64())),
     ]
     if export_fk:
-        fields.extend(pa.field(key, pa.list_(pa.float64())) for key in _fk_feature_keys())
+        fields.extend(pa.field(key, pa.list_(pa.float64())) for key in _fk_feature_keys(export_dex1_tcp=export_dex1_tcp))
     for slot in CAMERA_SLOTS:
         fields.append(pa.field(f"observation.images.{slot}", _struct_type()))
     return pa.schema(fields)
@@ -637,6 +712,7 @@ class LeRobotV2Writer:
         task_dir: str,
         arm_ik=None,
         fk_provider=None,
+        export_dex1_tcp: bool = False,
         task_goal: Optional[str] = None,
         task_desc: Optional[str] = None,
         task_steps: Optional[str] = None,
@@ -644,6 +720,8 @@ class LeRobotV2Writer:
         image_size: Optional[List[int]] = None,
         rerun_log: bool = False,
         verify_encoded_video: bool = True,
+        state_vector_size: int = STATE_VECTOR_SIZE,
+        action_vector_size: int = STATE_VECTOR_SIZE,
     ):
         self.dataset_root = os.path.abspath(task_dir)
         self.frequency = float(frequency)
@@ -660,9 +738,26 @@ class LeRobotV2Writer:
             raise TypeError("fk_provider must define compute(arm_qpos)")
         self._fk_provider = fk_provider
         self._export_fk = fk_provider is not None
+        self._export_dex1_tcp = bool(export_dex1_tcp)
+        self._state_vector_size = int(state_vector_size)
+        self._action_vector_size = int(action_vector_size)
+        if self._state_vector_size <= 0 or self._action_vector_size <= 0:
+            raise ValueError("state_vector_size and action_vector_size must be positive")
+        if self._export_dex1_tcp and not self._export_fk:
+            raise ValueError("export_dex1_tcp requires an explicit G1D fk_provider")
 
-        self._parquet_schema = _build_parquet_schema(export_fk=self._export_fk)
-        self._feature_spec = _make_feature_spec(export_fk=self._export_fk)
+        self._parquet_schema = _build_parquet_schema(
+            export_fk=self._export_fk,
+            export_dex1_tcp=self._export_dex1_tcp,
+            state_vector_size=self._state_vector_size,
+            action_vector_size=self._action_vector_size,
+        )
+        self._feature_spec = _make_feature_spec(
+            export_fk=self._export_fk,
+            export_dex1_tcp=self._export_dex1_tcp,
+            state_vector_size=self._state_vector_size,
+            action_vector_size=self._action_vector_size,
+        )
 
         self.meta_dir = os.path.join(self.dataset_root, "meta")
         self.alignment_dir = os.path.join(self.meta_dir, "alignment")
@@ -1275,6 +1370,8 @@ class LeRobotV2Writer:
         actions = item_data.get("actions", {}) or {}
         timestamps = item_data.get("timestamps", {}) or {}
         control_extras = item_data.get("control_extras")
+        state_vector = item_data.get("state_vector")
+        action_vector = item_data.get("action_vector")
 
         try:
             slot_frames = self._extract_camera_frames(colors)
@@ -1311,6 +1408,15 @@ class LeRobotV2Writer:
             fk_samples["fk_cmd"] = self._compute_fk_for_qpos(
                 np.concatenate([left_arm_action_qpos[:7], right_arm_action_qpos[:7]]), "cmd"
             )
+            if self._export_dex1_tcp:
+                tcp_fk = dex1_tcp_fk_from_raw_records(states, actions)
+                for key, value in tcp_fk.items():
+                    if ".fb." in key:
+                        fk_samples["fk_fb"][key] = value
+                    elif ".cmd." in key:
+                        fk_samples["fk_cmd"][key] = value
+                    else:
+                        raise RuntimeError(f"unexpected Dex1 TCP FK key: {key}")
 
         with self._state_lock:
             if self._current_first_sample_monotonic_ns is None:
@@ -1346,13 +1452,17 @@ class LeRobotV2Writer:
             logger_mp.warning("[LeRobotV2Writer] episode failed: video streaming failed: %s", exc)
             return
 
+        if state_vector is None:
+            state_vector = np.concatenate([left_arm_qpos[:7], left_arm_qpos[7:8], right_arm_qpos[:7], right_arm_qpos[7:8]])
+        if action_vector is None:
+            action_vector = np.concatenate([left_arm_action_qpos[:7], left_arm_action_qpos[7:8], right_arm_action_qpos[:7], right_arm_action_qpos[7:8]])
         sample = {
             "frame_index": frame_index,
             "timestamp_s": sample_timestamp_s,
             "sample_monotonic_ns": sample_monotonic_ns,
             "task_index": task_index,
-            "state_qpos": np.concatenate([left_arm_qpos[:7], left_arm_qpos[7:8], right_arm_qpos[:7], right_arm_qpos[7:8]]),
-            "action_qpos": np.concatenate([left_arm_action_qpos[:7], left_arm_action_qpos[7:8], right_arm_action_qpos[:7], right_arm_action_qpos[7:8]]),
+            "state_qpos": np.asarray(state_vector, dtype=float).reshape(-1),
+            "action_qpos": np.asarray(action_vector, dtype=float).reshape(-1),
             "images": {
                 slot: {
                     "path": _dataset_relpath(
@@ -1399,7 +1509,7 @@ class LeRobotV2Writer:
     def _sample_is_valid(self, sample: Dict[str, Any]) -> None:
         state_qpos = np.asarray(sample["state_qpos"], dtype=float)
         action_qpos = np.asarray(sample["action_qpos"], dtype=float)
-        if state_qpos.shape[0] != STATE_VECTOR_SIZE or action_qpos.shape[0] != STATE_VECTOR_SIZE:
+        if state_qpos.shape[0] != self._state_vector_size or action_qpos.shape[0] != self._action_vector_size:
             raise ValueError("state/action vector size mismatch")
         if not np.all(np.isfinite(state_qpos)):
             raise ValueError("state vector contains NaN or Inf")
@@ -1435,7 +1545,7 @@ class LeRobotV2Writer:
         columns["observation.state"] = []
         columns["action"] = []
         if self._export_fk:
-            for key in _fk_feature_keys():
+            for key in _fk_feature_keys(export_dex1_tcp=self._export_dex1_tcp):
                 columns[key] = []
         for slot in CAMERA_SLOTS:
             columns[f"observation.images.{slot}"] = []
@@ -1475,7 +1585,7 @@ class LeRobotV2Writer:
         arrays["observation.state"] = pa.array(columns["observation.state"], type=pa.list_(pa.float64()))
         arrays["action"] = pa.array(columns["action"], type=pa.list_(pa.float64()))
         if self._export_fk:
-            for key in _fk_feature_keys():
+            for key in _fk_feature_keys(export_dex1_tcp=self._export_dex1_tcp):
                 arrays[key] = pa.array(columns[key], type=pa.list_(pa.float64()))
         for slot in CAMERA_SLOTS:
             arrays[f"observation.images.{slot}"] = pa.array(columns[f"observation.images.{slot}"], type=_struct_type())
@@ -1777,6 +1887,8 @@ class LeRobotV2Writer:
         sim_state=None,
         timestamps=None,
         control_extras=None,
+        state_vector=None,
+        action_vector=None,
     ):
         with self._state_lock:
             if not self._current_episode_active or self.is_available:
@@ -1792,6 +1904,8 @@ class LeRobotV2Writer:
             "sim_state": sim_state,
             "timestamps": timestamps or {},
             "control_extras": control_extras or {},
+            "state_vector": state_vector,
+            "action_vector": action_vector,
         }
         self._item_queue.put(item_data)
         with self._state_lock:

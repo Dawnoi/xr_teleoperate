@@ -145,8 +145,8 @@ def validate_episode(episode_dir: Path, payload: dict[str, Any] | None = None) -
         errors.append("episode has no camera images")
     for name, count in sorted(camera_counts.items()):
         coverage = count / max(1, frame_count)
-        if coverage < 0.95:
-            errors.append(f"camera {name} coverage {count}/{frame_count} below 95%")
+        if coverage < 1.0:
+            errors.append(f"camera {name} coverage {count}/{frame_count} below 100%")
 
     robot_counts = {
         "left": {"valid_q8": 0, "valid_gripper": 0},

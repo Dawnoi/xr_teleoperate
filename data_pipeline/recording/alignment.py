@@ -1,6 +1,10 @@
 """Timestamp alignment helpers for recording data streams."""
 
+import copy
+import math
 from collections import deque
+from collections.abc import Mapping
+from numbers import Real
 
 import numpy as np
 
@@ -161,6 +165,9 @@ def interpolate_timed_sample(
                 continue
         except Exception:
             pass
+        if isinstance(prev_val, Real) and isinstance(next_val, Real):
+            result[key] = float(prev_val) + alpha * (float(next_val) - float(prev_val))
+            continue
         result[key] = prev_val if abs(target_ns - prev_t) <= abs(next_t - target_ns) else next_val
     return result
 
@@ -343,5 +350,226 @@ def interpolate_timed_sample_strict(
                 continue
         except Exception:
             pass
+        if isinstance(prev_val, Real) and isinstance(next_val, Real):
+            result[key] = float(prev_val) + alpha * (float(next_val) - float(prev_val))
+            continue
         result[key] = prev_val if abs(target_ns - prev_t) <= abs(next_t - target_ns) else next_val
+    return result
+
+
+def _finite_float(value, field_name: str) -> float:
+    result = float(value)
+    if not math.isfinite(result):
+        raise ValueError(f"{field_name} must be finite, got {value!r}")
+    return result
+
+
+def _mapping(value, field_name: str) -> Mapping:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} must be an object, got {type(value).__name__}")
+    return value
+
+
+def _same_metadata(first: Mapping, second: Mapping, keys: tuple[str, ...], field_name: str) -> dict:
+    result = {}
+    for key in keys:
+        first_value = first.get(key)
+        second_value = second.get(key)
+        if first_value != second_value:
+            raise RuntimeError(
+                f"{field_name}.{key} changes between interpolation supports: "
+                f"{first_value!r} != {second_value!r}"
+            )
+        result[key] = copy.deepcopy(first_value)
+    return result
+
+
+def _normalized_quaternion(value, field_name: str) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 4:
+        raise ValueError(f"{field_name} must be a length-4 quaternion")
+    quaternion = [_finite_float(component, f"{field_name}[{index}]") for index, component in enumerate(value)]
+    norm = math.sqrt(sum(component * component for component in quaternion))
+    if norm < 1e-12:
+        raise ValueError(f"{field_name} has zero norm")
+    if abs(norm - 1.0) > 1e-3:
+        raise ValueError(f"{field_name} must have unit norm, got {norm:.9f}")
+    return [component / norm for component in quaternion]
+
+
+def _slerp_quaternion_xyzw(first: list[float], second: list[float], alpha: float) -> list[float]:
+    dot = sum(left * right for left, right in zip(first, second))
+    if dot < 0.0:
+        second = [-component for component in second]
+        dot = -dot
+    dot = min(1.0, max(-1.0, dot))
+    if dot > 0.9995:
+        result = [left + alpha * (right - left) for left, right in zip(first, second)]
+    else:
+        theta = math.acos(dot)
+        sin_theta = math.sin(theta)
+        first_weight = math.sin((1.0 - alpha) * theta) / sin_theta
+        second_weight = math.sin(alpha * theta) / sin_theta
+        result = [first_weight * left + second_weight * right for left, right in zip(first, second)]
+    norm = math.sqrt(sum(component * component for component in result))
+    if norm < 1e-12:
+        raise RuntimeError("SLERP produced a zero-norm quaternion")
+    return [component / norm for component in result]
+
+
+def _interpolate_scalar(first, second, alpha: float, field_name: str) -> float:
+    first_value = _finite_float(first, f"{field_name}.prev")
+    second_value = _finite_float(second, f"{field_name}.next")
+    return first_value + alpha * (second_value - first_value)
+
+
+def _interpolate_yaw_shortest(first, second, alpha: float, field_name: str) -> float:
+    first_value = _finite_float(first, f"{field_name}.prev")
+    second_value = _finite_float(second, f"{field_name}.next")
+    delta = math.atan2(math.sin(second_value - first_value), math.cos(second_value - first_value))
+    return math.atan2(math.sin(first_value + alpha * delta), math.cos(first_value + alpha * delta))
+
+
+def _interpolate_pose(first: Mapping, second: Mapping, alpha: float, field_name: str) -> dict:
+    metadata_keys = ("frame_id", "source_topic")
+    if "child_frame_id" in first or "child_frame_id" in second:
+        metadata_keys += ("child_frame_id",)
+    result = {
+        "x": _interpolate_scalar(first.get("x"), second.get("x"), alpha, f"{field_name}.x"),
+        "y": _interpolate_scalar(first.get("y"), second.get("y"), alpha, f"{field_name}.y"),
+        "z": _interpolate_scalar(first.get("z"), second.get("z"), alpha, f"{field_name}.z"),
+        "yaw": _interpolate_yaw_shortest(first.get("yaw"), second.get("yaw"), alpha, f"{field_name}.yaw"),
+        "quat_xyzw": _slerp_quaternion_xyzw(
+            _normalized_quaternion(first.get("quat_xyzw"), f"{field_name}.prev.quat_xyzw"),
+            _normalized_quaternion(second.get("quat_xyzw"), f"{field_name}.next.quat_xyzw"),
+            alpha,
+        ),
+    }
+    result.update(_same_metadata(first, second, metadata_keys, field_name))
+    return result
+
+
+def _support_entry(buffer: deque, timestamp_ns: int, min_timestamp_ns: int | None, field_name: str) -> Mapping:
+    for entry in buffer:
+        if min_timestamp_ns is not None and int(entry["t_ns"]) < int(min_timestamp_ns):
+            continue
+        if int(entry["t_ns"]) == int(timestamp_ns):
+            return entry
+    raise RuntimeError(f"{field_name} interpolation support timestamp {timestamp_ns} is absent from its history")
+
+
+def _linear_supports(buffer: deque, aligned: Mapping, min_timestamp_ns: int | None, field_name: str) -> tuple[Mapping, Mapping, float] | None:
+    if aligned.get("interpolation_mode") != "linear":
+        return None
+    previous = _support_entry(buffer, int(aligned["interp_prev_t_ns"]), min_timestamp_ns, field_name)
+    following = _support_entry(buffer, int(aligned["interp_next_t_ns"]), min_timestamp_ns, field_name)
+    return previous, following, float(aligned["interp_alpha"])
+
+
+def interpolate_base_state_timed_sample_strict(
+    buffer: deque,
+    target_ns: int,
+    max_delta_ns: int | None = None,
+    min_timestamp_ns: int | None = None,
+):
+    """Interpolate measured odom pose and feedback velocity to one camera timestamp."""
+    aligned = interpolate_timed_sample_strict(buffer, target_ns, max_delta_ns, min_timestamp_ns)
+    if aligned is None:
+        return None
+    supports = _linear_supports(buffer, aligned, min_timestamp_ns, "base_state")
+    if supports is None:
+        return aligned
+    previous, following, alpha = supports
+    previous_pose = _mapping(previous.get("world_pose"), "base_state.prev.world_pose")
+    following_pose = _mapping(following.get("world_pose"), "base_state.next.world_pose")
+    previous_velocity = _mapping(previous.get("velocity"), "base_state.prev.velocity")
+    following_velocity = _mapping(following.get("velocity"), "base_state.next.velocity")
+    result = dict(aligned)
+    result.pop("source_stamp_ns", None)
+    result["world_pose"] = _interpolate_pose(previous_pose, following_pose, alpha, "base_state.world_pose")
+    velocity = {
+        key: _interpolate_scalar(previous_velocity.get(key), following_velocity.get(key), alpha, f"base_state.velocity.{key}")
+        for key in ("vx", "vy", "vz", "wz")
+    }
+    velocity.update(
+        _same_metadata(
+            previous_velocity,
+            following_velocity,
+            ("frame_id", "linear_unit", "angular_unit", "source_topic"),
+            "base_state.velocity",
+        )
+    )
+    result["velocity"] = velocity
+    result["source_topic"] = _same_metadata(previous, following, ("source_topic",), "base_state")["source_topic"]
+    return result
+
+
+def interpolate_base_height_timed_sample_strict(
+    buffer: deque,
+    target_ns: int,
+    max_delta_ns: int | None = None,
+    min_timestamp_ns: int | None = None,
+):
+    """Interpolate measured column height to one camera timestamp."""
+    aligned = interpolate_timed_sample_strict(buffer, target_ns, max_delta_ns, min_timestamp_ns)
+    if aligned is None:
+        return None
+    supports = _linear_supports(buffer, aligned, min_timestamp_ns, "base_height")
+    if supports is None:
+        return aligned
+    previous, following, alpha = supports
+    previous_height = _mapping(previous.get("height"), "base_height.prev.height")
+    following_height = _mapping(following.get("height"), "base_height.next.height")
+    result = dict(aligned)
+    result.pop("source_stamp_ns", None)
+    height = {
+        "z": _interpolate_scalar(previous_height.get("z"), following_height.get("z"), alpha, "base_height.height.z"),
+    }
+    height.update(_same_metadata(previous_height, following_height, ("source_topic",), "base_height.height"))
+    result["height"] = height
+    result["source_topic"] = _same_metadata(previous, following, ("source_topic",), "base_height")["source_topic"]
+    return result
+
+
+def interpolate_slam_tf_timed_sample_strict(
+    buffer: deque,
+    target_ns: int,
+    max_delta_ns: int | None = None,
+    min_timestamp_ns: int | None = None,
+):
+    """Interpolate slamware_map->base_link pose while retaining both raw TF supports."""
+    aligned = interpolate_timed_sample_strict(buffer, target_ns, max_delta_ns, min_timestamp_ns)
+    if aligned is None:
+        return None
+    supports = _linear_supports(buffer, aligned, min_timestamp_ns, "slam_tf")
+    if supports is None:
+        return aligned
+    previous, following, alpha = supports
+    pose = _interpolate_pose(previous, following, alpha, "slam_tf.pose")
+    pose.update(
+        _same_metadata(
+            previous,
+            following,
+            ("source_child_frame_id", "source_to_base_link_identity_assumed"),
+            "slam_tf.pose",
+        )
+    )
+    previous_tf_age_ms = _finite_float(previous.get("tf_age_ms"), "slam_tf.prev.tf_age_ms")
+    following_tf_age_ms = _finite_float(following.get("tf_age_ms"), "slam_tf.next.tf_age_ms")
+    pose["tf_age_ms"] = max(previous_tf_age_ms, following_tf_age_ms)
+    pose["tf_age_ms_semantics"] = "max_support_age_ms"
+    pose["interpolation_support"] = {
+        "prev_tf_header_stamp_ns": int(previous["tf_header_stamp_ns"]),
+        "next_tf_header_stamp_ns": int(following["tf_header_stamp_ns"]),
+        "prev_tf_lookup_wall_time_ns": int(previous["tf_lookup_wall_time_ns"]),
+        "next_tf_lookup_wall_time_ns": int(following["tf_lookup_wall_time_ns"]),
+        "prev_tf_lookup_monotonic_ns": int(previous["tf_lookup_monotonic_ns"]),
+        "next_tf_lookup_monotonic_ns": int(following["tf_lookup_monotonic_ns"]),
+        "prev_source_chain": copy.deepcopy(previous.get("source_chain")),
+        "next_source_chain": copy.deepcopy(following.get("source_chain")),
+    }
+    result = dict(aligned)
+    result.pop("source_stamp_ns", None)
+    for key in ("tf_header_stamp_ns", "tf_lookup_wall_time_ns", "tf_lookup_monotonic_ns", "source_chain"):
+        result.pop(key, None)
+    result.update(pose)
     return result

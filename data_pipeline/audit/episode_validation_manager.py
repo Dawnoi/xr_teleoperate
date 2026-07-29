@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from data_pipeline.audit.episode_validation import (
     DEFAULT_ACTION_SEMANTICS_CONFIG,
+    DEFAULT_MOBILE_TRAINING_CONFIG,
     DEFAULT_TIME_ALIGNMENT_CONFIG,
     validate_finalized_episode,
     write_validation_report,
@@ -24,12 +25,14 @@ class EpisodeValidationManager:
         validator: Callable[[str | Path], dict[str, Any]] | None = None,
         action_semantics_config: str | Path = DEFAULT_ACTION_SEMANTICS_CONFIG,
         time_alignment_config: str | Path = DEFAULT_TIME_ALIGNMENT_CONFIG,
+        mobile_training_config: str | Path = DEFAULT_MOBILE_TRAINING_CONFIG,
     ) -> None:
         self._validator = validator or (
             lambda episode_dir: validate_finalized_episode(
                 episode_dir,
                 action_semantics_config=action_semantics_config,
                 time_alignment_config=time_alignment_config,
+                mobile_training_config=mobile_training_config,
             )
         )
         self._queue: Queue[Path | None] = Queue()

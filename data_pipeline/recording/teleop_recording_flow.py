@@ -18,12 +18,15 @@ from data_pipeline.recording.alignment import (
     build_alignment_timestamp_entry,
     camera_frame_identity,
     camera_meta_monotonic_ns,
-    hold_last_timed_sample,
+    interpolate_base_height_timed_sample_strict,
+    interpolate_base_state_timed_sample_strict,
+    interpolate_slam_tf_timed_sample_strict,
     interpolate_timed_sample_strict,
     nearest_timed_sample,
     timed_buffer_bounds,
 )
 from data_pipeline.recording.base_recording import build_base_action_record, build_base_state_record
+from teleop.control_flow.mobile_manipulation_coordinator import column_position_from_raw_height
 
 
 _CAMERA_NAME_ALIASES = {
@@ -116,9 +119,13 @@ class TeleopRecordingFlow:
         self.record_future_wait_timeout_ns = int(max(120_000_000, (2.0 / frequency) * 1e9))
         self.pending_sample_timeout_ns = int(1_000_000_000)
         self.record_base = bool(getattr(args, "record_base", False))
-        self.base_state_max_delta_ns = int(max(1_000_000, float(getattr(args, "base_state_max_age_ms", 150.0)) * 1e6))
-        self.base_height_max_delta_ns = self.base_state_max_delta_ns
-        self.base_action_max_age_ns = int(max(1_000_000, float(getattr(args, "base_action_max_age_ms", 500.0)) * 1e6))
+        self.record_slam_map_pose = bool(getattr(args, "record_slam_map_pose", False))
+        self._record_mobile_training_state = bool(
+            getattr(args, "record_mobile_training_state", False)
+        )
+        self.base_state_max_delta_ns = int(max(1_000_000, float(getattr(args, "base_state_max_age_ms", 131.578947)) * 1e6))
+        self.base_height_max_delta_ns = int(150.0 * 1e6)
+        self.slam_tf_max_delta_ns = int(max(1_000_000, float(getattr(args, "slam_tf_max_age_ms", 125.0)) * 1e6))
         self.base_height_required = bool(str(getattr(args, "base_height_topic", "/hispeed_state") or "").strip())
 
     def handle_commands(
@@ -187,10 +194,13 @@ class TeleopRecordingFlow:
         teleop_input_perf_counter_ns: int,
         arm_ik,
         get_wrist_poses: Callable[[Any, np.ndarray], tuple[np.ndarray, np.ndarray]],
+        get_wrist_poses_base_link: Callable[[Any, np.ndarray, float, float], tuple[np.ndarray, np.ndarray]] | None = None,
+        get_dex1_tcp_poses_base_link: Callable[[np.ndarray, float, float], tuple[np.ndarray, np.ndarray]] | None = None,
         sim_state_subscriber=None,
         base_state_history: deque | None = None,
         base_height_history: deque | None = None,
         base_action_history: deque | None = None,
+        slam_tf_history: deque | None = None,
     ) -> RecordingFrameResult:
         """Align the current frame to camera time and append items to the recorder."""
         ready = self.recorder.is_ready()
@@ -219,9 +229,12 @@ class TeleopRecordingFlow:
             base_state_history=base_state_history,
             base_height_history=base_height_history,
             base_action_history=base_action_history,
+            slam_tf_history=slam_tf_history,
             record_min_timestamp_ns=record_min_timestamp_ns,
             arm_ik=arm_ik,
             get_wrist_poses=get_wrist_poses,
+            get_wrist_poses_base_link=get_wrist_poses_base_link,
+            get_dex1_tcp_poses_base_link=get_dex1_tcp_poses_base_link,
             sim_state_subscriber=sim_state_subscriber,
         )
         return RecordingFrameResult(record_running=record_running, ready=ready)
@@ -365,9 +378,12 @@ class TeleopRecordingFlow:
         base_state_history: deque | None,
         base_height_history: deque | None,
         base_action_history: deque | None,
+        slam_tf_history: deque | None,
         record_min_timestamp_ns: int,
         arm_ik,
         get_wrist_poses: Callable[[Any, np.ndarray], tuple[np.ndarray, np.ndarray]],
+        get_wrist_poses_base_link: Callable[[Any, np.ndarray, float, float], tuple[np.ndarray, np.ndarray]] | None,
+        get_dex1_tcp_poses_base_link: Callable[[np.ndarray, float, float], tuple[np.ndarray, np.ndarray]] | None,
         sim_state_subscriber=None,
     ):
         while self.state.pending_samples:
@@ -386,6 +402,7 @@ class TeleopRecordingFlow:
                 base_state_history=base_state_history,
                 base_height_history=base_height_history,
                 base_action_history=base_action_history,
+                slam_tf_history=slam_tf_history,
                 sample_monotonic_ns=sample_monotonic_ns,
                 record_min_timestamp_ns=record_min_timestamp_ns,
             )
@@ -410,6 +427,8 @@ class TeleopRecordingFlow:
                 aligned_base_action=aligned_base_action,
                 arm_ik=arm_ik,
                 get_wrist_poses=get_wrist_poses,
+                get_wrist_poses_base_link=get_wrist_poses_base_link,
+                get_dex1_tcp_poses_base_link=get_dex1_tcp_poses_base_link,
             )
             if not self._add_record_item(
                 pending=pending,
@@ -438,6 +457,7 @@ class TeleopRecordingFlow:
         base_state_history: deque | None,
         base_height_history: deque | None,
         base_action_history: deque | None,
+        slam_tf_history: deque | None,
         sample_monotonic_ns: int,
         record_min_timestamp_ns: int,
     ) -> tuple[str, dict | None, dict | None, dict | None, dict | None, dict | None]:
@@ -485,6 +505,7 @@ class TeleopRecordingFlow:
             base_state_history=base_state_history,
             base_height_history=base_height_history,
             base_action_history=base_action_history,
+            slam_tf_history=slam_tf_history,
             sample_monotonic_ns=sample_monotonic_ns,
             record_min_timestamp_ns=record_min_timestamp_ns,
             sample_age_ns=sample_age_ns,
@@ -502,32 +523,44 @@ class TeleopRecordingFlow:
         sample_monotonic_ns: int,
         record_min_timestamp_ns: int,
         sample_age_ns: int,
+        slam_tf_history: deque | None = None,
     ) -> tuple[str, dict | None, dict | None, dict | None]:
         if not self.record_base:
             return "ready", None, None, None
         if base_state_history is None or base_action_history is None:
             raise RuntimeError("--record-base requires base_state_history and base_action_history")
+        if self.record_slam_map_pose and slam_tf_history is None:
+            raise RuntimeError("--record-slam-map-pose requires slam_tf_history")
         if self.base_height_required and base_height_history is None:
             raise RuntimeError("--record-base requires base_height_history when --base-height-topic is set")
 
-        aligned_base_state = nearest_timed_sample(
+        aligned_base_state = interpolate_base_state_timed_sample_strict(
             base_state_history,
             sample_monotonic_ns,
             max_delta_ns=self.base_state_max_delta_ns,
             min_timestamp_ns=record_min_timestamp_ns,
         )
-        aligned_base_action = hold_last_timed_sample(
+        aligned_base_action = self._aligned_sample(
             base_action_history,
             sample_monotonic_ns,
-            max_age_ns=self.base_action_max_age_ns,
+            strict_max_delta_ns=self.action_align_max_delta_ns,
+            fallback_max_delta_ns=self.action_nearest_fallback_max_delta_ns,
             min_timestamp_ns=record_min_timestamp_ns,
         )
         aligned_base_height = None
+        aligned_slam_tf = None
         if self.base_height_required:
-            aligned_base_height = nearest_timed_sample(
+            aligned_base_height = interpolate_base_height_timed_sample_strict(
                 base_height_history,
                 sample_monotonic_ns,
                 max_delta_ns=self.base_height_max_delta_ns,
+                min_timestamp_ns=record_min_timestamp_ns,
+            )
+        if self.record_slam_map_pose:
+            aligned_slam_tf = interpolate_slam_tf_timed_sample_strict(
+                slam_tf_history,
+                sample_monotonic_ns,
+                max_delta_ns=self.slam_tf_max_delta_ns,
                 min_timestamp_ns=record_min_timestamp_ns,
             )
 
@@ -538,7 +571,10 @@ class TeleopRecordingFlow:
             return "wait", None, None, None
         if aligned_base_action is None:
             if sample_age_ns > self.pending_sample_timeout_ns:
-                self.log.warning("[RECORD_ALIGN] drop pending sample: no aligned base action found at primary camera timestamp.")
+                self.log.error(
+                    "[RECORD_ALIGN] drop pending sample: no base action aligned to the primary camera timestamp "
+                    "under the arm-action alignment policy."
+                )
                 return "drop", None, None, None
             return "wait", None, None, None
         if self.base_height_required and aligned_base_height is None:
@@ -546,10 +582,14 @@ class TeleopRecordingFlow:
                 self.log.warning("[RECORD_ALIGN] drop pending sample: no aligned base height found at primary camera timestamp.")
                 return "drop", None, None, None
             return "wait", None, None, None
+        if self.record_slam_map_pose and aligned_slam_tf is None:
+            if sample_age_ns > self.pending_sample_timeout_ns:
+                self.log.warning("[RECORD_ALIGN] drop pending sample: no aligned SLAM TF found at primary camera timestamp.")
+                return "drop", None, None, None
+            return "wait", None, None, None
 
-        aligned_base_state["interpolation_mode"] = "nearest"
-        if aligned_base_height is not None:
-            aligned_base_height["interpolation_mode"] = "nearest"
+        if aligned_slam_tf is not None:
+            aligned_base_state["slam_map_pose"] = aligned_slam_tf
         return "ready", aligned_base_state, aligned_base_height, aligned_base_action
 
     def _add_record_item(
@@ -580,6 +620,9 @@ class TeleopRecordingFlow:
         }
         if self.record_base:
             timestamps["base_state"] = self._alignment_timestamp_with_source(aligned_base_state, sample_monotonic_ns)
+            slam_map_pose = aligned_base_state.get("slam_map_pose")
+            if slam_map_pose is not None:
+                timestamps["slam_tf"] = self._alignment_timestamp_with_source(slam_map_pose, sample_monotonic_ns)
             timestamps["base_action"] = self._alignment_timestamp_with_source(aligned_base_action, sample_monotonic_ns)
             if aligned_base_height is not None:
                 timestamps["base_height"] = self._alignment_timestamp_with_source(aligned_base_height, sample_monotonic_ns)
@@ -670,6 +713,8 @@ class TeleopRecordingFlow:
         aligned_base_action,
         arm_ik,
         get_wrist_poses,
+        get_wrist_poses_base_link,
+        get_dex1_tcp_poses_base_link,
     ):
         aligned_lr_arm_q = np.asarray(aligned_state["q"], dtype=float)
         aligned_sol_q = np.asarray(aligned_action["q"], dtype=float)
@@ -712,6 +757,88 @@ class TeleopRecordingFlow:
             left_arm_action_entry["pose"] = pose_matrix_to_record(left_action_pose)
             right_arm_action_entry["pose"] = pose_matrix_to_record(right_action_pose)
 
+        if self._record_mobile_training_state:
+            if aligned_base_height is None:
+                raise RuntimeError("mobile training state requires aligned column height")
+            if get_wrist_poses_base_link is None:
+                raise RuntimeError("mobile training state requires base_link wrist kinematics")
+            if get_dex1_tcp_poses_base_link is None:
+                raise RuntimeError("mobile training state requires calibrated Dex1 TCP FK")
+            raw_height = float(aligned_base_height["height"]["z"])
+            column_height_m = column_position_from_raw_height(
+                raw_height=raw_height,
+                raw_minimum=float(self.args.mobile_height_raw_minimum),
+                raw_maximum=float(self.args.mobile_height_raw_maximum),
+                column_travel_m=float(self.args.mobile_column_travel_m),
+            )
+            waist_yaw = _finite_scalar(aligned_state.get("waist_yaw"), "state.waist_yaw")
+            waist_yaw_target = _finite_scalar(
+                aligned_action.get("waist_yaw_target"),
+                "action.waist_yaw_target",
+            )
+            left_state_base_pose, right_state_base_pose = get_wrist_poses_base_link(
+                arm_ik,
+                aligned_lr_arm_q,
+                column_height_m,
+                waist_yaw,
+            )
+            left_action_base_pose, right_action_base_pose = get_wrist_poses_base_link(
+                arm_ik,
+                aligned_sol_q,
+                column_height_m,
+                waist_yaw_target,
+            )
+            left_state_tcp_pose, right_state_tcp_pose = get_dex1_tcp_poses_base_link(
+                aligned_lr_arm_q,
+                column_height_m,
+                waist_yaw,
+            )
+            left_action_tcp_pose, right_action_tcp_pose = get_dex1_tcp_poses_base_link(
+                aligned_sol_q,
+                column_height_m,
+                waist_yaw_target,
+            )
+            left_arm_state_entry["pose_base_link"] = pose_matrix_to_record(
+                left_state_base_pose,
+                frame_id="base_link",
+                child_frame_id="left_ee",
+            )
+            right_arm_state_entry["pose_base_link"] = pose_matrix_to_record(
+                right_state_base_pose,
+                frame_id="base_link",
+                child_frame_id="right_ee",
+            )
+            left_arm_action_entry["pose_base_link"] = pose_matrix_to_record(
+                left_action_base_pose,
+                frame_id="base_link",
+                child_frame_id="left_ee_target",
+            )
+            right_arm_action_entry["pose_base_link"] = pose_matrix_to_record(
+                right_action_base_pose,
+                frame_id="base_link",
+                child_frame_id="right_ee_target",
+            )
+            left_arm_state_entry["pose_base_link_tcp"] = pose_matrix_to_record(
+                left_state_tcp_pose,
+                frame_id="base_link",
+                child_frame_id="left_dex1_tcp",
+            )
+            right_arm_state_entry["pose_base_link_tcp"] = pose_matrix_to_record(
+                right_state_tcp_pose,
+                frame_id="base_link",
+                child_frame_id="right_dex1_tcp",
+            )
+            left_arm_action_entry["pose_base_link_tcp"] = pose_matrix_to_record(
+                left_action_tcp_pose,
+                frame_id="base_link",
+                child_frame_id="left_dex1_tcp_target",
+            )
+            right_arm_action_entry["pose_base_link_tcp"] = pose_matrix_to_record(
+                right_action_tcp_pose,
+                frame_id="base_link",
+                child_frame_id="right_dex1_tcp_target",
+            )
+
         states = {
             "left_arm": left_arm_state_entry,
             "right_arm": right_arm_state_entry,
@@ -727,17 +854,33 @@ class TeleopRecordingFlow:
         if self.record_base:
             states["base"] = build_base_state_record(aligned_base_state, aligned_base_height)
             actions["base"] = build_base_action_record(aligned_base_action)
+            if self._record_mobile_training_state:
+                states["base"]["column_height_m"] = column_height_m
+                states["base"]["waist_yaw"] = waist_yaw
+                actions["base"]["waist_yaw_target"] = waist_yaw_target
         return states, actions
 
 
-def pose_matrix_to_record(pose_mat):
+def pose_matrix_to_record(pose_mat, *, frame_id: str | None = None, child_frame_id: str | None = None):
     from scipy.spatial.transform import Rotation as R
 
     pose = np.asarray(pose_mat, dtype=float)
     rpy = R.from_matrix(pose[:3, :3]).as_euler("xyz", degrees=False)
-    return {
+    record = {
         "position": pose[:3, 3].tolist(),
         "rpy": rpy.tolist(),
         "rotation_matrix": pose[:3, :3].tolist(),
         "matrix4x4": pose.tolist(),
     }
+    if frame_id is not None:
+        record["frame_id"] = str(frame_id)
+    if child_frame_id is not None:
+        record["child_frame_id"] = str(child_frame_id)
+    return record
+
+
+def _finite_scalar(value, field_name: str) -> float:
+    result = float(value)
+    if not np.isfinite(result):
+        raise ValueError(f"{field_name} must be finite, got {value!r}")
+    return result

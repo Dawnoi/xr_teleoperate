@@ -3,11 +3,16 @@ from threading import Event
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import data_pipeline.audit.episode_validation as episode_validation
 from data_pipeline.audit.episode_validation import validate_finalized_episode, write_validation_report
 from data_pipeline.audit.episode_validation_manager import EpisodeValidationManager
 from data_pipeline.recording.episode_writer import EpisodeWriter
 from data_pipeline.recording.teleop_recording_flow import TeleopRecordingFlow
+from teleop.ui.episode_store import validate_episode
+import teleop.validation.mobile_training as mobile_training
+from teleop.validation.mobile_training import validate_mobile_training
 
 
 def test_validation_manager_serializes_report_and_clears_pending(tmp_path):
@@ -90,6 +95,134 @@ def test_malformed_data_json_becomes_a_durable_validation_error(tmp_path):
     assert report["action_semantics"]["status"] == "not_applicable"
     assert "parse error" in report["errors"][0]
     assert json.loads(output.read_text(encoding="utf-8"))["level"] == "error"
+
+
+def test_base_record_without_mobile_tcp_schema_is_an_error():
+    config = json.loads(
+        (Path(__file__).resolve().parents[1] / "configs/data_quality/g1_d_mobile_training.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    report = validate_mobile_training(
+        [{"states": {"base": {}}, "actions": {}}],
+        config,
+        episode_info={"enabled_cameras": ["head"]},
+    )
+
+    assert report["status"] == "error"
+    assert any(issue["code"] == "MOBILE_TCP_METADATA_MISMATCH" for issue in report["errors"])
+
+
+def test_mobile_training_alignment_uses_recorded_delta_to_sample_ns():
+    issues = []
+
+    delta_ms = mobile_training._validate_alignment(
+        {"base_state": {"delta_to_sample_ns": -31_670_866}},
+        key="base_state",
+        max_abs_delta_ms=150.0,
+        require_past=False,
+        frame_index=0,
+        issues=issues,
+    )
+
+    assert delta_ms == -31.670866
+    assert issues == []
+
+
+def test_base_action_hold_last_requires_past_source_and_respects_age_limit():
+    issues = []
+    age_ms = mobile_training._validate_base_action_alignment(
+        {
+            "sample_monotonic_ns": 100_000_000,
+            "base_action": {
+                "interpolation_mode": "hold_last",
+                "support_source_t_ns": 40_000_000,
+                "support_max_abs_delta_ns": 60_000_000,
+            },
+        },
+        max_support_delta_ms=83.333333,
+        frame_index=0,
+        issues=issues,
+    )
+
+    assert age_ms == 60.0
+    assert issues == []
+
+    future_issues = []
+    mobile_training._validate_base_action_alignment(
+        {
+            "sample_monotonic_ns": 100_000_000,
+            "base_action": {
+                "interpolation_mode": "hold_last",
+                "support_source_t_ns": 100_000_001,
+                "support_max_abs_delta_ns": 1,
+            },
+        },
+        max_support_delta_ms=83.333333,
+        frame_index=1,
+        issues=future_issues,
+    )
+
+    assert [issue["code"] for issue in future_issues] == ["MOBILE_BASE_ACTION_HOLD_LAST_FUTURE"]
+
+
+def test_mobile_training_derives_alignment_limits_from_nominal_periods():
+    config = json.loads(
+        (Path(__file__).resolve().parents[1] / "configs/data_quality/g1_d_mobile_training.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    validated = mobile_training._validate_config(config)
+
+    assert validated["timing"] == {
+        "base_state_period_ms": 60.0,
+        "base_height_period_ms": 33.333333,
+        "slam_tf_period_ms": 60.0,
+        "base_action_period_ms": 33.333333,
+        "max_alignment_periods": 2.5,
+        "slam_tf_max_alignment_periods": 3.0,
+        "slam_tf_max_age_periods": 3.0,
+        "slam_tf_max_future_periods": 0.2,
+    }
+    assert validated["limits"]["base_state_max_delta_ms"] == pytest.approx(150.0)
+    assert validated["limits"]["base_height_max_delta_ms"] == pytest.approx(83.3333325)
+    assert validated["limits"]["slam_tf_max_delta_ms"] == pytest.approx(180.0)
+    assert validated["limits"]["base_action_max_support_delta_ms"] == pytest.approx(83.3333325)
+    assert validated["limits"]["slam_tf_max_age_ms"] == pytest.approx(180.0)
+    assert validated["limits"]["slam_tf_max_future_ms"] == pytest.approx(12.0)
+
+
+def test_episode_validation_requires_full_camera_coverage(tmp_path):
+    episode_dir = tmp_path / "episode_0001"
+    image_path = episode_dir / "colors" / "head" / "000000_head.jpg"
+    image_path.parent.mkdir(parents=True)
+    image_path.write_bytes(b"image")
+    payload = {
+        "data": [
+            {
+                "colors": {"head": "colors/head/000000_head.jpg"},
+                "states": {
+                    "left_arm": {"qpos": [0.0] * 7},
+                    "right_arm": {"qpos": [0.0] * 7},
+                },
+                "timestamps": {"sample_monotonic_ns": 0},
+            },
+            {
+                "colors": {"head": "colors/head/000001_head.jpg"},
+                "states": {
+                    "left_arm": {"qpos": [0.0] * 7},
+                    "right_arm": {"qpos": [0.0] * 7},
+                },
+                "timestamps": {"sample_monotonic_ns": 1},
+            },
+        ]
+    }
+
+    report = validate_episode(episode_dir, payload)
+
+    assert report["level"] == "error"
+    assert "camera head coverage 1/2 below 100%" in report["errors"]
 
 
 def test_episode_writer_persists_explicit_enabled_camera_manifest(tmp_path):

@@ -10,12 +10,14 @@ from typing import Any
 
 from teleop.ui.episode_store import validate_episode
 from teleop.validation.action_semantics import validate_action_semantics
+from teleop.validation.mobile_training import validate_mobile_training
 from teleop.validation.time_alignment import validate_time_alignment
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ACTION_SEMANTICS_CONFIG = REPO_ROOT / "configs" / "data_quality" / "g1_29_action_semantics.json"
 DEFAULT_TIME_ALIGNMENT_CONFIG = REPO_ROOT / "configs" / "data_quality" / "g1_29_time_alignment.json"
+DEFAULT_MOBILE_TRAINING_CONFIG = REPO_ROOT / "configs" / "data_quality" / "g1_d_mobile_training.json"
 CAMERA_MANIFEST_ORDER = ("head", "left_wrist", "right_wrist")
 CAMERA_NAME_ALIASES = {
     "head": "head",
@@ -126,6 +128,14 @@ def _run_time_alignment(items, enabled_cameras, *, config_path):
     return validate_time_alignment(items, enabled_cameras, _load_time_alignment_config(config_path))
 
 
+def _run_mobile_training_validation(items, *, episode_info, config_path):
+    path = Path(config_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"mobile training validation config not found: {path}")
+    config = json.loads(path.read_text(encoding="utf-8"))
+    return validate_mobile_training(items, config, episode_info=episode_info)
+
+
 def _parse_error_report(episode_dir: Path, data_path: Path, error: json.JSONDecodeError) -> dict[str, Any]:
     message = f"data.json parse error: {error.msg} at line {error.lineno}, column {error.colno}"
     return {
@@ -163,6 +173,7 @@ def validate_finalized_episode(
     *,
     action_semantics_config: str | Path = DEFAULT_ACTION_SEMANTICS_CONFIG,
     time_alignment_config: str | Path = DEFAULT_TIME_ALIGNMENT_CONFIG,
+    mobile_training_config: str | Path = DEFAULT_MOBILE_TRAINING_CONFIG,
 ) -> dict[str, Any]:
     """Validate one finalized episode.
 
@@ -276,9 +287,17 @@ def validate_finalized_episode(
     alignment_errors, alignment_warnings = _report_messages(time_alignment)
     time_alignment["errors"] = alignment_errors
     time_alignment["warnings"] = alignment_warnings
+    mobile_training = _run_mobile_training_validation(
+        items,
+        episode_info=payload.get("info"),
+        config_path=mobile_training_config,
+    )
+    mobile_errors, mobile_warnings = _report_messages(mobile_training)
+    mobile_training["errors"] = mobile_errors
+    mobile_training["warnings"] = mobile_warnings
 
-    errors = [*structural_errors, *alignment_errors, *semantic_errors]
-    warnings = [*list(structural.get("warnings", [])), *alignment_warnings, *semantic_warnings]
+    errors = [*structural_errors, *alignment_errors, *semantic_errors, *mobile_errors]
+    warnings = [*list(structural.get("warnings", [])), *alignment_warnings, *semantic_warnings, *mobile_warnings]
     level = "error" if errors else "warning" if warnings else "ok"
     return {
         **structural,
@@ -289,6 +308,7 @@ def validate_finalized_episode(
         "structural": structural,
         "time_alignment": time_alignment,
         "action_semantics": semantics,
+        "mobile_training": mobile_training,
         "errors": errors,
         "warnings": warnings,
     }

@@ -65,7 +65,7 @@ def build_runtime_recording_status(
         "odom_topic": str(getattr(args, "base_odom_topic", "") or ""),
         "height_topic": str(getattr(args, "base_height_topic", "") or ""),
         "state_max_age_ms": float(getattr(args, "base_state_max_age_ms", 0.0) or 0.0),
-        "action_max_age_ms": float(getattr(args, "base_action_max_age_ms", 0.0) or 0.0),
+        "action_max_age_ms": float(max(80.0, (2.5 / max(float(args.frequency), 1e-6)) * 1000.0)),
         "stop_confirmed": bool((base_stop_state or {}).get("latched", True)),
         "control_fault": bool((base_stop_state or {}).get("fault", False)),
         "fault_reason": str((base_stop_state or {}).get("error", "") or ""),

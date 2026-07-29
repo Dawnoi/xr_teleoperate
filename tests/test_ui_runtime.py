@@ -520,7 +520,6 @@ class UiIntegrationTest(unittest.TestCase):
             base_odom_topic="rt/agv/odom",
             base_height_topic="rt/hispeed_state",
             base_state_max_age_ms=150.0,
-            base_action_max_age_ms=500.0,
         )
         recorder = SimpleNamespace(item_id=0, episode_dir="/tmp/data/pick_cube/episode_0001")
         recording_flow = SimpleNamespace(state=SimpleNamespace(waiting_for_first_frame=False, pending_samples=[]))
@@ -542,7 +541,7 @@ class UiIntegrationTest(unittest.TestCase):
                 "odom_topic": "rt/agv/odom",
                 "height_topic": "rt/hispeed_state",
                 "state_max_age_ms": 150.0,
-                "action_max_age_ms": 500.0,
+                "action_max_age_ms": 83.33333333333333,
                 "stop_confirmed": True,
                 "control_fault": False,
                 "fault_reason": "",

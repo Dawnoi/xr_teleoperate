@@ -604,7 +604,36 @@ function validationSummary(v) {
       <div>${checkDot(cameraOk)}<span>相机完整性</span><b>${esc(cameraText)}</b><small>要求：manifest 中每路相机每帧均有路径、文件和 host receive 时间戳</small></div>
     </div>
     ${issueHtml ? `<ul class="validation-issues">${issueHtml}</ul>` : `<p class="mini">未发现错误或警告，数据完整性检查通过。</p>`}
+    ${mobileTrainingSummary(v)}
     ${timeAlignmentSummary(v)}
+  </div>`;
+}
+
+function mobileTrainingSummary(v) {
+  const report = v.mobile_training || {};
+  if (report.status === "not_applicable" || !report.status) return "";
+  const level = String(report.status || "unknown");
+  const maxDelta = report.max_alignment_delta_ms || {};
+  const limits = report.limits || {};
+  const baseStateLimit = Number(limits.base_state_max_delta_ms || 0);
+  const slamTfDeltaLimit = Number(limits.slam_tf_max_delta_ms || 0);
+  const slamTfLimit = Number(limits.slam_tf_max_age_ms || 0);
+  const baseActionLimit = Number(limits.base_action_max_support_delta_ms || 0);
+  const issues = [...(report.errors || []), ...(report.warnings || [])]
+    .slice(0, 6)
+    .map((text) => `<li class="${level === "error" ? "err-text" : "warn-text"}">${esc(typeof text === "string" ? text : text.message || String(text))}</li>`)
+    .join("");
+  return `<div class="validation-summary quality-section">
+    <div class="quality-section-head"><div><b>移动操作训练字段</b><span class="mini">EEF/base_link、SLAM map、底盘、升降柱、腰部与对齐</span></div>${qualityBadge(level)}</div>
+    <div class="validation-grid">
+      <div>${checkDot(level !== "error")}<span>字段完整性</span><b>${Number(report.present_frame_count || 0)}/${Number(report.frame_count || 0)}</b></div>
+      <div>${checkDot(baseStateLimit > 0 && Number(maxDelta.base_state || 0) <= baseStateLimit)}<span>Base state 对齐</span><b>${Number(maxDelta.base_state || 0).toFixed(1)} / ${baseStateLimit.toFixed(1)} ms</b></div>
+      <div>${checkDot(slamTfDeltaLimit > 0 && Number(maxDelta.slam_tf || 0) <= slamTfDeltaLimit)}<span>SLAM TF 对齐</span><b>${Number(maxDelta.slam_tf || 0).toFixed(1)} / ${slamTfDeltaLimit.toFixed(1)} ms</b></div>
+      <div>${checkDot(slamTfLimit > 0 && Number(report.max_slam_tf_age_ms || 0) <= slamTfLimit)}<span>SLAM TF 新鲜度</span><b>${Number(report.max_slam_tf_age_ms || 0).toFixed(1)} / ${slamTfLimit.toFixed(1)} ms</b></div>
+      <div>${checkDot(baseActionLimit > 0 && Number(maxDelta.base_action || 0) <= baseActionLimit)}<span>Base action 对齐</span><b>${Number(maxDelta.base_action || 0).toFixed(1)} / ${baseActionLimit.toFixed(1)} ms</b></div>
+      <div>${checkDot(Number(report.identity_extrinsic_assumption_frames || 0) === 0)}<span>雷达到底盘外参</span><b>${Number(report.identity_extrinsic_assumption_frames || 0) ? "identity assumed" : "calibrated"}</b></div>
+    </div>
+    ${issues ? `<ul class="validation-issues">${issues}</ul>` : `<p class="mini">移动训练字段、单位、坐标系和时间对齐检查通过。</p>`}
   </div>`;
 }
 
@@ -840,6 +869,19 @@ function renderPlayback() {
   const selectedEpisodeMeta = selectedEpisode
     ? `${Number(selectedEpisode.frame_count || 0)} 帧 · ${Number(selectedEpisode.duration_sec || 0).toFixed(1)}s · 自检 ${String(selectedEpisode.validation_level || "unknown")}`
     : "加载 episode 后显示帧数、时长和自检结果";
+  const selectedValidation = selectedEpisode?.validation || {};
+  const selectedErrors = Array.isArray(selectedValidation.errors) ? selectedValidation.errors : [];
+  const selectedWarnings = Array.isArray(selectedValidation.warnings) ? selectedValidation.warnings : [];
+  const selectedValidationLevel = selectedErrors.length ? "error" : selectedWarnings.length ? "warning" : String(selectedEpisode?.validation_level || "ok");
+  const selectedValidationIssues = [
+    ...selectedErrors.map((issue) => `<li class="err-text"><b>错误：</b>${esc(semanticIssueText(issue))}</li>`),
+    ...selectedWarnings.map((issue) => `<li class="warn-text"><b>警告：</b>${esc(semanticIssueText(issue))}</li>`),
+  ].join("");
+  const selectedValidationCard = !selectedEpisode
+    ? `<div class="validation-conclusion"><b>尚未加载 episode</b><span>从下方列表加载后，在这里显示该 episode 的具体自检原因。</span></div>`
+    : selectedValidationIssues
+      ? `<ul class="validation-issues">${selectedValidationIssues}</ul>`
+      : `<div class="validation-conclusion ok"><b>自检通过</b><span>该 episode 未报告 error 或 warning。</span></div>`;
   return `<div class="grid">
     <div class="playback-top-grid">
     <div class="card hero playback-control-card"><div class="card-head"><div><div class="eyebrow">Episode Playback</div><div class="headline">${esc(p.episode_name || "选择一个 episode")}</div><div class="subline">${esc(selectedEpisodeMeta)}</div></div>${badge(p.state || "idle")}</div>
@@ -852,6 +894,7 @@ function renderPlayback() {
     <div class="card full"><div class="card-head"><div><h2>全部相机同步回放</h2><p class="mini" id="playbackFrameMeta">真机回放运行时，图像和曲线游标跟随真机实际进入控制循环的 episode frame。</p></div><span class="pill">${(p.cameras || []).length} cameras</span></div><div class="preview-grid playback-camera-grid layout-placeholder">${cameraCards || empty("当前 episode 没有相机图像；加载 episode 后这里保留相机回放占位")}</div></div>
     <div class="card full"><div class="card-head"><div><h2>夹爪状态复现对比</h2><p class="mini">蓝线为 raw replay 当前 frame 进入控制循环前读到的真机 DDS 反馈 state；橙线为该 frame 的 episode recorded state。两者比较回放状态是否复现采集时真机状态。</p></div><span class="pill">2 charts</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left Gripper</b><span>raw replay</span></div><canvas id="liveLeftGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveLeftGripperLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right Gripper</b><span>raw replay</span></div><canvas id="liveRightGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveRightGripperLegend"></div></div></div></div>
     <div class="card full"><div class="card-head"><div><h2>机械臂轨迹同步回放</h2><p class="mini" id="playbackCurveMeta">左右臂 J1-J7 来自 episode 回放数据，游标与历史图像同步。</p></div><span class="pill">2 charts</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left J1-J7</b><span>playback</span></div><canvas id="playbackLeftJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="playbackLeftJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right J1-J7</b><span>playback</span></div><canvas id="playbackRightJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="playbackRightJointLegend"></div></div></div></div>
+    <div class="card full"><div class="card-head"><div><h2>当前回放 Episode 自检原因</h2><p class="mini">${esc(selectedEpisode?.name || "未选择 episode")} 的 validation.json 中记录的 error 与 warning。</p></div>${selectedEpisode ? badge(selectedValidationLevel) : badge("unknown", "未加载")}</div>${selectedValidationCard}</div>
     <div class="card full episodes-card"><div class="toolbar"><div><h2>Episodes</h2><p class="mini">来自当前 Root：${esc(effectiveRecordRoot())} · ${filteredEpisodes.length}/${(state.episodes || []).length}</p></div><div class="row episode-search"><input id="playbackEpisodeSearch" placeholder="搜索 episode / 时间 / validation" value="${esc(state.playbackEpisodeSearch || "")}" oninput="setPlaybackSearch(this.value)"><button class="secondary" onclick="refreshEpisodes().then(render)">刷新</button><button class="danger" onclick="deleteSelectedEpisodes()">删除所选</button></div></div><div class="table-wrap episode-table-wrap"><table><thead><tr><th></th><th>Name</th><th>采集时间</th><th>Validation</th><th>Frames</th><th>Duration</th><th>操作</th></tr></thead><tbody>${rows || `<tr><td colspan="7">${empty(query ? "没有匹配的 episode" : "暂无 episode")}</td></tr>`}</tbody></table></div></div>
   </div>`;
 }
@@ -1677,15 +1720,25 @@ function drawInferenceDualTcp3D() {
 function updatePreviewLoop() {
   if (state.active !== "record" && state.active !== "inference") return;
   document.querySelectorAll("img[data-live-camera], img[data-inference-camera]").forEach((img) => {
+    if (img.dataset.previewRequestPending === "1") return;
     const cameraId = img.dataset.liveCamera ?? img.dataset.inferenceCamera ?? "0";
     const base = img.dataset.frameSrc || `/camera/frame?camera_id=${cameraId}`;
     const sep = base.includes("?") ? "&" : "?";
     const url = `${base}${sep}_=${Math.floor(performance.now() / 200)}`;
     const hint = img.parentElement?.querySelector(".hint") || null;
-    img.onload = () => { img.style.display = "block"; if (hint) hint.textContent = ""; };
-    img.onerror = () => { img.style.display = "none"; if (hint) hint.textContent = `cam${cameraId} 暂无图像`; };
+    img.dataset.previewRequestPending = "1";
+    img.onload = () => {
+      img.dataset.previewRequestPending = "0";
+      img.style.display = "block";
+      if (hint) hint.textContent = "";
+    };
+    img.onerror = () => {
+      img.dataset.previewRequestPending = "0";
+      img.style.display = "none";
+      if (hint) hint.textContent = `cam${cameraId} 暂无图像`;
+    };
     if (hint && !img.getAttribute("src")) hint.textContent = `等待 cam${cameraId}...`;
-    if (img.getAttribute("src") !== url) img.src = url;
+    img.src = url;
   });
 }
 

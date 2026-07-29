@@ -1,0 +1,24 @@
+{
+  "map_frame": "slamware_map",
+  "base_frame": "base_link",
+  "velocity_frames": ["base_link", "world"],
+  "allow_identity_source_to_base_link": true,
+  "timing": {
+    "base_state_period_ms": 60.0,
+    "base_height_period_ms": 33.333333,
+    "slam_tf_period_ms": 60.0,
+    "base_action_period_ms": 33.333333,
+    "max_alignment_periods": 2.5,
+    "slam_tf_max_alignment_periods": 3.0,
+    "slam_tf_max_age_periods": 3.0,
+    "slam_tf_max_future_periods": 0.2
+  },
+  "limits": {
+    "map_speed_warning_mps": 1.0,
+    "map_yaw_rate_warning_radps": 2.0,
+    "column_minimum_m": 0.0,
+    "column_maximum_m": 0.42,
+    "waist_yaw_minimum_rad": -2.7053,
+    "waist_yaw_maximum_rad": 2.7053
+  }
+}

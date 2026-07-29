@@ -251,6 +251,45 @@ class RerunLogger:
                     pose_info = state_info.get("pose")
                     if pose_info:
                         self._log_pose_series(f"{self.prefix}{part}_pose/states", pose_info, recording)
+                    pose_base_link_info = state_info.get("pose_base_link")
+                    if pose_base_link_info:
+                        self._log_pose_series(
+                            f"{self.prefix}{part}_pose_base_link/states",
+                            pose_base_link_info,
+                            recording,
+                        )
+                    pose_base_link_tcp_info = state_info.get("pose_base_link_tcp")
+                    if pose_base_link_tcp_info:
+                        self._log_pose_series(
+                            f"{self.prefix}{part}_pose_base_link_tcp/states",
+                            pose_base_link_tcp_info,
+                            recording,
+                        )
+
+            base_state = states.get("base") or {}
+            slam_map_pose = base_state.get("slam_map_pose") or {}
+            for axis in ("x", "y", "z", "yaw"):
+                if axis in slam_map_pose:
+                    self._rr.log(
+                        f"{self.prefix}base/slamware_map_pose/{axis}",
+                        self._rr.Scalar(float(slam_map_pose[axis])),
+                        recording=recording,
+                    )
+            velocity = base_state.get("velocity") or {}
+            for axis in ("vx", "vy", "vz", "wz"):
+                if axis in velocity:
+                    self._rr.log(
+                        f"{self.prefix}base/velocity/{axis}",
+                        self._rr.Scalar(float(velocity[axis])),
+                        recording=recording,
+                    )
+            for field in ("column_height_m", "waist_yaw"):
+                if field in base_state:
+                    self._rr.log(
+                        f"{self.prefix}base/states/{field}",
+                        self._rr.Scalar(float(base_state[field])),
+                        recording=recording,
+                    )
 
             actions = item_data.get('actions', {}) or {}
             for part, action_info in actions.items():
@@ -261,6 +300,29 @@ class RerunLogger:
                     pose_info = action_info.get("pose")
                     if pose_info:
                         self._log_pose_series(f"{self.prefix}{part}_pose/actions", pose_info, recording)
+                    pose_base_link_info = action_info.get("pose_base_link")
+                    if pose_base_link_info:
+                        self._log_pose_series(
+                            f"{self.prefix}{part}_pose_base_link/actions",
+                            pose_base_link_info,
+                            recording,
+                        )
+                    pose_base_link_tcp_info = action_info.get("pose_base_link_tcp")
+                    if pose_base_link_tcp_info:
+                        self._log_pose_series(
+                            f"{self.prefix}{part}_pose_base_link_tcp/actions",
+                            pose_base_link_tcp_info,
+                            recording,
+                        )
+
+            base_action = actions.get("base") or {}
+            for field in ("vx_cmd", "vy_cmd", "wz_cmd", "z_cmd", "waist_yaw_target"):
+                if field in base_action:
+                    self._rr.log(
+                        f"{self.prefix}base/actions/{field}",
+                        self._rr.Scalar(float(base_action[field])),
+                        recording=recording,
+                    )
 
             colors = item_data.get('colors', {}) or {}
             for color_key, color_val in colors.items():
