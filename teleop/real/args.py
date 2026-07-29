@@ -82,7 +82,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='HTTP handshake path for online inference.')
     parser.add_argument('--online-inference-http-infer-path', type=str, default='/infer',
                         help='HTTP infer path for online inference.')
-    parser.add_argument('--online-inference-protocol-profile', type=str, choices=['pika_pose7', 'pi05_dual_arm_20d'], default='pika_pose7',
+    parser.add_argument('--online-inference-protocol-profile', type=str, choices=['pika_pose7', 'pi05_dual_arm_20d', 'mobile_tcp23'], default='pika_pose7',
                         help='Online inference payload/action schema profile.')
     parser.add_argument('--online-inference-prompt', type=str, default='',
                         help='Task prompt sent to online inference services such as pi0.5.')
@@ -276,4 +276,19 @@ def parse_args(argv=None):
             raise ValueError("--record-mobile-training-state requires --base-height-topic")
         if args.base_velocity_frame is None:
             raise ValueError("--record-mobile-training-state requires --base-velocity-frame base_link or world")
+    if args.online_inference_protocol_profile == 'mobile_tcp23':
+        if args.arm != 'G1_29' or args.ee != 'dex1' or args.no_gripper:
+            raise ValueError("mobile_tcp23 requires --arm G1_29 --ee dex1 without --no-gripper")
+        if args.online_inference_transport != 'http':
+            raise ValueError("mobile_tcp23 requires --online-inference-transport http")
+        if args.online_inference_arm_side != 'both':
+            raise ValueError("mobile_tcp23 requires --online-inference-arm-side both")
+        if args.mobile_manipulation_mode != 'direct_ik':
+            raise ValueError("mobile_tcp23 requires --mobile-manipulation-mode direct_ik; model base actions must not pass through QP")
+        if args.base_controller != 'g1d_agv' or not args.base_motion:
+            raise ValueError("mobile_tcp23 requires --base-controller g1d_agv --base-motion")
+        if args.base_command_source != 'provider':
+            raise ValueError("mobile_tcp23 requires --base-command-source provider")
+        if args.base_velocity_frame != 'base_link':
+            raise ValueError("mobile_tcp23 requires --base-velocity-frame base_link")
     return args

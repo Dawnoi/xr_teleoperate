@@ -49,7 +49,7 @@ class OnlineInferenceConfig:
 
     def __post_init__(self) -> None:
         self.protocol_profile = str(self.protocol_profile or "pika_pose7").strip()
-        if self.protocol_profile not in {"pika_pose7", "pi05_dual_arm_20d"}:
+        if self.protocol_profile not in {"pika_pose7", "pi05_dual_arm_20d", "mobile_tcp23"}:
             raise ValueError(f"unsupported protocol_profile: {self.protocol_profile!r}")
         if self.arm_side not in {"left", "right", "both"}:
             raise ValueError(f"unsupported arm_side: {self.arm_side!r}")
@@ -87,6 +87,7 @@ class RobotStateSample:
     right_pose: Any
     left_gripper_width: float
     right_gripper_width: float
+    mobile_state26: np.ndarray | None = None
 
 
 @dataclass
@@ -139,7 +140,12 @@ class OnlineInferenceSession:
         self.clock_ns = clock_ns or _monotonic_ns
         self.trace_clock_ns = trace_clock_ns or _perf_counter_ns
 
-        if self.config.enable_motion and not self.config.dry_run and self.pose_transformer is None:
+        if (
+            self.config.protocol_profile != "mobile_tcp23"
+            and self.config.enable_motion
+            and not self.config.dry_run
+            and self.pose_transformer is None
+        ):
             raise ValueError("pose_transformer is required when online inference motion is enabled")
 
         self.status = "collecting_observation"
@@ -181,6 +187,7 @@ class OnlineInferenceSession:
         self._observation_ready_timeout_ns = int(max(5.0, self.config.response_timeout_sec * 2.0) * 1_000_000_000)
 
         self._transport_reset_done = bool(transport_reset_done)
+        self._mobile_tcp_to_wrist = None
 
     def get_debug_snapshot(self) -> Dict[str, Any]:
         last_observation = dict(self._last_observation_debug)
@@ -313,6 +320,13 @@ class OnlineInferenceSession:
             reason = str(feedback.get("reason", "fatal control feedback"))
             self._fail(reason)
 
+    def set_mobile_tcp_to_wrist_transformer(self, transformer: Callable[[str, np.ndarray], np.ndarray]) -> None:
+        if self.config.protocol_profile != "mobile_tcp23":
+            raise RuntimeError("mobile TCP transformer is only valid for protocol_profile='mobile_tcp23'")
+        if not callable(transformer):
+            raise TypeError("mobile TCP transformer must be callable")
+        self._mobile_tcp_to_wrist = transformer
+
     def _append_history(
         self,
         state_sample: RobotStateSample,
@@ -364,6 +378,8 @@ class OnlineInferenceSession:
     def _build_observation_message(self) -> Dict[str, Any]:
         if self.config.protocol_profile == "pi05_dual_arm_20d":
             return self._build_pi05_observation_message()
+        if self.config.protocol_profile == "mobile_tcp23":
+            return self._build_mobile_tcp23_observation_message()
         message: Dict[str, Any] = {"type": "observation"}
         if self.config.arm_side in {"left", "both"}:
             message["arm_l"] = self._build_arm_observation("left")
@@ -422,6 +438,41 @@ class OnlineInferenceSession:
             grippers_right=grippers_right,
             prompt=self.config.task_prompt,
         )
+
+    def _build_mobile_tcp23_observation_message(self) -> Dict[str, Any]:
+        state_window, camera_window = self._select_observation_window()
+        mobile_state = state_window[-1].mobile_state26
+        if mobile_state is None:
+            raise RuntimeError("mobile_tcp23 observation is missing the 26D mobile state")
+        mobile_state = np.asarray(mobile_state, dtype=np.float32)
+        if mobile_state.shape != (26,) or not np.all(np.isfinite(mobile_state)):
+            raise ValueError(f"mobile_tcp23 state must be a finite 26D vector, got {mobile_state.shape}")
+        images = self._build_mobile_tcp23_images(camera_window)
+        payload: Dict[str, Any] = {
+            "type": "observation",
+            "mobile_state": [float(value) for value in mobile_state.tolist()],
+            "images": images,
+            "prompt": self.config.task_prompt,
+        }
+        return payload
+
+    def _build_mobile_tcp23_images(self, camera_window: Dict[str, List[CameraSample]]) -> Dict[str, bytes]:
+        images: Dict[str, bytes] = {}
+        for camera_name in self._camera_order:
+            role = self._pi05_role_for_camera_name(camera_name)
+            if role not in {"head_fpv", "left_hand", "right_hand"}:
+                continue
+            samples = camera_window.get(camera_name)
+            if not samples:
+                raise ValueError(f"missing camera sample for {camera_name}")
+            images[role] = self._encode_jpeg_bytes(
+                np.asarray(samples[-1].frame),
+                self.config.jpeg_quality,
+            )
+        for role in ("head_fpv", "left_hand", "right_hand"):
+            if role not in images or not images[role]:
+                raise ValueError(f"mobile_tcp23 observation requires non-empty image role: {role}")
+        return images
 
     def _build_pi05_images(self, camera_window: Dict[str, List[CameraSample]]) -> Dict[str, bytes | str]:
         if not self._camera_order:
@@ -489,6 +540,22 @@ class OnlineInferenceSession:
         return list(matrix_to_pose9_rot6d(matrix))
 
     def _log_current_observation_point(self, observation: Dict[str, Any]) -> None:
+        if self.config.protocol_profile == "mobile_tcp23":
+            mobile_state = observation.get("mobile_state")
+            images = observation.get("images")
+            if not isinstance(mobile_state, list) or len(mobile_state) != 26:
+                raise ValueError("mobile_tcp23 observation must contain mobile_state[26]")
+            if not isinstance(images, dict):
+                raise ValueError("mobile_tcp23 observation images must be a role mapping")
+            logger.info(
+                "[ONLINE_INFERENCE][OBS][mobile_tcp23] image_roles=%s left_tcp=%s right_tcp=%s base=%s prompt=%r",
+                sorted(str(key) for key, value in images.items() if value),
+                [float(value) for value in mobile_state[:10]],
+                [float(value) for value in mobile_state[10:20]],
+                [float(value) for value in mobile_state[20:]],
+                self.config.task_prompt,
+            )
+            return
         if self.config.protocol_profile == "pi05_dual_arm_20d":
             poses_left = observation.get("poses_left")
             poses_right = observation.get("poses_right")
@@ -680,7 +747,20 @@ class OnlineInferenceSession:
         if not isinstance(payload, dict):
             raise ValueError("action payload must be an object")
 
-        if self.config.protocol_profile == "pi05_dual_arm_20d":
+        if self.config.protocol_profile == "mobile_tcp23":
+            if payload.get("wire_format") != "mobile_tcp23_pose20_base4":
+                raise ValueError(
+                    "mobile_tcp23 response requires wire_format='mobile_tcp23_pose20_base4'"
+                )
+            if int(payload.get("model_action_dim", -1)) != 23:
+                raise ValueError("mobile_tcp23 response requires model_action_dim=23")
+            if int(payload.get("wire_arm_action_dim", -1)) != 20:
+                raise ValueError("mobile_tcp23 response requires wire_arm_action_dim=20")
+            if int(payload.get("base_action_dim", -1)) != 4:
+                raise ValueError("mobile_tcp23 response requires base_action_dim=4")
+            actions = validate_pi05_action_sequence(payload, expected_dim=20)
+            left_steps, right_steps = pi05_action_sequence_to_pose7_chunks(actions, self.config.arm_side)
+        elif self.config.protocol_profile == "pi05_dual_arm_20d":
             actions = validate_pi05_action_sequence(payload, expected_dim=20)
             left_steps, right_steps = pi05_action_sequence_to_pose7_chunks(actions, self.config.arm_side)
         else:
@@ -710,7 +790,11 @@ class OnlineInferenceSession:
 
         self._chunk_seq += 1
         self._current_chunk_seq = self._chunk_seq
-        base_steps = self._parse_base_action_steps(payload, chunk_size)
+        base_steps = self._parse_base_action_steps(
+            payload,
+            chunk_size,
+            required=self.config.protocol_profile == "mobile_tcp23",
+        )
         self._last_action_debug = self._make_action_debug(left_steps, right_steps, chunk_size)
         if base_steps is not None:
             self._last_action_debug["base"] = {
@@ -941,11 +1025,18 @@ class OnlineInferenceSession:
         return metadata
 
     @staticmethod
-    def _parse_base_action_steps(payload: Dict[str, Any], chunk_size: int) -> Optional[List[np.ndarray]]:
+    def _parse_base_action_steps(
+        payload: Dict[str, Any],
+        chunk_size: int,
+        *,
+        required: bool = False,
+    ) -> Optional[List[np.ndarray]]:
         if "base_action" not in payload:
+            if required:
+                raise ValueError("mobile_tcp23 response is missing base_action[T,4]")
             return None
         arr = np.asarray(payload["base_action"], dtype=np.float64)
-        if arr.shape == (4,):
+        if arr.shape == (4,) and not required:
             arr = np.repeat(arr.reshape(1, 4), int(chunk_size), axis=0)
         elif arr.ndim == 2 and arr.shape[1] == 4:
             if arr.shape[0] != int(chunk_size):
@@ -1071,6 +1162,19 @@ class OnlineInferenceSession:
 
     def _action_pose_to_unitree(self, side: str, pose7: Any) -> np.ndarray:
         try:
+            if self.config.protocol_profile == "mobile_tcp23":
+                if self._mobile_tcp_to_wrist is None:
+                    raise RuntimeError("mobile_tcp23 action requires a TCP-to-wrist transformer")
+                tcp_target = np.asarray(
+                    pose7_xyzw_to_matrix(np.asarray(pose7, dtype=np.float64).tolist()),
+                    dtype=np.float64,
+                )
+                wrist_target = np.asarray(self._mobile_tcp_to_wrist(side, tcp_target), dtype=np.float64)
+                if wrist_target.shape != (4, 4) or not np.all(np.isfinite(wrist_target)):
+                    raise ValueError(
+                        f"mobile TCP transformer returned invalid {side} wrist target {wrist_target.shape}"
+                    )
+                return wrist_target
             if self.pose_transformer is not None:
                 return np.asarray(self.pose_transformer.action_to_unitree(side, pose7), dtype=np.float64)
             return np.asarray(pose7_xyzw_to_matrix(np.asarray(pose7, dtype=np.float64).tolist()), dtype=np.float64)

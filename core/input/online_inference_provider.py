@@ -7,7 +7,7 @@ import logging_mp
 import numpy as np
 
 from inference.online_session import CameraSample, OnlineInferenceConfig, OnlineInferenceSession, RobotStateSample
-from inference.pose_transform import load_pose_transformer
+from inference.pose_transform import load_pose_transformer, matrix_to_pose9_rot6d
 from inference.transport import HttpJsonInferenceTransport, TcpJsonTransport
 from core.input.base import (
     BaseCommandIntent,
@@ -70,6 +70,15 @@ def _http_handshake_payload(protocol_profile: str) -> dict[str, Any]:
             "robot": "nero_dual_arm",
             "transport": "http",
         }
+    if profile == "mobile_tcp23":
+        return {
+            "action_dim": 20,
+            "action_space": "mobile_tcp23_pose20_base4",
+            "model_action_dim": 23,
+            "base_action_dim": 4,
+            "robot": "g1d_dex1_mobile",
+            "transport": "http",
+        }
     return {"transport": "http"}
 
 
@@ -104,7 +113,7 @@ def create_online_inference_provider(args) -> "OnlineInferenceInputProvider":
     dry_run = bool(getattr(args, "online_inference_dry_run", False))
     protocol_profile = str(getattr(args, "online_inference_protocol_profile", "pika_pose7") or "pika_pose7").strip()
     transport_kind = str(getattr(args, "online_inference_transport", "tcp_jsonl") or "tcp_jsonl").strip()
-    transform_arm_side = "both" if protocol_profile == "pi05_dual_arm_20d" else getattr(args, "online_inference_arm_side", "both")
+    transform_arm_side = "both" if protocol_profile in {"pi05_dual_arm_20d", "mobile_tcp23"} else getattr(args, "online_inference_arm_side", "both")
     transformer = load_pose_transformer(
         enable_motion=enable_motion and not dry_run,
         transform_config_path=getattr(args, "online_inference_transform_config", None),
@@ -183,8 +192,15 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
             host_monotonic_ns=int(host_monotonic_ns),
             left_pose=left_pose,
             right_pose=right_pose,
-            left_gripper_width=_finite_gripper_width(kwargs.get("current_left_gripper_width", 0.0), "current_left_gripper_width"),
-            right_gripper_width=_finite_gripper_width(kwargs.get("current_right_gripper_width", 0.0), "current_right_gripper_width"),
+            left_gripper_width=_finite_gripper_width(
+                kwargs.get("current_left_gripper_width", 0.0),
+                "current_left_gripper_width",
+            ),
+            right_gripper_width=_finite_gripper_width(
+                kwargs.get("current_right_gripper_width", 0.0),
+                "current_right_gripper_width",
+            ),
+            mobile_state26=self._mobile_state26(kwargs),
         )
         camera_samples = self._coerce_camera_samples(kwargs)
         step = self.session.tick(state_sample=state_sample, camera_samples=camera_samples)
@@ -236,6 +252,56 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
         self._frame_index += 1
         done = step.status == "failed"
         return TeleopInputSample(tele_data=tele_data, motion_intent=motion_intent, done=done, base_intent=base_intent)
+
+    def _mobile_state26(self, kwargs: Mapping[str, Any]) -> np.ndarray | None:
+        protocol_profile = str(
+            getattr(getattr(self.session, "config", None), "protocol_profile", "pika_pose7")
+        ).strip()
+        if protocol_profile != "mobile_tcp23":
+            return None
+        transformer = kwargs.get("mobile_tcp_to_wrist_transformer")
+        self.session.set_mobile_tcp_to_wrist_transformer(transformer)
+
+        left_tcp = _finite_pose_matrix(
+            kwargs.get("current_left_robot_tcp_pose_base_link"),
+            "current_left_robot_tcp_pose_base_link",
+        )
+        right_tcp = _finite_pose_matrix(
+            kwargs.get("current_right_robot_tcp_pose_base_link"),
+            "current_right_robot_tcp_pose_base_link",
+        )
+        map_base = np.asarray(kwargs.get("current_map_base_pose"), dtype=float).reshape(-1)
+        if map_base.shape != (3,) or not np.all(np.isfinite(map_base)):
+            raise ValueError("current_map_base_pose must be a finite [map_x, map_y, map_yaw]")
+        base_velocity = np.asarray(kwargs.get("current_base_velocity_base_link"), dtype=float).reshape(-1)
+        if base_velocity.shape != (2,) or not np.all(np.isfinite(base_velocity)):
+            raise ValueError("current_base_velocity_base_link must be a finite [vx, wz]")
+        column_height = float(kwargs.get("current_column_height_m"))
+        if not np.isfinite(column_height):
+            raise ValueError("current_column_height_m must be finite")
+
+        left_gripper = _finite_gripper_width(
+            kwargs.get("current_left_gripper_width", 0.0),
+            "current_left_gripper_width",
+        )
+        right_gripper = _finite_gripper_width(
+            kwargs.get("current_right_gripper_width", 0.0),
+            "current_right_gripper_width",
+        )
+        state = np.concatenate(
+            [
+                np.asarray(matrix_to_pose9_rot6d(left_tcp), dtype=float),
+                [left_gripper],
+                np.asarray(matrix_to_pose9_rot6d(right_tcp), dtype=float),
+                [right_gripper],
+                map_base,
+                base_velocity,
+                [column_height],
+            ]
+        ).astype(np.float32)
+        if state.shape != (26,) or not np.all(np.isfinite(state)):
+            raise RuntimeError(f"mobile_tcp23 state construction failed: shape={state.shape}")
+        return state
 
     def _coerce_camera_samples(self, kwargs: dict[str, Any]) -> list[CameraSample]:
         explicit_samples = kwargs.get("camera_samples")

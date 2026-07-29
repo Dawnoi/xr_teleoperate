@@ -13,6 +13,19 @@ fi
 
 unset PYTHONPATH || true
 
+if [[ "${VLA_SOURCE_ROS_HUMBLE:-0}" == "1" ]]; then
+  ROS_SETUP="/opt/ros/humble/setup.bash"
+  if [[ ! -f "${ROS_SETUP}" ]]; then
+    echo "[START_VLA] VLA_SOURCE_ROS_HUMBLE=1 requires ${ROS_SETUP}." >&2
+    exit 1
+  fi
+  # ROS Humble setup references unset variables on this host.
+  set +u
+  # shellcheck disable=SC1091
+  source "${ROS_SETUP}"
+  set -u
+fi
+
 REAL_TELEOP_ENTRY="${REAL_TELEOP_ENTRY:-teleop/real/teleop_hand_and_arm.py}"
 
 NETWORK_INTERFACE="${NETWORK_INTERFACE:-enx9c69d3212b05}"
