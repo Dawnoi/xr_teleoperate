@@ -79,6 +79,15 @@ def _http_handshake_payload(protocol_profile: str) -> dict[str, Any]:
             "robot": "g1d_dex1_mobile",
             "transport": "http",
         }
+    if profile == "mobile_joint_base":
+        return {
+            "action_dim": 16,
+            "action_space": "mobile_joint_base_q16_base4",
+            "model_action_dim": 19,
+            "base_action_dim": 4,
+            "robot": "g1d_dex1_mobile",
+            "transport": "http",
+        }
     return {"transport": "http"}
 
 
@@ -115,7 +124,11 @@ def create_online_inference_provider(args) -> "OnlineInferenceInputProvider":
     transport_kind = str(getattr(args, "online_inference_transport", "tcp_jsonl") or "tcp_jsonl").strip()
     transform_arm_side = "both" if protocol_profile in {"pi05_dual_arm_20d", "mobile_tcp23"} else getattr(args, "online_inference_arm_side", "both")
     transformer = load_pose_transformer(
-        enable_motion=enable_motion and not dry_run,
+        enable_motion=(
+            enable_motion
+            and not dry_run
+            and protocol_profile != "mobile_joint_base"
+        ),
         transform_config_path=getattr(args, "online_inference_transform_config", None),
         arm_side=transform_arm_side,
     )
@@ -201,6 +214,7 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
                 "current_right_gripper_width",
             ),
             mobile_state26=self._mobile_state26(kwargs),
+            mobile_joint_state22=self._mobile_joint_state22(kwargs),
         )
         camera_samples = self._coerce_camera_samples(kwargs)
         step = self.session.tick(state_sample=state_sample, camera_samples=camera_samples)
@@ -239,24 +253,35 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
                 "arm_side": self.arm_side,
             }
         )
-        motion_intent = MotionIntent(
-            kind="pose",
-            left_wrist_pose=np.asarray(step.left_pose, dtype=float),
-            right_wrist_pose=np.asarray(step.right_pose, dtype=float),
-            timestamp=time.time(),
-            frame_index=self._frame_index,
-            source="online_inference",
-            metadata=metadata,
-        )
+        if self._protocol_profile() == "mobile_joint_base":
+            current_joint_q = self._current_joint_q_from_mobile_state(state_sample.mobile_joint_state22)
+            target_joint_q = current_joint_q if step.joint_arm_q is None else np.asarray(step.joint_arm_q, dtype=float)
+            motion_intent = MotionIntent(
+                kind="joint_position",
+                arm_q=target_joint_q,
+                gripper_q=np.asarray([step.left_gripper_width, step.right_gripper_width], dtype=float),
+                timestamp=time.time(),
+                frame_index=self._frame_index,
+                source="online_inference:mobile_joint_base",
+                metadata=metadata,
+            )
+        else:
+            motion_intent = MotionIntent(
+                kind="pose",
+                left_wrist_pose=np.asarray(step.left_pose, dtype=float),
+                right_wrist_pose=np.asarray(step.right_pose, dtype=float),
+                timestamp=time.time(),
+                frame_index=self._frame_index,
+                source="online_inference",
+                metadata=metadata,
+            )
         base_intent = _base_intent_from_online_metadata(metadata, self._frame_index)
         self._frame_index += 1
         done = step.status == "failed"
         return TeleopInputSample(tele_data=tele_data, motion_intent=motion_intent, done=done, base_intent=base_intent)
 
     def _mobile_state26(self, kwargs: Mapping[str, Any]) -> np.ndarray | None:
-        protocol_profile = str(
-            getattr(getattr(self.session, "config", None), "protocol_profile", "pika_pose7")
-        ).strip()
+        protocol_profile = self._protocol_profile()
         if protocol_profile != "mobile_tcp23":
             return None
         transformer = kwargs.get("mobile_tcp_to_wrist_transformer")
@@ -302,6 +327,58 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
         if state.shape != (26,) or not np.all(np.isfinite(state)):
             raise RuntimeError(f"mobile_tcp23 state construction failed: shape={state.shape}")
         return state
+
+    def _mobile_joint_state22(self, kwargs: Mapping[str, Any]) -> np.ndarray | None:
+        if self._protocol_profile() != "mobile_joint_base":
+            return None
+        arm_q = np.asarray(kwargs.get("current_arm_q"), dtype=float).reshape(-1)
+        if arm_q.shape != (14,) or not np.all(np.isfinite(arm_q)):
+            raise ValueError("current_arm_q must be a finite 14D [left_q7, right_q7] vector")
+        map_base = np.asarray(kwargs.get("current_map_base_pose"), dtype=float).reshape(-1)
+        if map_base.shape != (3,) or not np.all(np.isfinite(map_base)):
+            raise ValueError("current_map_base_pose must be a finite [map_x, map_y, map_yaw]")
+        base_velocity = np.asarray(kwargs.get("current_base_velocity_base_link"), dtype=float).reshape(-1)
+        if base_velocity.shape != (2,) or not np.all(np.isfinite(base_velocity)):
+            raise ValueError("current_base_velocity_base_link must be a finite [vx, wz]")
+        column_height = float(kwargs.get("current_column_height_m"))
+        if not np.isfinite(column_height):
+            raise ValueError("current_column_height_m must be finite")
+        left_gripper = _finite_gripper_width(
+            kwargs.get("current_left_gripper_width", 0.0),
+            "current_left_gripper_width",
+        )
+        right_gripper = _finite_gripper_width(
+            kwargs.get("current_right_gripper_width", 0.0),
+            "current_right_gripper_width",
+        )
+        state = np.concatenate(
+            [
+                arm_q[:7],
+                [left_gripper],
+                arm_q[7:14],
+                [right_gripper],
+                map_base,
+                base_velocity,
+                [column_height],
+            ]
+        ).astype(np.float32)
+        if state.shape != (22,) or not np.all(np.isfinite(state)):
+            raise RuntimeError(f"mobile_joint_base state construction failed: shape={state.shape}")
+        return state
+
+    def _protocol_profile(self) -> str:
+        return str(
+            getattr(getattr(self.session, "config", None), "protocol_profile", "pika_pose7")
+        ).strip()
+
+    @staticmethod
+    def _current_joint_q_from_mobile_state(mobile_joint_state22: np.ndarray | None) -> np.ndarray:
+        if mobile_joint_state22 is None:
+            raise RuntimeError("mobile_joint_base current state is missing")
+        state = np.asarray(mobile_joint_state22, dtype=float)
+        if state.shape != (22,) or not np.all(np.isfinite(state)):
+            raise ValueError("mobile_joint_base current state must be a finite 22D vector")
+        return np.concatenate([state[:7], state[8:15]])
 
     def _coerce_camera_samples(self, kwargs: dict[str, Any]) -> list[CameraSample]:
         explicit_samples = kwargs.get("camera_samples")

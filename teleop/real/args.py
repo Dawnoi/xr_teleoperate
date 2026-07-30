@@ -20,18 +20,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='Arm DDS publish frequency in Hz. Use 500 to test lower ctrl_wait.')
     parser.add_argument('--home-return-speed', type=float, default=0.6,
                         help='Dedicated arm joint speed limit in rad/s used only while returning to the ready/home pose via left Y.')
+    parser.add_argument('--home-position-tolerance-rad', type=float, default=0.015,
+                        help='Maximum absolute joint error accepted as G1_29 Home completion.')
+    parser.add_argument('--home-gravity-update-hz', type=float, default=20.0,
+                        help='Rate at which G1_29 Home refreshes gravity feed-forward from measured arm joints.')
+    parser.add_argument('--home-gravity-torque-limit-nm', type=float, default=10.0,
+                        help='Maximum absolute per-joint gravity feed-forward torque accepted during G1_29 Home; values beyond this abort Home.')
     parser.add_argument('--mobile-manipulation-mode', choices=['direct_ik', 'mobile_ik_qp'], default='direct_ik',
-                        help='direct_ik preserves the legacy path; mobile_ik_qp coordinates G1D base, column, torso yaw, and legacy arm IK.')
+                        help='direct_ik preserves the legacy path; mobile_ik_qp runs the measured-state G1-D whole-body velocity QP for both TCPs, arms, torso yaw, column, and base.')
     parser.add_argument('--mobile-state-timeout-sec', type=float, default=0.50,
                         help='Maximum age of required odom/column measurements in mobile_ik_qp mode.')
-    parser.add_argument('--mobile-height-raw-minimum', type=float, default=-0.032287,
-                        help='Raw rt/hispeed_state.y value for fully lowered G1D column.')
-    parser.add_argument('--mobile-height-raw-maximum', type=float, default=0.398077,
-                        help='Raw rt/hispeed_state.y value for fully raised G1D column.')
+    parser.add_argument('--mobile-height-raw-minimum', type=float, default=-0.263500,
+                        help='Calibrated rt/hispeed_state.y lower endpoint with a 0.5 mm measurement margin for the fully lowered G1D column.')
+    parser.add_argument('--mobile-height-raw-maximum', type=float, default=0.167790,
+                        help='Calibrated rt/hispeed_state.y value for the fully raised G1D column.')
     parser.add_argument('--mobile-column-travel-m', type=float, default=0.42,
                         help='Total physical G1D column travel used by mobile_ik_qp.')
     parser.add_argument('--mobile-max-torso-yaw-rate', type=float, default=0.50,
                         help='Maximum independent waist-yaw rate in rad/s from the right thumbstick X axis.')
+    parser.add_argument('--mobile-wbc-command-horizon-sec', type=float, default=0.10,
+                        help='Position lookahead horizon applied to mobile_ik_qp arm and torso QP velocities.')
+    parser.add_argument('--mobile-wbc-max-position-lead-rad', type=float, default=0.12,
+                        help='Maximum QP position lookahead from measured arm/torso joint state in radians.')
+    parser.add_argument('--disable-mobile-wbc-collision-avoidance', action='store_true',
+                        help='Disable mobile_ik_qp WBC collision constraints. This is a high-risk explicit override.')
     parser.add_argument('--base-max-vx', type=float, default=0.3,
                         help='Maximum commanded chassis x velocity in m/s from the left thumbstick Y axis.')
     parser.add_argument('--base-max-vy', type=float, default=0.3,
@@ -82,7 +94,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='HTTP handshake path for online inference.')
     parser.add_argument('--online-inference-http-infer-path', type=str, default='/infer',
                         help='HTTP infer path for online inference.')
-    parser.add_argument('--online-inference-protocol-profile', type=str, choices=['pika_pose7', 'pi05_dual_arm_20d', 'mobile_tcp23'], default='pika_pose7',
+    parser.add_argument('--online-inference-protocol-profile', type=str, choices=['pika_pose7', 'pi05_dual_arm_20d', 'mobile_tcp23', 'mobile_joint_base'], default='pika_pose7',
                         help='Online inference payload/action schema profile.')
     parser.add_argument('--online-inference-prompt', type=str, default='',
                         help='Task prompt sent to online inference services such as pi0.5.')
@@ -196,6 +208,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='Recording representation for arm data: joint angles (qpos), wrist pose, or both.')
     parser.add_argument('--record-base', action='store_true',
                         help='Record mobile-base pose/velocity/action into raw episode JSON. Requires --record and Unitree DDS access to --base-odom-topic.')
+    parser.add_argument('--record-base-velocity-only', action='store_true',
+                        help='Record only base_link velocity and base commands. Omits odom world_pose and SLAM map pose from raw episodes.')
     parser.add_argument('--base-odom-topic', type=str, default='rt/agv/odom',
                         help='Unitree DDS odometry topic used for recorded base world pose and velocity.')
     parser.add_argument('--base-height-topic', type=str, default='rt/hispeed_state',
@@ -242,6 +256,12 @@ def parse_args(argv=None):
     args = build_arg_parser().parse_args(argv)
     if args.ui:
         args.headless = True
+    if args.home_position_tolerance_rad <= 0.0:
+        raise ValueError('--home-position-tolerance-rad must be positive')
+    if args.home_gravity_update_hz <= 0.0:
+        raise ValueError('--home-gravity-update-hz must be positive')
+    if args.home_gravity_torque_limit_nm <= 0.0:
+        raise ValueError('--home-gravity-torque-limit-nm must be positive')
     if args.base_motion and args.base_controller == 'none':
         raise ValueError('--base-motion requires --base-controller loco or g1d_agv')
     if args.mobile_manipulation_mode == 'mobile_ik_qp':
@@ -251,6 +271,8 @@ def parse_args(argv=None):
             raise ValueError('mobile_ik_qp state timeout and column travel must be positive')
         if args.mobile_height_raw_maximum <= args.mobile_height_raw_minimum:
             raise ValueError('mobile_ik_qp raw height limits must be ordered')
+        if args.mobile_wbc_command_horizon_sec <= 0.0 or args.mobile_wbc_max_position_lead_rad <= 0.0:
+            raise ValueError('mobile_ik_qp WBC position lookahead settings must be positive')
     if args.record_base and not args.record:
         raise ValueError("--record-base requires --record")
     if args.record_base and float(args.base_state_max_age_ms) <= 0.0:
@@ -263,6 +285,10 @@ def parse_args(argv=None):
         raise ValueError("--base-startup-timeout-sec must be positive")
     if args.record_slam_map_pose and not args.record_base:
         raise ValueError("--record-slam-map-pose requires --record-base")
+    if args.record_base_velocity_only and not args.record_base:
+        raise ValueError("--record-base-velocity-only requires --record-base")
+    if args.record_base_velocity_only and args.record_slam_map_pose:
+        raise ValueError("--record-base-velocity-only cannot be combined with --record-slam-map-pose")
     if args.record_slam_map_pose and not str(args.slam_pose_source_frame or "").strip():
         raise ValueError("--slam-pose-source-frame must not be empty with --record-slam-map-pose")
     if args.record_slam_map_pose and float(args.slam_chain_max_skew_ms) <= 0.0:
@@ -270,12 +296,16 @@ def parse_args(argv=None):
     if args.record_mobile_training_state:
         if not args.record_base:
             raise ValueError("--record-mobile-training-state requires --record-base")
-        if not args.record_slam_map_pose:
-            raise ValueError("--record-mobile-training-state requires --record-slam-map-pose")
+        if not args.record_slam_map_pose and not args.record_base_velocity_only:
+            raise ValueError(
+                "--record-mobile-training-state requires --record-slam-map-pose or --record-base-velocity-only"
+            )
         if not str(args.base_height_topic or "").strip():
             raise ValueError("--record-mobile-training-state requires --base-height-topic")
         if args.base_velocity_frame is None:
             raise ValueError("--record-mobile-training-state requires --base-velocity-frame base_link or world")
+        if args.record_base_velocity_only and args.base_velocity_frame != "base_link":
+            raise ValueError("--record-base-velocity-only requires --base-velocity-frame base_link")
     if args.online_inference_protocol_profile == 'mobile_tcp23':
         if args.arm != 'G1_29' or args.ee != 'dex1' or args.no_gripper:
             raise ValueError("mobile_tcp23 requires --arm G1_29 --ee dex1 without --no-gripper")
@@ -291,4 +321,21 @@ def parse_args(argv=None):
             raise ValueError("mobile_tcp23 requires --base-command-source provider")
         if args.base_velocity_frame != 'base_link':
             raise ValueError("mobile_tcp23 requires --base-velocity-frame base_link")
+    if args.online_inference_protocol_profile == 'mobile_joint_base':
+        if args.arm != 'G1_29' or args.ee != 'dex1' or args.no_gripper:
+            raise ValueError("mobile_joint_base requires --arm G1_29 --ee dex1 without --no-gripper")
+        if args.online_inference_transport != 'http':
+            raise ValueError("mobile_joint_base requires --online-inference-transport http")
+        if args.online_inference_arm_side != 'both':
+            raise ValueError("mobile_joint_base requires --online-inference-arm-side both")
+        if args.mobile_manipulation_mode == 'mobile_ik_qp':
+            raise ValueError("mobile_joint_base cannot run with --mobile-manipulation-mode mobile_ik_qp")
+        if args.online_inference_chunk_step_mode != 'per_tick':
+            raise ValueError("mobile_joint_base requires --online-inference-chunk-step-mode per_tick")
+        if args.base_controller != 'g1d_agv' or not args.base_motion:
+            raise ValueError("mobile_joint_base requires --base-controller g1d_agv --base-motion")
+        if args.base_command_source != 'provider':
+            raise ValueError("mobile_joint_base requires --base-command-source provider")
+        if args.base_velocity_frame != 'base_link':
+            raise ValueError("mobile_joint_base requires --base-velocity-frame base_link")
     return args

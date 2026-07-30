@@ -124,6 +124,8 @@ def build_runtime_web_payload(
     ready: bool = False,
     stopping: bool = False,
     provider_status: dict[str, Any] | None = None,
+    latency_snapshot: dict[str, Any] | None = None,
+    timing_snapshot: dict[str, Any] | None = None,
     base_state_receiver: Any | None = None,
     base_stop_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -176,6 +178,8 @@ def build_runtime_web_payload(
         playback_status={"state": "disabled", "error": "playback is not implemented in xr_teleoperate UI"},
         convert_status={"ok": True, "state": "idle", "phase": "idle", "running": False, "message": "ready: LeRobot v2 raw exporter is available"},
         provider_status=provider_status,
+        teleop_latency=latency_snapshot,
+        teleop_timing=timing_snapshot,
         teleop_status={
             "started": bool(started),
             "ready": bool(ready),

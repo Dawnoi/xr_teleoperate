@@ -21,26 +21,21 @@ def _finite_float_list(values, field_name: str, expected_len: int) -> list[float
     return [_finite_float(value, f"{field_name}[{idx}]") for idx, value in enumerate(values)]
 
 
-def build_base_state_record(aligned_base_state: dict, aligned_base_height: dict | None):
+def build_base_state_record(
+    aligned_base_state: dict,
+    aligned_base_height: dict | None,
+    *,
+    include_world_pose: bool = True,
+):
     if not isinstance(aligned_base_state, dict):
         raise TypeError("aligned_base_state must be a dict")
-    world_pose = aligned_base_state.get("world_pose")
+    if not isinstance(include_world_pose, bool):
+        raise TypeError("include_world_pose must be a bool")
     velocity = aligned_base_state.get("velocity")
-    if not isinstance(world_pose, dict):
-        raise ValueError("aligned_base_state.world_pose is required")
     if not isinstance(velocity, dict):
         raise ValueError("aligned_base_state.velocity is required")
 
     record = {
-        "world_pose": {
-            "x": _finite_float(world_pose.get("x"), "world_pose.x"),
-            "y": _finite_float(world_pose.get("y"), "world_pose.y"),
-            "z": _finite_float(world_pose.get("z"), "world_pose.z"),
-            "yaw": _finite_float(world_pose.get("yaw"), "world_pose.yaw"),
-            "quat_xyzw": _finite_float_list(world_pose.get("quat_xyzw"), "world_pose.quat_xyzw", 4),
-            "frame_id": str(world_pose.get("frame_id") or ""),
-            "source_topic": str(world_pose.get("source_topic") or ""),
-        },
         "velocity": {
             "vx": _finite_float(velocity.get("vx"), "velocity.vx"),
             "vy": _finite_float(velocity.get("vy"), "velocity.vy"),
@@ -52,6 +47,19 @@ def build_base_state_record(aligned_base_state: dict, aligned_base_height: dict 
             "source_topic": str(velocity.get("source_topic") or ""),
         },
     }
+    if include_world_pose:
+        world_pose = aligned_base_state.get("world_pose")
+        if not isinstance(world_pose, dict):
+            raise ValueError("aligned_base_state.world_pose is required when include_world_pose is true")
+        record["world_pose"] = {
+            "x": _finite_float(world_pose.get("x"), "world_pose.x"),
+            "y": _finite_float(world_pose.get("y"), "world_pose.y"),
+            "z": _finite_float(world_pose.get("z"), "world_pose.z"),
+            "yaw": _finite_float(world_pose.get("yaw"), "world_pose.yaw"),
+            "quat_xyzw": _finite_float_list(world_pose.get("quat_xyzw"), "world_pose.quat_xyzw", 4),
+            "frame_id": str(world_pose.get("frame_id") or ""),
+            "source_topic": str(world_pose.get("source_topic") or ""),
+        }
     slam_map_pose = aligned_base_state.get("slam_map_pose")
     if slam_map_pose is not None:
         if not isinstance(slam_map_pose, dict):

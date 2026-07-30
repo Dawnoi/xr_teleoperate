@@ -120,9 +120,14 @@ class TeleopRecordingFlow:
         self.pending_sample_timeout_ns = int(1_000_000_000)
         self.record_base = bool(getattr(args, "record_base", False))
         self.record_slam_map_pose = bool(getattr(args, "record_slam_map_pose", False))
+        self.record_base_velocity_only = bool(getattr(args, "record_base_velocity_only", False))
         self._record_mobile_training_state = bool(
             getattr(args, "record_mobile_training_state", False)
         )
+        if self.record_base_velocity_only and not self.record_base:
+            raise ValueError("record_base_velocity_only requires record_base")
+        if self.record_base_velocity_only and self.record_slam_map_pose:
+            raise ValueError("record_base_velocity_only cannot be combined with record_slam_map_pose")
         self.base_state_max_delta_ns = int(max(1_000_000, float(getattr(args, "base_state_max_age_ms", 131.578947)) * 1e6))
         self.base_height_max_delta_ns = int(150.0 * 1e6)
         self.slam_tf_max_delta_ns = int(max(1_000_000, float(getattr(args, "slam_tf_max_age_ms", 125.0)) * 1e6))
@@ -852,7 +857,11 @@ class TeleopRecordingFlow:
             "right_ee": {"qpos": pending["right_hand_action"], "qvel": [], "torque": []},
         }
         if self.record_base:
-            states["base"] = build_base_state_record(aligned_base_state, aligned_base_height)
+            states["base"] = build_base_state_record(
+                aligned_base_state,
+                aligned_base_height,
+                include_world_pose=not self.record_base_velocity_only,
+            )
             actions["base"] = build_base_action_record(aligned_base_action)
             if self._record_mobile_training_state:
                 states["base"]["column_height_m"] = column_height_m

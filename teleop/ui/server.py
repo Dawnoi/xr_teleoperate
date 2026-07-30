@@ -657,6 +657,12 @@ class TeleopUiServer:
                 "available": False,
                 "reason": "mobile_tcp23 runtime is not configured",
             },
+            {
+                "id": "mobile_joint_base",
+                "label": "移动操作 Joint19",
+                "available": False,
+                "reason": "mobile_joint_base runtime is not configured",
+            },
         ]
 
     @staticmethod

@@ -129,6 +129,10 @@ function badge(level, label) {
   return `<span class="pill"><span class="dot ${tone(l)}"></span>${esc(label ?? l)}</span>`;
 }
 
+function formatMs(value) {
+  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(1)} ms` : "-";
+}
+
 function metric(label, value, hint = "") {
   return `<div class="metric"><span>${esc(label)}</span><b>${esc(value)}</b>${hint ? `<small class="mini">${esc(hint)}</small>` : ""}</div>`;
 }
@@ -700,9 +704,26 @@ function renderRecord() {
     </div>
     <div class="card full record-validation-card"><div class="card-head"><h2>单条 episode 完整性与时间对齐检查</h2>${qualityBadge(validationCardState(v))}</div>${validationSummary(v)}</div>
     <div class="card full record-action-semantics-card"><div class="card-head"><h2>动作语义与异常动作</h2>${actionSemanticsBadge(v)}</div>${actionSemanticsSummary(v)}</div>
+    ${recordLatencySummary()}
     <div class="card full"><div class="card-head"><div><h2>多相机实时预览</h2><p class="mini">预览只读取当前进程已有 latest frame；不重启相机，不参与录制写盘。</p></div><span class="pill">${streamItems.length} live</span></div><div class="preview-grid layout-placeholder">${previews || empty("暂无可预览相机；请检查启动参数和相机链路")}</div></div>
     <div class="card full"><div class="card-head"><div><h2>实时数据曲线</h2><p class="mini">四图布局：左/右臂 J1-J7 与左/右夹爪分别显示，不再用线型区分。</p></div><span class="pill">4 charts</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left J1-J7</b><span>q_fb</span></div><canvas id="liveLeftJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="liveLeftJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right J1-J7</b><span>q_fb</span></div><canvas id="liveRightJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="liveRightJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Left Gripper</b><span>q_fb</span></div><canvas id="liveLeftGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveLeftGripperLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right Gripper</b><span>q_fb</span></div><canvas id="liveRightGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveRightGripperLegend"></div></div></div></div>
     <div class="modal ${state.cameraConfigOpen ? "show" : ""}" onclick="if(event.target===this) closeCameraConfig()"><div class="modal-card"><div class="card-head"><div><h2>相机启动参数说明</h2><p class="mini">当前仓库相机在 Python 进程启动时打开，网页只读取 latest frame。</p></div><button class="secondary" onclick="closeCameraConfig()">关闭</button></div><div class="form compact-form"><label>宽<input id="camWidth" value="${esc(localStorage.camWidth || "1280")}" disabled></label><label>高<input id="camHeight" value="${esc(localStorage.camHeight || "720")}" disabled></label><label>FPS<input id="camFps" value="${esc(localStorage.camFps || "30")}" disabled></label><label>模式<select id="camMode" disabled><option value="rgb" ${(localStorage.camMode || "rgb") === "rgb" ? "selected" : ""}>RGB</option><option value="depth" ${localStorage.camMode === "depth" ? "selected" : ""}>Depth</option></select></label><label>名称<input id="camName" placeholder="head / left_wrist / right_wrist" value="${esc(localStorage.camName || "")}" disabled></label><label>角色<input id="camRole" value="${esc(localStorage.camRole || "runtime")}" disabled></label></div><p class="mini">请用 --head-camera-id / --left-camera-id / --right-camera-id 或 --head-zmq-endpoint / --left-zmq-endpoint / --right-zmq-endpoint 配置。这样录制线程和 UI 预览共享同一个相机 source，不会因为网页操作重启相机而破坏对齐。</p></div></div>
+  </div>`;
+}
+
+function recordLatencySummary() {
+  const latency = state.snapshot?.teleop_latency || {};
+  const trace = latency.current || latency.latest || {};
+  const timing = state.snapshot?.teleop_timing || {};
+  const loop = timing.loop || {};
+  const teleFetch = timing.tele_fetch || {};
+  const ik = timing.ik || {};
+  const wbc = timing.wbc || {};
+  const traceState = trace.status || "idle";
+  const traceLabel = trace.input_provider === "xr" ? "XR trace" : trace.input_provider || traceState;
+  return `<div class="card full record-latency-card"><div class="card-head"><div><h2>遥操链路延时</h2></div>${badge(traceState === "completed" ? "ok" : traceState === "pending" ? "running" : traceState, traceLabel)}</div>
+    <div class="metric-grid"><div class="metric"><span>XR 到 DDS 发布</span><b>${formatMs(trace.recv_to_pub_ms)}</b></div><div class="metric"><span>DDS 到反馈起动</span><b>${formatMs(trace.pub_to_exec_thread_ms)}</b></div><div class="metric"><span>XR 到反馈起动</span><b>${formatMs(trace.recv_to_exec_thread_ms)}</b></div><div class="metric"><span>传统 IK</span><b>${formatMs(trace.ik_ms)}</b></div><div class="metric"><span>WBC QP</span><b>${formatMs(trace.wbc_ms)}</b></div><div class="metric"><span>控制线程排队</span><b>${formatMs(trace.controller_wait_ms)}</b></div><div class="metric"><span>DDS 写入</span><b>${formatMs(trace.dds_write_ms)}</b></div></div>
+    <div class="metric-grid"><div class="metric"><span>主循环 avg / P95 / max</span><b>${formatMs(loop.avg_ms)} / ${formatMs(loop.p95_ms)} / ${formatMs(loop.max_ms)}</b><small class="mini">overrun ${Number(loop.overrun_count || 0)} / ${Number(loop.count || 0)}</small></div><div class="metric"><span>读取 XR 输入 P95</span><b>${formatMs(teleFetch.p95_ms)}</b></div><div class="metric"><span>传统 IK P95</span><b>${formatMs(ik.p95_ms)}</b></div><div class="metric"><span>WBC QP P95</span><b>${formatMs(wbc.p95_ms)}</b></div></div>
   </div>`;
 }
 

@@ -49,7 +49,7 @@ class OnlineInferenceConfig:
 
     def __post_init__(self) -> None:
         self.protocol_profile = str(self.protocol_profile or "pika_pose7").strip()
-        if self.protocol_profile not in {"pika_pose7", "pi05_dual_arm_20d", "mobile_tcp23"}:
+        if self.protocol_profile not in {"pika_pose7", "pi05_dual_arm_20d", "mobile_tcp23", "mobile_joint_base"}:
             raise ValueError(f"unsupported protocol_profile: {self.protocol_profile!r}")
         if self.arm_side not in {"left", "right", "both"}:
             raise ValueError(f"unsupported arm_side: {self.arm_side!r}")
@@ -88,6 +88,7 @@ class RobotStateSample:
     left_gripper_width: float
     right_gripper_width: float
     mobile_state26: np.ndarray | None = None
+    mobile_joint_state22: np.ndarray | None = None
 
 
 @dataclass
@@ -98,6 +99,7 @@ class OnlineInferenceStep:
     right_gripper_width: float
     enabled_arms: List[str]
     status: str
+    joint_arm_q: np.ndarray | None = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -141,7 +143,7 @@ class OnlineInferenceSession:
         self.trace_clock_ns = trace_clock_ns or _perf_counter_ns
 
         if (
-            self.config.protocol_profile != "mobile_tcp23"
+            self.config.protocol_profile not in {"mobile_tcp23", "mobile_joint_base"}
             and self.config.enable_motion
             and not self.config.dry_run
             and self.pose_transformer is None
@@ -380,6 +382,8 @@ class OnlineInferenceSession:
             return self._build_pi05_observation_message()
         if self.config.protocol_profile == "mobile_tcp23":
             return self._build_mobile_tcp23_observation_message()
+        if self.config.protocol_profile == "mobile_joint_base":
+            return self._build_mobile_joint_base_observation_message()
         message: Dict[str, Any] = {"type": "observation"}
         if self.config.arm_side in {"left", "both"}:
             message["arm_l"] = self._build_arm_observation("left")
@@ -455,6 +459,23 @@ class OnlineInferenceSession:
             "prompt": self.config.task_prompt,
         }
         return payload
+
+    def _build_mobile_joint_base_observation_message(self) -> Dict[str, Any]:
+        state_window, camera_window = self._select_observation_window()
+        mobile_joint_state = state_window[-1].mobile_joint_state22
+        if mobile_joint_state is None:
+            raise RuntimeError("mobile_joint_base observation is missing the 22D mobile joint state")
+        mobile_joint_state = np.asarray(mobile_joint_state, dtype=np.float32)
+        if mobile_joint_state.shape != (22,) or not np.all(np.isfinite(mobile_joint_state)):
+            raise ValueError(
+                f"mobile_joint_base state must be a finite 22D vector, got {mobile_joint_state.shape}"
+            )
+        return {
+            "type": "observation",
+            "mobile_joint_state": [float(value) for value in mobile_joint_state.tolist()],
+            "images": self._build_mobile_tcp23_images(camera_window),
+            "prompt": self.config.task_prompt,
+        }
 
     def _build_mobile_tcp23_images(self, camera_window: Dict[str, List[CameraSample]]) -> Dict[str, bytes]:
         images: Dict[str, bytes] = {}
@@ -760,6 +781,20 @@ class OnlineInferenceSession:
                 raise ValueError("mobile_tcp23 response requires base_action_dim=4")
             actions = validate_pi05_action_sequence(payload, expected_dim=20)
             left_steps, right_steps = pi05_action_sequence_to_pose7_chunks(actions, self.config.arm_side)
+        elif self.config.protocol_profile == "mobile_joint_base":
+            if payload.get("wire_format") != "mobile_joint_base_q16_base4":
+                raise ValueError(
+                    "mobile_joint_base response requires wire_format='mobile_joint_base_q16_base4'"
+                )
+            if int(payload.get("model_action_dim", -1)) != 19:
+                raise ValueError("mobile_joint_base response requires model_action_dim=19")
+            if int(payload.get("wire_arm_action_dim", -1)) != 16:
+                raise ValueError("mobile_joint_base response requires wire_arm_action_dim=16")
+            if int(payload.get("base_action_dim", -1)) != 4:
+                raise ValueError("mobile_joint_base response requires base_action_dim=4")
+            actions = validate_pi05_action_sequence(payload, expected_dim=16)
+            left_steps = [np.asarray(action[:8], dtype=np.float64).copy() for action in actions]
+            right_steps = [np.asarray(action[8:16], dtype=np.float64).copy() for action in actions]
         elif self.config.protocol_profile == "pi05_dual_arm_20d":
             actions = validate_pi05_action_sequence(payload, expected_dim=20)
             left_steps, right_steps = pi05_action_sequence_to_pose7_chunks(actions, self.config.arm_side)
@@ -793,7 +828,7 @@ class OnlineInferenceSession:
         base_steps = self._parse_base_action_steps(
             payload,
             chunk_size,
-            required=self.config.protocol_profile == "mobile_tcp23",
+            required=self.config.protocol_profile in {"mobile_tcp23", "mobile_joint_base"},
         )
         self._last_action_debug = self._make_action_debug(left_steps, right_steps, chunk_size)
         if base_steps is not None:
@@ -832,6 +867,24 @@ class OnlineInferenceSession:
         right_steps: Optional[List[np.ndarray]],
         chunk_size: int,
     ) -> None:
+        if self.config.protocol_profile == "mobile_joint_base":
+            for side, steps in (("left", left_steps), ("right", right_steps)):
+                if not steps:
+                    continue
+                action_array = np.asarray(steps, dtype=np.float64)
+                if action_array.ndim != 2 or action_array.shape[1] != 8 or not np.all(np.isfinite(action_array)):
+                    raise ValueError(f"{side} joint action chunk must be finite with shape Nx8, got {action_array.shape}")
+                logger.info(
+                    "[ONLINE_INFERENCE][JOINT_ACTION] %s chunk_size=%d first_q=%s first_gripper=%.6f "
+                    "last_q=%s last_gripper=%.6f",
+                    side,
+                    int(chunk_size),
+                    [float(value) for value in action_array[0, :7]],
+                    float(action_array[0, 7]),
+                    [float(value) for value in action_array[-1, :7]],
+                    float(action_array[-1, 7]),
+                )
+            return
         for side, steps in (("left", left_steps), ("right", right_steps)):
             if not steps:
                 continue
@@ -905,10 +958,19 @@ class OnlineInferenceSession:
         debug: Dict[str, Any] = {}
         if self.config.protocol_profile == "pi05_dual_arm_20d":
             debug["profile"] = "pi05_dual_arm_20d"
+        elif self.config.protocol_profile == "mobile_joint_base":
+            debug["profile"] = "mobile_joint_base"
         for side, steps in (("left", left_steps), ("right", right_steps)):
             if not steps:
                 continue
             first_step = np.asarray(steps[0], dtype=np.float64)
+            if self.config.protocol_profile == "mobile_joint_base":
+                debug[side] = {
+                    "chunk_size": int(chunk_size),
+                    "first_joint_q": [float(value) for value in first_step[:7]],
+                    "first_gripper": float(first_step[7]),
+                }
+                continue
             side_observation = self._last_observation_debug.get(side, {})
             arm_current_pose = side_observation.get("arm_current_pose")
             delta_xyz_m = None
@@ -963,11 +1025,17 @@ class OnlineInferenceSession:
             )
 
         step_index = self._current_chunk_index
-        left_pose, right_pose, left_gripper_width, right_gripper_width = self._build_action_output(
-            state_sample,
-            step_index,
-            now_ns,
-        )
+        joint_arm_q = None
+        if self.config.protocol_profile == "mobile_joint_base":
+            left_pose = np.asarray(state_sample.left_pose, dtype=np.float64).copy()
+            right_pose = np.asarray(state_sample.right_pose, dtype=np.float64).copy()
+            joint_arm_q, left_gripper_width, right_gripper_width = self._build_joint_action_output(step_index)
+        else:
+            left_pose, right_pose, left_gripper_width, right_gripper_width = self._build_action_output(
+                state_sample,
+                step_index,
+                now_ns,
+            )
         if self.config.chunk_step_mode == "per_tick":
             self._current_step_start_ns = now_ns
             self._current_chunk_index += 1
@@ -983,6 +1051,7 @@ class OnlineInferenceSession:
             right_gripper_width=right_gripper_width,
             enabled_arms=self._enabled_arms_for_action(),
             status="executing_chunk",
+            joint_arm_q=joint_arm_q,
             metadata=metadata,
         )
 
@@ -1112,6 +1181,17 @@ class OnlineInferenceSession:
                 now_ns=now_ns,
             )
         return left_pose, right_pose, left_gripper_width, right_gripper_width
+
+    def _build_joint_action_output(self, step_index: int) -> tuple[np.ndarray, float, float]:
+        if self._current_chunk_left is None or self._current_chunk_right is None:
+            raise RuntimeError("mobile_joint_base action chunk is not initialized")
+        if step_index >= len(self._current_chunk_left) or step_index >= len(self._current_chunk_right):
+            raise ValueError(f"mobile_joint_base action chunk is missing step {step_index}")
+        left = np.asarray(self._current_chunk_left[step_index], dtype=np.float64)
+        right = np.asarray(self._current_chunk_right[step_index], dtype=np.float64)
+        if left.shape != (8,) or right.shape != (8,) or not np.all(np.isfinite(left)) or not np.all(np.isfinite(right)):
+            raise ValueError("mobile_joint_base action step must contain finite left/right q7 + gripper")
+        return np.concatenate([left[:7], right[:7]]), float(left[7]), float(right[7])
 
     def _interpolate_step(
         self,

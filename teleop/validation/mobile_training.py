@@ -287,6 +287,98 @@ def _validate_tcp_metadata(info: Any, issues: list[dict[str, Any]]) -> None:
             issues.append(_issue("MOBILE_TCP_METADATA_MISMATCH", "error", f"episode info.{key} must equal {expected}", observed=value))
 
 
+def _validate_base_observation_mode(episode_info: Any, issues: list[dict[str, Any]]) -> bool:
+    """Return whether this episode intentionally excludes all global base poses."""
+    if not isinstance(episode_info, Mapping):
+        return False
+    mode = episode_info.get("mobile_base_observation_mode")
+    if mode is None:
+        return False
+    if mode == "global_slam_map_and_velocity":
+        return False
+    if mode != "velocity_only_base_link":
+        issues.append(
+            _issue(
+                "MOBILE_BASE_OBSERVATION_MODE_INVALID",
+                "error",
+                "episode info.mobile_base_observation_mode is invalid",
+                observed=mode,
+            )
+        )
+        return False
+    if episode_info.get("mobile_base_absolute_pose_recorded") is not False:
+        issues.append(
+            _issue(
+                "MOBILE_BASE_OBSERVATION_MODE_INVALID",
+                "error",
+                "velocity_only_base_link must declare mobile_base_absolute_pose_recorded=false",
+            )
+        )
+    if episode_info.get("mobile_base_velocity_frame") != "base_link":
+        issues.append(
+            _issue(
+                "MOBILE_BASE_OBSERVATION_MODE_INVALID",
+                "error",
+                "velocity_only_base_link must declare mobile_base_velocity_frame=base_link",
+            )
+        )
+    return True
+
+
+def _validate_global_slam_pose(
+    *,
+    states_base: dict[str, Any],
+    timestamps: dict[str, Any],
+    validated: dict[str, Any],
+    limits: dict[str, Any],
+    frame_index: int,
+    issues: list[dict[str, Any]],
+    previous_map_pose: tuple[float, float, float, int] | None,
+) -> tuple[tuple[float, float, float, int] | None, int, float, float, float]:
+    slam_map_pose = states_base.get("slam_map_pose")
+    if not isinstance(slam_map_pose, Mapping):
+        issues.append(_issue("MOBILE_MISSING_SLAM_POSE", "error", f"frame {frame_index} missing states.base.slam_map_pose", frame_index=frame_index))
+        slam_map_pose = {}
+    if slam_map_pose.get("frame_id") != validated["map_frame"] or slam_map_pose.get("child_frame_id") != validated["base_frame"]:
+        issues.append(_issue("MOBILE_SLAM_FRAME_MISMATCH", "error", f"frame {frame_index} slam pose must be {validated['map_frame']}->{validated['base_frame']}", frame_index=frame_index))
+
+    identity_assumption_count = 0
+    max_slam_tf_age_ms = 0.0
+    max_map_speed_mps = 0.0
+    max_map_yaw_rate_radps = 0.0
+    if not _finite_vector(slam_map_pose.get("quat_xyzw"), 4) or not all(_finite_number(slam_map_pose.get(key)) for key in ("x", "y", "z", "yaw")):
+        issues.append(_issue("MOBILE_BAD_SLAM_POSE", "error", f"frame {frame_index} slam pose must contain finite xyz/yaw/quaternion", frame_index=frame_index))
+    else:
+        quaternion_norm = math.sqrt(sum(float(value) ** 2 for value in slam_map_pose["quat_xyzw"]))
+        if abs(quaternion_norm - 1.0) > 0.01:
+            issues.append(_issue("MOBILE_BAD_SLAM_QUATERNION", "error", f"frame {frame_index} slam quaternion norm is {quaternion_norm:.4f}", frame_index=frame_index))
+        sample_time = timestamps.get("sample_monotonic_ns")
+        if _finite_number(sample_time):
+            current_map_pose = (float(slam_map_pose["x"]), float(slam_map_pose["y"]), float(slam_map_pose["yaw"]), int(sample_time))
+            if previous_map_pose is not None and current_map_pose[3] > previous_map_pose[3]:
+                dt_s = (current_map_pose[3] - previous_map_pose[3]) / 1e9
+                max_map_speed_mps = math.hypot(current_map_pose[0] - previous_map_pose[0], current_map_pose[1] - previous_map_pose[1]) / dt_s
+                yaw_delta = math.atan2(math.sin(current_map_pose[2] - previous_map_pose[2]), math.cos(current_map_pose[2] - previous_map_pose[2]))
+                max_map_yaw_rate_radps = abs(yaw_delta) / dt_s
+            previous_map_pose = current_map_pose
+    if not isinstance(slam_map_pose.get("source_child_frame_id"), str) or not slam_map_pose.get("source_child_frame_id"):
+        issues.append(_issue("MOBILE_MISSING_SLAM_SOURCE_FRAME", "error", f"frame {frame_index} missing slam source_child_frame_id", frame_index=frame_index))
+    if not isinstance(slam_map_pose.get("source_to_base_link_identity_assumed"), bool):
+        issues.append(_issue("MOBILE_BAD_SLAM_EXTRINSIC_FLAG", "error", f"frame {frame_index} slam identity-extrinsic flag must be boolean", frame_index=frame_index))
+    if slam_map_pose.get("source_to_base_link_identity_assumed") is True:
+        identity_assumption_count = 1
+    tf_age_ms = slam_map_pose.get("tf_age_ms")
+    if not _finite_number(tf_age_ms):
+        issues.append(_issue("MOBILE_MISSING_SLAM_TF_AGE", "error", f"frame {frame_index} missing finite slam TF age", frame_index=frame_index))
+    else:
+        max_slam_tf_age_ms = float(tf_age_ms)
+        if max_slam_tf_age_ms > limits["slam_tf_max_age_ms"]:
+            issues.append(_issue("MOBILE_SLAM_TF_STALE", "error", f"frame {frame_index} slam TF age {max_slam_tf_age_ms:.1f}ms exceeds {limits['slam_tf_max_age_ms']:.1f}ms", frame_index=frame_index, tf_age_ms=max_slam_tf_age_ms, limit_ms=limits["slam_tf_max_age_ms"]))
+        if max_slam_tf_age_ms < -limits["slam_tf_max_future_ms"]:
+            issues.append(_issue("MOBILE_SLAM_TF_FUTURE", "error", f"frame {frame_index} slam TF is {-max_slam_tf_age_ms:.1f}ms in the future; verify ROS host clock synchronization", frame_index=frame_index, tf_age_ms=max_slam_tf_age_ms, limit_ms=limits["slam_tf_max_future_ms"]))
+    return previous_map_pose, identity_assumption_count, max_slam_tf_age_ms, max_map_speed_mps, max_map_yaw_rate_radps
+
+
 def validate_mobile_training(
     items: Sequence[Mapping[str, Any]],
     config: Mapping[str, Any],
@@ -310,6 +402,7 @@ def validate_mobile_training(
 
     issues: list[dict[str, Any]] = []
     _validate_tcp_metadata(episode_info, issues)
+    velocity_only_base = _validate_base_observation_mode(episode_info, issues)
     limits = validated["limits"]
     max_deltas_ms = {"base_state": 0.0, "base_height": 0.0, "base_action": 0.0, "slam_tf": 0.0}
     max_slam_tf_age_ms = 0.0
@@ -361,43 +454,25 @@ def validate_mobile_training(
                 issues=issues,
             )
 
-        slam_map_pose = states_base.get("slam_map_pose")
-        if not isinstance(slam_map_pose, Mapping):
-            issues.append(_issue("MOBILE_MISSING_SLAM_POSE", "error", f"frame {frame_index} missing states.base.slam_map_pose", frame_index=frame_index))
-            slam_map_pose = {}
-        if slam_map_pose.get("frame_id") != validated["map_frame"] or slam_map_pose.get("child_frame_id") != validated["base_frame"]:
-            issues.append(_issue("MOBILE_SLAM_FRAME_MISMATCH", "error", f"frame {frame_index} slam pose must be {validated['map_frame']}->{validated['base_frame']}", frame_index=frame_index))
-        if not _finite_vector(slam_map_pose.get("quat_xyzw"), 4) or not all(_finite_number(slam_map_pose.get(key)) for key in ("x", "y", "z", "yaw")):
-            issues.append(_issue("MOBILE_BAD_SLAM_POSE", "error", f"frame {frame_index} slam pose must contain finite xyz/yaw/quaternion", frame_index=frame_index))
+        if velocity_only_base:
+            if "slam_map_pose" in states_base:
+                issues.append(_issue("MOBILE_UNEXPECTED_GLOBAL_POSE", "error", f"frame {frame_index} velocity-only episode must not contain states.base.slam_map_pose", frame_index=frame_index))
+            if "world_pose" in states_base:
+                issues.append(_issue("MOBILE_UNEXPECTED_GLOBAL_POSE", "error", f"frame {frame_index} velocity-only episode must not contain states.base.world_pose", frame_index=frame_index))
         else:
-            quaternion_norm = math.sqrt(sum(float(value) ** 2 for value in slam_map_pose["quat_xyzw"]))
-            if abs(quaternion_norm - 1.0) > 0.01:
-                issues.append(_issue("MOBILE_BAD_SLAM_QUATERNION", "error", f"frame {frame_index} slam quaternion norm is {quaternion_norm:.4f}", frame_index=frame_index))
-            sample_time = timestamps.get("sample_monotonic_ns")
-            if _finite_number(sample_time):
-                current_map_pose = (float(slam_map_pose["x"]), float(slam_map_pose["y"]), float(slam_map_pose["yaw"]), int(sample_time))
-                if previous_map_pose is not None and current_map_pose[3] > previous_map_pose[3]:
-                    dt_s = (current_map_pose[3] - previous_map_pose[3]) / 1e9
-                    max_map_speed_mps = max(max_map_speed_mps, math.hypot(current_map_pose[0] - previous_map_pose[0], current_map_pose[1] - previous_map_pose[1]) / dt_s)
-                    yaw_delta = math.atan2(math.sin(current_map_pose[2] - previous_map_pose[2]), math.cos(current_map_pose[2] - previous_map_pose[2]))
-                    max_map_yaw_rate_radps = max(max_map_yaw_rate_radps, abs(yaw_delta) / dt_s)
-                previous_map_pose = current_map_pose
-        if not isinstance(slam_map_pose.get("source_child_frame_id"), str) or not slam_map_pose.get("source_child_frame_id"):
-            issues.append(_issue("MOBILE_MISSING_SLAM_SOURCE_FRAME", "error", f"frame {frame_index} missing slam source_child_frame_id", frame_index=frame_index))
-        if not isinstance(slam_map_pose.get("source_to_base_link_identity_assumed"), bool):
-            issues.append(_issue("MOBILE_BAD_SLAM_EXTRINSIC_FLAG", "error", f"frame {frame_index} slam identity-extrinsic flag must be boolean", frame_index=frame_index))
-        if slam_map_pose.get("source_to_base_link_identity_assumed") is True:
-            identity_assumption_count += 1
-        tf_age_ms = slam_map_pose.get("tf_age_ms")
-        if not _finite_number(tf_age_ms):
-            issues.append(_issue("MOBILE_MISSING_SLAM_TF_AGE", "error", f"frame {frame_index} missing finite slam TF age", frame_index=frame_index))
-        else:
-            tf_age_ms = float(tf_age_ms)
+            previous_map_pose, identity_count, tf_age_ms, map_speed_mps, map_yaw_rate_radps = _validate_global_slam_pose(
+                states_base=states_base,
+                timestamps=timestamps,
+                validated=validated,
+                limits=limits,
+                frame_index=frame_index,
+                issues=issues,
+                previous_map_pose=previous_map_pose,
+            )
+            identity_assumption_count += identity_count
             max_slam_tf_age_ms = max(max_slam_tf_age_ms, tf_age_ms)
-            if tf_age_ms > limits["slam_tf_max_age_ms"]:
-                issues.append(_issue("MOBILE_SLAM_TF_STALE", "error", f"frame {frame_index} slam TF age {tf_age_ms:.1f}ms exceeds {limits['slam_tf_max_age_ms']:.1f}ms", frame_index=frame_index, tf_age_ms=tf_age_ms, limit_ms=limits["slam_tf_max_age_ms"]))
-            if tf_age_ms < -limits["slam_tf_max_future_ms"]:
-                issues.append(_issue("MOBILE_SLAM_TF_FUTURE", "error", f"frame {frame_index} slam TF is {-tf_age_ms:.1f}ms in the future; verify ROS host clock synchronization", frame_index=frame_index, tf_age_ms=tf_age_ms, limit_ms=limits["slam_tf_max_future_ms"]))
+            max_map_speed_mps = max(max_map_speed_mps, map_speed_mps)
+            max_map_yaw_rate_radps = max(max_map_yaw_rate_radps, map_yaw_rate_radps)
 
         velocity = states_base.get("velocity")
         if not isinstance(velocity, Mapping) or not all(_finite_number(velocity.get(key)) for key in ("vx", "vy", "wz")):
@@ -419,11 +494,13 @@ def validate_mobile_training(
         elif actions_base.get("frame_id") != validated["base_frame"] or actions_base.get("linear_unit") != "m/s" or actions_base.get("angular_unit") != "rad/s" or actions_base.get("z_cmd_unit") != "normalized":
             issues.append(_issue("MOBILE_BASE_ACTION_SEMANTICS", "error", f"frame {frame_index} base action frame or units are invalid", frame_index=frame_index))
 
-        for key, limit, require_past in (
+        alignment_specs = [
             ("base_state", limits["base_state_max_delta_ms"], False),
             ("base_height", limits["base_height_max_delta_ms"], False),
-            ("slam_tf", limits["slam_tf_max_delta_ms"], False),
-        ):
+        ]
+        if not velocity_only_base:
+            alignment_specs.append(("slam_tf", limits["slam_tf_max_delta_ms"], False))
+        for key, limit, require_past in alignment_specs:
             delta_ms = _validate_alignment(timestamps, key=key, max_abs_delta_ms=limit, require_past=require_past, frame_index=frame_index, issues=issues)
             if delta_ms is not None:
                 max_deltas_ms[key] = max(max_deltas_ms[key], abs(delta_ms))
@@ -436,12 +513,12 @@ def validate_mobile_training(
         if base_action_delta_ms is not None:
             max_deltas_ms["base_action"] = max(max_deltas_ms["base_action"], base_action_delta_ms)
 
-    if identity_assumption_count:
+    if not velocity_only_base and identity_assumption_count:
         severity = "warning" if validated["allow_identity_source_to_base_link"] else "error"
         issues.append(_issue("MOBILE_IDENTITY_EXTRINSIC_ASSUMPTION", severity, f"{identity_assumption_count}/{len(items)} frames use source_to_base_link_identity_assumed", frame_count=identity_assumption_count))
-    if max_map_speed_mps > limits["map_speed_warning_mps"]:
+    if not velocity_only_base and max_map_speed_mps > limits["map_speed_warning_mps"]:
         issues.append(_issue("MOBILE_MAP_SPEED_JUMP", "warning", f"map pose max speed {max_map_speed_mps:.3f}m/s exceeds {limits['map_speed_warning_mps']:.3f}m/s", max_speed_mps=max_map_speed_mps))
-    if max_map_yaw_rate_radps > limits["map_yaw_rate_warning_radps"]:
+    if not velocity_only_base and max_map_yaw_rate_radps > limits["map_yaw_rate_warning_radps"]:
         issues.append(_issue("MOBILE_MAP_YAW_JUMP", "warning", f"map pose max yaw rate {max_map_yaw_rate_radps:.3f}rad/s exceeds {limits['map_yaw_rate_warning_radps']:.3f}rad/s", max_yaw_rate_radps=max_map_yaw_rate_radps))
 
     errors = [issue for issue in issues if issue["severity"] == "error"]
@@ -450,6 +527,7 @@ def validate_mobile_training(
         "status": "error" if errors else "warning" if warnings else "ok",
         "frame_count": len(items),
         "present_frame_count": present_count,
+        "base_observation_mode": "velocity_only_base_link" if velocity_only_base else "global_slam_map_and_velocity",
         "identity_extrinsic_assumption_frames": identity_assumption_count,
         "timing": dict(validated["timing"]),
         "limits": dict(limits),

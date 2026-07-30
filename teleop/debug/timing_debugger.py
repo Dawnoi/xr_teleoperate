@@ -9,8 +9,15 @@ logger_mp = logging_mp.getLogger(__name__)
 
 
 class TimingDebugger:
-    def __init__(self, enabled: bool = False, interval_sec: float = 2.0, history_size: int = 400):
-        self.enabled = enabled
+    def __init__(
+        self,
+        enabled: bool = False,
+        interval_sec: float = 2.0,
+        history_size: int = 400,
+        collect_for_ui: bool = False,
+    ):
+        self.enabled = bool(enabled)
+        self.collect_enabled = bool(enabled or collect_for_ui)
         self.interval_sec = max(0.5, float(interval_sec))
         self.history_size = max(50, int(history_size))
         self._last_report_time = time.time()
@@ -30,12 +37,16 @@ class TimingDebugger:
         self.ik_total = 0.0
         self.ik_max = 0.0
         self.ik_count = 0
+        self.wbc_total = 0.0
+        self.wbc_max = 0.0
+        self.wbc_count = 0
         self.agv_total = 0.0
         self.agv_max = 0.0
         self.agv_count = 0
         self.loop_window = self._make_window()
         self.tele_window = self._make_window()
         self.ik_window = self._make_window()
+        self.wbc_window = self._make_window()
         self.agv_window = self._make_window()
 
     def _p95_ms(self, values):
@@ -44,7 +55,7 @@ class TimingDebugger:
         return float(np.percentile(np.asarray(values, dtype=float), 95) * 1000.0)
 
     def add_loop(self, dt: float, overrun: bool):
-        if not self.enabled:
+        if not self.collect_enabled:
             return
         self.loop_count += 1
         self.loop_total += dt
@@ -54,7 +65,7 @@ class TimingDebugger:
             self.overrun_count += 1
 
     def add_tele_fetch(self, dt: float, got_data: bool):
-        if not self.enabled:
+        if not self.collect_enabled:
             return
         self.tele_fetch_total += dt
         self.tele_fetch_max = max(self.tele_fetch_max, dt)
@@ -63,20 +74,70 @@ class TimingDebugger:
             self.tele_none_count += 1
 
     def add_ik(self, dt: float):
-        if not self.enabled:
+        if not self.collect_enabled:
             return
         self.ik_total += dt
         self.ik_max = max(self.ik_max, dt)
         self.ik_count += 1
         self.ik_window.append(float(dt))
 
+    def add_wbc(self, dt: float):
+        if not self.collect_enabled:
+            return
+        self.wbc_total += dt
+        self.wbc_max = max(self.wbc_max, dt)
+        self.wbc_count += 1
+        self.wbc_window.append(float(dt))
+
     def add_agv(self, dt: float):
-        if not self.enabled:
+        if not self.collect_enabled:
             return
         self.agv_total += dt
         self.agv_max = max(self.agv_max, dt)
         self.agv_count += 1
         self.agv_window.append(float(dt))
+
+    def snapshot(self):
+        """Return current in-memory timing metrics without emitting a log line."""
+        loop_avg_ms = (self.loop_total / self.loop_count * 1000.0) if self.loop_count else None
+        tele_avg_ms = (self.tele_fetch_total / self.loop_count * 1000.0) if self.loop_count else None
+        ik_avg_ms = (self.ik_total / self.ik_count * 1000.0) if self.ik_count else None
+        wbc_avg_ms = (self.wbc_total / self.wbc_count * 1000.0) if self.wbc_count else None
+        agv_avg_ms = (self.agv_total / self.agv_count * 1000.0) if self.agv_count else None
+        return {
+            "enabled": self.collect_enabled,
+            "loop": {
+                "count": int(self.loop_count),
+                "avg_ms": loop_avg_ms,
+                "p95_ms": self._p95_ms(self.loop_window) if self.loop_window else None,
+                "max_ms": self.loop_max * 1000.0 if self.loop_count else None,
+                "overrun_count": int(self.overrun_count),
+            },
+            "tele_fetch": {
+                "avg_ms": tele_avg_ms,
+                "p95_ms": self._p95_ms(self.tele_window) if self.tele_window else None,
+                "max_ms": self.tele_fetch_max * 1000.0 if self.tele_window else None,
+                "no_data_count": int(self.tele_none_count),
+            },
+            "ik": {
+                "count": int(self.ik_count),
+                "avg_ms": ik_avg_ms,
+                "p95_ms": self._p95_ms(self.ik_window) if self.ik_window else None,
+                "max_ms": self.ik_max * 1000.0 if self.ik_window else None,
+            },
+            "wbc": {
+                "count": int(self.wbc_count),
+                "avg_ms": wbc_avg_ms,
+                "p95_ms": self._p95_ms(self.wbc_window) if self.wbc_window else None,
+                "max_ms": self.wbc_max * 1000.0 if self.wbc_window else None,
+            },
+            "agv": {
+                "count": int(self.agv_count),
+                "avg_ms": agv_avg_ms,
+                "p95_ms": self._p95_ms(self.agv_window) if self.agv_window else None,
+                "max_ms": self.agv_max * 1000.0 if self.agv_window else None,
+            },
+        }
 
     def maybe_report(self, arm_ctrl=None, gripper_ctrl=None):
         if not self.enabled:
@@ -102,6 +163,7 @@ class TimingDebugger:
         loop_avg_ms = (self.loop_total / self.loop_count * 1000.0) if self.loop_count else 0.0
         tele_avg_ms = (self.tele_fetch_total / self.loop_count * 1000.0) if self.loop_count else 0.0
         ik_avg_ms = (self.ik_total / self.ik_count * 1000.0) if self.ik_count else 0.0
+        wbc_avg_ms = (self.wbc_total / self.wbc_count * 1000.0) if self.wbc_count else 0.0
         agv_avg_ms = (self.agv_total / self.agv_count * 1000.0) if self.agv_count else 0.0
 
         timing_msg = (
@@ -109,6 +171,7 @@ class TimingDebugger:
             f"loop avg/p95/max={loop_avg_ms:.1f}/{self._p95_ms(self.loop_window):.1f}/{self.loop_max * 1000.0:.1f} ms, "
             f"tele avg/p95/max={tele_avg_ms:.1f}/{self._p95_ms(self.tele_window):.1f}/{self.tele_fetch_max * 1000.0:.1f} ms, "
             f"ik avg/p95/max={ik_avg_ms:.1f}/{self._p95_ms(self.ik_window):.1f}/{self.ik_max * 1000.0:.1f} ms ({self.ik_count} calls), "
+            f"wbc avg/p95/max={wbc_avg_ms:.1f}/{self._p95_ms(self.wbc_window):.1f}/{self.wbc_max * 1000.0:.1f} ms ({self.wbc_count} calls), "
             f"agv avg/p95/max={agv_avg_ms:.1f}/{self._p95_ms(self.agv_window):.1f}/{self.agv_max * 1000.0:.1f} ms ({self.agv_count} calls)"
         )
         if arm_age is not None:

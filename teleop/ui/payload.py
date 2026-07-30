@@ -28,6 +28,8 @@ def build_web_payload(
     playback_status: dict[str, Any] | None = None,
     convert_status: dict[str, Any] | None = None,
     provider_status: dict[str, Any] | None = None,
+    teleop_latency: dict[str, Any] | None = None,
+    teleop_timing: dict[str, Any] | None = None,
     updated_mono: float | None = None,
     teleop_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -71,6 +73,8 @@ def build_web_payload(
         "playback": dict(playback_status or {}),
         "convert": dict(convert_status or {}),
         "provider": dict(provider_status or {"active_provider": "unknown", "real_replay": {"state": "disabled"}}),
+        "teleop_latency": dict(teleop_latency or {"current": None, "latest": None}),
+        "teleop_timing": dict(teleop_timing or {}),
         "updated_mono": float(time.monotonic() if updated_mono is None else updated_mono),
     }
     if teleop_status is not None:

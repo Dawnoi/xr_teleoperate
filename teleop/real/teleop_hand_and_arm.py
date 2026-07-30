@@ -34,8 +34,7 @@ import pinocchio as pin
 from teleop.real.args import parse_args
 from data_pipeline.recording.alignment import append_timed_sample
 from core.input.online_inference_provider import create_online_inference_provider
-from core.input.base import BaseCommandIntent
-from core.control.workspace_governor import WorkspaceGovernor, WorkspaceGovernorConfig
+from core.input.base import BaseCommandIntent, MotionIntent
 from core.input.teleop_input_provider import validate_lerobot_offline_episode
 from teleop.debug.inference_pose_debug import wrist_pose_to_debug_sample
 from teleop.debug.timing_debugger import TimingDebugger
@@ -200,16 +199,33 @@ def get_robot_wrist_poses(arm_ik, arm_q):
 
 
 def compute_arm_gravity_tauff(arm_ik_obj, arm_q):
-    try:
-        model = arm_ik_obj.reduced_robot.model
-        data = arm_ik_obj.reduced_robot.data
-        q = np.asarray(arm_q, dtype=float).copy()
-        dq = np.zeros(model.nv, dtype=float)
-        ddq = np.zeros(model.nv, dtype=float)
-        return pin.rnea(model, data, q, dq, ddq)
-    except Exception as e:
-        logger_mp.warning(f"[HOLD_TAUFF] failed to compute gravity compensation, fallback to zeros: {e}")
-        return np.zeros_like(np.asarray(arm_q, dtype=float))
+    if arm_ik_obj is None:
+        raise RuntimeError("arm gravity compensation requires an initialized arm_ik")
+    model = arm_ik_obj.reduced_robot.model
+    data = arm_ik_obj.reduced_robot.data
+    q = np.asarray(arm_q, dtype=float).reshape(-1)
+    if q.shape != (model.nq,) or not np.all(np.isfinite(q)):
+        raise ValueError(f"arm gravity compensation q must be a finite ({model.nq},) vector")
+    dq = np.zeros(model.nv, dtype=float)
+    ddq = np.zeros(model.nv, dtype=float)
+    tauff = np.asarray(pin.rnea(model, data, q, dq, ddq), dtype=float).reshape(-1)
+    if tauff.shape != (model.nv,) or not np.all(np.isfinite(tauff)):
+        raise RuntimeError(f"arm gravity compensation must return a finite ({model.nv},) vector")
+    return tauff
+
+
+def ctrl_g1_29_dual_arm_go_home(*, args, arm_ctrl, arm_ik) -> None:
+    if str(args.arm) != "G1_29":
+        arm_ctrl.ctrl_dual_arm_go_home()
+        return
+    if arm_ik is None:
+        raise RuntimeError("G1_29 Home requires an initialized arm_ik for gravity compensation")
+    arm_ctrl.ctrl_dual_arm_go_home(
+        gravity_tauff_fn=lambda arm_q: compute_arm_gravity_tauff(arm_ik, arm_q),
+        position_tolerance_rad=float(args.home_position_tolerance_rad),
+        gravity_update_hz=float(args.home_gravity_update_hz),
+        gravity_torque_limit_nm=float(args.home_gravity_torque_limit_nm),
+    )
 
 
 def start_keyboard_listener():
@@ -252,6 +268,7 @@ def cleanup_real_teleop_resources(
     *,
     args,
     arm_ctrl,
+    arm_ik,
     tv_wrapper,
     listen_keyboard_thread,
     recorder,
@@ -287,19 +304,16 @@ def cleanup_real_teleop_resources(
                 base_controller,
             )
 
-    try:
-        if arm_ctrl is not None:
-            if exit_go_home:
-                logger_mp.info("[EXIT] returning dual arms to home before shutdown...")
-                arm_ctrl.ctrl_dual_arm_go_home()
-            logger_mp.warning(
-                "[EXIT] holding dual arms at home for %.1fs before shutdown. "
-                "Keep clear and support the robot if needed.",
-                exit_home_hold_sec,
-            )
-            time.sleep(exit_home_hold_sec)
-    except Exception as e:
-        logger_mp.error(f"Failed to hold dual arms at home before shutdown: {e}")
+    if arm_ctrl is not None:
+        if exit_go_home:
+            logger_mp.info("[EXIT] returning dual arms to home before shutdown...")
+            ctrl_g1_29_dual_arm_go_home(args=args, arm_ctrl=arm_ctrl, arm_ik=arm_ik)
+        logger_mp.warning(
+            "[EXIT] holding dual arms at home for %.1fs before shutdown. "
+            "Keep clear and support the robot if needed.",
+            exit_home_hold_sec,
+        )
+        time.sleep(exit_home_hold_sec)
 
     try:
         stop_listening()
@@ -396,7 +410,11 @@ if __name__ == '__main__':
         workspace_max=workspace_max,
         tapered_workspace_params=tapered_workspace_params,
     )
-    timing_debugger = TimingDebugger(enabled=args.timing_debug, interval_sec=args.timing_debug_interval)
+    timing_debugger = TimingDebugger(
+        enabled=args.timing_debug,
+        interval_sec=args.timing_debug_interval,
+        collect_for_ui=args.ui,
+    )
     state_history_size = max(32, int(args.frequency * 6))
     action_history_size = max(32, int(args.frequency * 6))
     base_history_size = max(32, int(getattr(args, "base_history_size", 512)))
@@ -454,27 +472,20 @@ if __name__ == '__main__':
         if args.mobile_manipulation_mode == "mobile_ik_qp":
             if base_state_receiver is None:
                 raise RuntimeError("mobile_ik_qp requires the G1D odometry and height receiver")
-            mobile_governor = WorkspaceGovernor(
-                WorkspaceGovernorConfig(
-                    mode=workspace_mode,
-                    workspace_min=workspace_min.copy(),
-                    workspace_max=workspace_max.copy(),
-                    tapered=dict(tapered_workspace_params),
-                    side_workspaces=side_workspaces,
-                    max_forward_speed=float(args.base_max_vx),
-                    max_base_yaw_rate=float(args.base_max_wz),
-                    max_column_command=float(args.base_max_z),
-                    column_speed_mps=0.10,
-                    max_torso_yaw_rate=float(args.mobile_max_torso_yaw_rate),
-                    column_minimum=0.0,
-                    column_maximum=float(args.mobile_column_travel_m),
-                )
-            )
             mobile_coordinator = MobileManipulationCoordinator(
-                mobile_governor,
                 state_timeout_sec=float(args.mobile_state_timeout_sec),
+                column_travel_m=float(args.mobile_column_travel_m),
+                command_horizon_sec=float(args.mobile_wbc_command_horizon_sec),
+                max_position_lead_rad=float(args.mobile_wbc_max_position_lead_rad),
+                enable_collision_avoidance=not bool(args.disable_mobile_wbc_collision_avoidance),
             )
-            logger_mp.info("[MOBILE_IK_QP] enabled: 4D base/column/torso governor with legacy G1_29 IK")
+            logger_mp.info(
+                "[MOBILE_IK_QP] enabled: measured-state whole-body QP; "
+                "collision_avoidance=%s, command_horizon=%.3fs, max_position_lead=%.3frad",
+                not bool(args.disable_mobile_wbc_collision_avoidance),
+                float(args.mobile_wbc_command_horizon_sec),
+                float(args.mobile_wbc_max_position_lead_rad),
+            )
         elif args.record_mobile_training_state:
             logger_mp.info("[MOBILE_RECORD] enabled: base_link-local EEF pose and SLAM map base state")
 
@@ -540,15 +551,18 @@ if __name__ == '__main__':
                 waist_yaw,
             )
 
-        def current_online_mobile_inputs(arm_q):
-            if base_state_receiver is None or dex1_tcp_fk is None or mobile_kinematics is None:
-                raise RuntimeError("mobile_tcp23 requires initialized base state, TCP FK, and G1D kinematics")
+        def current_online_mobile_inputs(arm_q, *, include_tcp: bool):
+            profile_name = "mobile_tcp23" if include_tcp else "mobile_joint_base"
+            if base_state_receiver is None:
+                raise RuntimeError(f"{profile_name} requires initialized base state")
+            if include_tcp and (dex1_tcp_fk is None or mobile_kinematics is None):
+                raise RuntimeError("mobile_tcp23 requires initialized TCP FK and G1D kinematics")
             if not base_state_receiver.is_alive():
-                raise RuntimeError("mobile_tcp23 base state receiver is not alive")
+                raise RuntimeError(f"{profile_name} base state receiver is not alive")
             odom_sample, height_sample = base_state_receiver.snapshot_latest()
             slam_history = base_state_receiver.snapshot_slam_tf_history()
             if odom_sample is None or height_sample is None or slam_history is None or not slam_history:
-                raise RuntimeError("MOBILE_TCP23_STATE_MISSING")
+                raise RuntimeError(f"{profile_name.upper()}_STATE_MISSING")
             slam_sample = dict(slam_history[-1])
             now_ns = time.monotonic_ns()
             timeout_ns = int(float(args.mobile_state_timeout_sec) * 1e9)
@@ -560,24 +574,38 @@ if __name__ == '__main__':
             stale = {name: age for name, age in ages.items() if age < 0 or age > timeout_ns}
             if stale:
                 raise RuntimeError(
-                    "MOBILE_TCP23_STATE_STALE "
+                    f"{profile_name.upper()}_STATE_STALE "
                     + " ".join(f"{name}_age_ms={age / 1e6:.1f}" for name, age in stale.items())
                     + f" timeout_ms={timeout_ns / 1e6:.1f}"
                 )
             if str(slam_sample.get("frame_id")) != "slamware_map" or str(slam_sample.get("child_frame_id")) != "base_link":
                 raise RuntimeError(
-                    "MOBILE_TCP23_SLAM_FRAME_INVALID "
+                    f"{profile_name.upper()}_SLAM_FRAME_INVALID "
                     f"frame_id={slam_sample.get('frame_id')!r} child_frame_id={slam_sample.get('child_frame_id')!r}"
                 )
             velocity = odom_sample.get("velocity")
             if not isinstance(velocity, dict) or str(velocity.get("frame_id")) != "base_link":
-                raise RuntimeError("MOBILE_TCP23_BASE_VELOCITY_FRAME_INVALID: expected base_link")
+                raise RuntimeError(f"{profile_name.upper()}_BASE_VELOCITY_FRAME_INVALID: expected base_link")
             column_height = column_position_from_raw_height(
                 raw_height=float(height_sample["height"]["z"]),
                 raw_minimum=float(args.mobile_height_raw_minimum),
                 raw_maximum=float(args.mobile_height_raw_maximum),
                 column_travel_m=float(args.mobile_column_travel_m),
             )
+            map_pose = np.asarray(
+                [slam_sample["x"], slam_sample["y"], slam_sample["yaw"]],
+                dtype=float,
+            )
+            base_velocity = np.asarray([velocity["vx"], velocity["wz"]], dtype=float)
+            if not np.all(np.isfinite(map_pose)) or not np.all(np.isfinite(base_velocity)):
+                raise RuntimeError(f"{profile_name.upper()}_BASE_STATE_NONFINITE")
+            if not include_tcp:
+                return {
+                    "current_map_base_pose": map_pose,
+                    "current_base_velocity_base_link": base_velocity,
+                    "current_column_height_m": column_height,
+                }
+
             waist_yaw = float(arm_ctrl.get_current_waist_yaw())
             left_tcp, right_tcp = get_robot_dex1_tcp_poses_base_link(
                 arm_q,
@@ -600,13 +628,6 @@ if __name__ == '__main__':
                     raise RuntimeError(f"MOBILE_TCP23_IK_EE_TARGET_INVALID: side={side}")
                 return legacy_ee_ik
 
-            map_pose = np.asarray(
-                [slam_sample["x"], slam_sample["y"], slam_sample["yaw"]],
-                dtype=float,
-            )
-            base_velocity = np.asarray([velocity["vx"], velocity["wz"]], dtype=float)
-            if not np.all(np.isfinite(map_pose)) or not np.all(np.isfinite(base_velocity)):
-                raise RuntimeError("MOBILE_TCP23_BASE_STATE_NONFINITE")
             return {
                 "current_left_robot_tcp_pose_base_link": left_tcp,
                 "current_right_robot_tcp_pose_base_link": right_tcp,
@@ -642,8 +663,29 @@ if __name__ == '__main__':
                 return "mobile_tcp23 unavailable: requires " + ", ".join(missing)
             return ""
 
+        def mobile_joint_base_runtime_error() -> str:
+            missing: list[str] = []
+            if str(args.arm) != "G1_29":
+                missing.append("--arm G1_29")
+            if str(args.ee) != "dex1" or bool(args.no_gripper):
+                missing.append("--ee dex1 without --no-gripper")
+            if args.mobile_manipulation_mode == "mobile_ik_qp":
+                missing.append("mobile_ik_qp disabled")
+            if args.base_controller != "g1d_agv" or not args.base_motion:
+                missing.append("--base-controller g1d_agv --base-motion")
+            if args.base_velocity_frame != "base_link":
+                missing.append("--base-velocity-frame base_link")
+            if base_state_receiver is None:
+                missing.append("base state receiver")
+            elif not base_state_receiver.is_alive():
+                missing.append("live base state receiver")
+            if missing:
+                return "mobile_joint_base unavailable: requires " + ", ".join(missing)
+            return ""
+
         def ui_inference_profiles() -> list[dict[str, object]]:
             mobile_error = mobile_tcp23_runtime_error()
+            mobile_joint_error = mobile_joint_base_runtime_error()
             return [
                 {
                     "id": "pi05_dual_arm_20d",
@@ -656,6 +698,12 @@ if __name__ == '__main__':
                     "label": "移动操作 TCP23",
                     "available": not bool(mobile_error),
                     "reason": mobile_error,
+                },
+                {
+                    "id": "mobile_joint_base",
+                    "label": "移动操作 Joint19",
+                    "available": not bool(mobile_joint_error),
+                    "reason": mobile_joint_error,
                 },
             ]
 
@@ -727,6 +775,8 @@ if __name__ == '__main__':
                     ready=READY,
                     stopping=STOP,
                     provider_status=provider_runtime.status(),
+                    latency_snapshot=latency_tracker.get_snapshot() if latency_tracker is not None else None,
+                    timing_snapshot=timing_debugger.snapshot(),
                     base_state_receiver=base_state_receiver,
                     base_stop_state=base_stop_state,
                 )
@@ -745,7 +795,7 @@ if __name__ == '__main__':
             logger_mp.info("[UI] web control enabled at http://%s:%d", ui_server.host, ui_server.port)
 
         logger_mp.info("Move arms to home pose before entering teleop wait state...")
-        arm_ctrl.ctrl_dual_arm_go_home()
+        ctrl_g1_29_dual_arm_go_home(args=args, arm_ctrl=arm_ctrl, arm_ik=arm_ik)
 
         logger_mp.info("----------------------------------------------------------------")
         logger_mp.info("🟢  Press [r] to start syncing the robot with your movements.")
@@ -807,6 +857,8 @@ if __name__ == '__main__':
                         ready=READY,
                         stopping=STOP,
                         provider_status=provider_runtime.status(),
+                        latency_snapshot=latency_tracker.get_snapshot() if latency_tracker is not None else None,
+                        timing_snapshot=timing_debugger.snapshot(),
                         base_state_receiver=base_state_receiver,
                         base_stop_state=base_stop_state,
                     )
@@ -952,6 +1004,8 @@ if __name__ == '__main__':
                         ready=READY,
                         stopping=STOP,
                         provider_status=provider_runtime.status(),
+                        latency_snapshot=latency_tracker.get_snapshot() if latency_tracker is not None else None,
+                        timing_snapshot=timing_debugger.snapshot(),
                         base_state_receiver=base_state_receiver,
                         base_stop_state=base_stop_state,
                     )
@@ -1170,7 +1224,13 @@ if __name__ == '__main__':
                 active_session = getattr(active_provider, "session", None)
                 active_profile = str(getattr(getattr(active_session, "config", None), "protocol_profile", ""))
                 if active_profile == "mobile_tcp23":
-                    provider_get_sample_kwargs.update(current_online_mobile_inputs(current_lr_arm_q))
+                    provider_get_sample_kwargs.update(
+                        current_online_mobile_inputs(current_lr_arm_q, include_tcp=True)
+                    )
+                elif active_profile == "mobile_joint_base":
+                    provider_get_sample_kwargs.update(
+                        current_online_mobile_inputs(current_lr_arm_q, include_tcp=False)
+                    )
             if is_ui_raw_replay and ui_command_bus is not None:
                 provider_get_sample_kwargs["raw_replay_stop_requested"] = ui_command_bus.raw_replay_stop_requested
             sample = active_provider.get_sample(
@@ -1322,11 +1382,18 @@ if __name__ == '__main__':
                 is_ui_raw_replay=is_ui_raw_replay,
                 raw_replay_base_source=raw_replay_base_source,
             )
-            manual_torso_yaw_rate = map_manual_torso_yaw_rate(
-                args=args,
-                tele_data=tele_data,
-                home_return_active=home_return_active,
+            active_protocol_profile = str(
+                getattr(getattr(getattr(active_provider, "session", None), "config", None), "protocol_profile", "")
             )
+            if active_input_provider == "online_inference" and active_protocol_profile == "mobile_joint_base":
+                manual_torso_yaw_rate = 0.0
+            else:
+                manual_torso_yaw_rate = map_manual_torso_yaw_rate(
+                    args=args,
+                    tele_data=tele_data,
+                    home_return_active=home_return_active,
+                )
+            wbc_ms = None
             if args.mobile_manipulation_mode == "mobile_ik_qp" and not is_ui_raw_replay:
                 nominal_source = runtime_base_source or "controller"
                 nominal_intent = map_base_command(
@@ -1336,10 +1403,15 @@ if __name__ == '__main__':
                     base_intent=getattr(sample, "base_intent", None),
                     base_command_source=nominal_source,
                 )
+                wbc_start = time.perf_counter()
                 coordinated = mobile_coordinator.step(
                     motion_intent=motion_intent,
                     enabled={"left": left_arm_enabled, "right": right_arm_enabled},
                     rising={"left": left_takeover_rising_edge, "right": right_takeover_rising_edge},
+                    settling={
+                        "left": left_zero_takeover_this_frame,
+                        "right": right_zero_takeover_this_frame,
+                    },
                     nominal_body_command=np.array([
                         nominal_intent.vx,
                         nominal_intent.wz,
@@ -1347,12 +1419,23 @@ if __name__ == '__main__':
                         manual_torso_yaw_rate,
                     ]),
                     mobile_state=current_mobile_state(),
+                    arm_q=current_lr_arm_q,
                     now_monotonic_ns=time.monotonic_ns(),
                     dt=control_dt,
                     home_active=home_return_active,
                     stop_active=STOP,
                 )
-                motion_intent = coordinated.motion_intent_for_ik
+                wbc_ms = (time.perf_counter() - wbc_start) * 1000.0
+                timing_debugger.add_wbc(wbc_ms / 1000.0)
+                motion_intent = MotionIntent(
+                    kind="joint_position",
+                    arm_q=coordinated.arm_q_target,
+                    gripper_q=motion_intent.gripper_q,
+                    timestamp=motion_intent.timestamp,
+                    frame_index=motion_intent.frame_index,
+                    source="mobile_ik_qp:wbc",
+                    metadata=motion_intent.metadata,
+                )
                 arm_ctrl.set_waist_yaw_target(coordinated.waist_yaw_target)
                 final_base_intent = BaseCommandIntent(
                     vx=float(coordinated.final_body_command[0]),
@@ -1537,6 +1620,7 @@ if __name__ == '__main__':
                         recv_q=current_lr_arm_q,
                         extra={
                             **provider_trace_extra,
+                            "input_provider": str(active_input_provider),
                             "tele_fetch_ms": tele_fetch_ms,
                             "takeover_logic_ms": takeover_logic_ms,
                             "base_control_ms": base_control_ms,
@@ -1554,6 +1638,7 @@ if __name__ == '__main__':
                             "base_async_cycle_avg_ms": base_async_cycle_avg_ms,
                             "base_async_queue_avg_ms": base_async_queue_avg_ms,
                             "ik_ms": ik_ms,
+                            "wbc_ms": wbc_ms,
                             "safety_ms": safety_ms,
                             "gravity_ms": gravity_ms,
                             "arm_cmd_input_ms": arm_command.arm_cmd_input_ms,
@@ -1604,6 +1689,26 @@ if __name__ == '__main__':
                 latency_tracker.set_fields(trace_seq, ctrl_dual_arm_call_ms=ctrl_dual_arm_call_ms)
             if active_input_provider == "online_inference":
                 metadata = getattr(motion_intent, "metadata", {}) or {}
+                if motion_intent.kind == "joint_position":
+                    trajectory_debug = {
+                        "sample_monotonic_ns": int(time.monotonic_ns()),
+                        "representation": "joint_position",
+                        "target_q": np.asarray(motion_intent.arm_q, dtype=float).tolist(),
+                        "feedback_q": current_lr_arm_q.tolist(),
+                    }
+                else:
+                    trajectory_debug = {
+                        "sample_monotonic_ns": int(time.monotonic_ns()),
+                        "representation": "wrist_pose",
+                        "left_target": wrist_pose_to_debug_sample(motion_intent.left_wrist_pose),
+                        "right_target": wrist_pose_to_debug_sample(motion_intent.right_wrist_pose),
+                        "left_feedback": wrist_pose_to_debug_sample(current_left_wrist_pose),
+                        "right_feedback": wrist_pose_to_debug_sample(current_right_wrist_pose),
+                        "left_target_xyz": np.asarray(motion_intent.left_wrist_pose, dtype=float)[:3, 3].tolist(),
+                        "right_target_xyz": np.asarray(motion_intent.right_wrist_pose, dtype=float)[:3, 3].tolist(),
+                        "left_feedback_xyz": np.asarray(current_left_wrist_pose, dtype=float)[:3, 3].tolist(),
+                        "right_feedback_xyz": np.asarray(current_right_wrist_pose, dtype=float)[:3, 3].tolist(),
+                    }
                 provider_runtime.note_online_inference_runtime_debug(
                     {
                         "updated_monotonic_ns": int(time.monotonic_ns()),
@@ -1611,6 +1716,7 @@ if __name__ == '__main__':
                             "http_roundtrip_ms": metadata.get("online_obs_send_to_action_recv_ms"),
                             "tele_fetch_ms": float(tele_fetch_ms),
                             "ik_ms": float(ik_ms),
+                            "wbc_ms": wbc_ms,
                             "safety_ms": float(safety_ms),
                             "gravity_ms": float(gravity_ms),
                             "provider_feedback_ms": float(provider_feedback_ms),
@@ -1622,17 +1728,7 @@ if __name__ == '__main__':
                             "command_delta_l2": float(np.linalg.norm(sol_q - current_lr_arm_q)),
                             "target_submitted": True,
                         },
-                        "trajectory": {
-                            "sample_monotonic_ns": int(time.monotonic_ns()),
-                            "left_target": wrist_pose_to_debug_sample(motion_intent.left_wrist_pose),
-                            "right_target": wrist_pose_to_debug_sample(motion_intent.right_wrist_pose),
-                            "left_feedback": wrist_pose_to_debug_sample(current_left_wrist_pose),
-                            "right_feedback": wrist_pose_to_debug_sample(current_right_wrist_pose),
-                            "left_target_xyz": np.asarray(motion_intent.left_wrist_pose, dtype=float)[:3, 3].tolist(),
-                            "right_target_xyz": np.asarray(motion_intent.right_wrist_pose, dtype=float)[:3, 3].tolist(),
-                            "left_feedback_xyz": np.asarray(current_left_wrist_pose, dtype=float)[:3, 3].tolist(),
-                            "right_feedback_xyz": np.asarray(current_right_wrist_pose, dtype=float)[:3, 3].tolist(),
-                        },
+                        "trajectory": trajectory_debug,
                     }
                 )
                 if latency_tracker is not None:
@@ -1645,7 +1741,9 @@ if __name__ == '__main__':
                 stop_base_once("raw_replay_final_frame")
                 provider_runtime.finish_raw_replay(reason="sample_done")
                 logger_mp.info("[UI_REPLAY] raw replay reached final frame -> HOLD.")
-            if home_return_active and np.all(np.abs(sol_q - home_target_q) < 0.05):
+            if home_return_active and np.all(
+                np.abs(sol_q - home_target_q) < float(args.home_position_tolerance_rad)
+            ):
                 home_return_active = False
                 calibration_hold_q = current_hold_q.copy()
                 calibration_hold_tauff = current_hold_tauff.copy()
@@ -1706,6 +1804,8 @@ if __name__ == '__main__':
                             ready=READY,
                             stopping=STOP,
                             provider_status=provider_runtime.status(),
+                            latency_snapshot=latency_tracker.get_snapshot() if latency_tracker is not None else None,
+                            timing_snapshot=timing_debugger.snapshot(),
                             base_state_receiver=base_state_receiver,
                             base_stop_state=base_stop_state,
                         )
@@ -1730,6 +1830,7 @@ if __name__ == '__main__':
         cleanup_real_teleop_resources(
             args=args,
             arm_ctrl=arm_ctrl or components.arm_ctrl,
+            arm_ik=arm_ik or components.arm_ik,
             tv_wrapper=tv_wrapper or components.tv_wrapper,
             listen_keyboard_thread=listen_keyboard_thread,
             recorder=recorder or components.recorder,

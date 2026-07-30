@@ -446,52 +446,90 @@ class G1_29_ArmController:
         '''Return current state dq of the left and right arm motors.'''
         return np.array([self.lowstate_buffer.GetData().motor_state[id].dq for id in G1_29_JointArmIndex])
     
-    def ctrl_dual_arm_go_home(self):
-        '''Move both the left and right arms of the robot to their home position by setting the target joint angles (q) and torques (tau) to zero.'''
+    def ctrl_dual_arm_go_home(
+        self,
+        *,
+        gravity_tauff_fn,
+        position_tolerance_rad: float,
+        gravity_update_hz: float,
+        gravity_torque_limit_nm: float,
+    ):
+        '''Move G1_29 arms Home with measured-state gravity feed-forward.'''
+        if not callable(gravity_tauff_fn):
+            raise TypeError("G1_29 Home requires a callable gravity_tauff_fn")
+        position_tolerance_rad = float(position_tolerance_rad)
+        gravity_update_hz = float(gravity_update_hz)
+        gravity_torque_limit_nm = float(gravity_torque_limit_nm)
+        if not np.isfinite(position_tolerance_rad) or position_tolerance_rad <= 0.0:
+            raise ValueError("G1_29 Home position_tolerance_rad must be positive and finite")
+        if not np.isfinite(gravity_update_hz) or gravity_update_hz <= 0.0:
+            raise ValueError("G1_29 Home gravity_update_hz must be positive and finite")
+        if not np.isfinite(gravity_torque_limit_nm) or gravity_torque_limit_nm <= 0.0:
+            raise ValueError("G1_29 Home gravity_torque_limit_nm must be positive and finite")
         logger_mp.info("[G1_29_ArmController] ctrl_dual_arm_go_home start...")
         max_attempts = 100
         current_attempts = 0
         home_target_q = np.zeros(14)
         start_q = self.get_current_dual_arm_q().copy()
-        with self.ctrl_lock:
-            self.q_target = home_target_q.copy()
-            # self.tauff_target = np.zeros(14)
-        tolerance = 0.05  # Tolerance threshold for joint angles to determine "close to zero", can be adjusted based on your motor's precision requirements
         logger_mp.info(
-            "[HOME] start_q=%s target_q=%s max_abs_error=%.6f tolerance=%.6f",
+            "[HOME] start_q=%s target_q=%s max_abs_error=%.6f tolerance=%.6f gravity_update_hz=%.1f gravity_torque_limit_nm=%.3f",
             np.array2string(start_q, precision=4),
             np.array2string(home_target_q, precision=4),
             float(np.max(np.abs(start_q - home_target_q))),
-            tolerance,
+            position_tolerance_rad,
+            gravity_update_hz,
+            gravity_torque_limit_nm,
         )
+        last_max_abs_tauff = 0.0
         while current_attempts < max_attempts:
-            current_q = self.get_current_dual_arm_q()
+            current_q = np.asarray(self.get_current_dual_arm_q(), dtype=float).reshape(-1)
+            if current_q.shape != (14,) or not np.all(np.isfinite(current_q)):
+                raise RuntimeError("G1_29 Home measured arm q must be a finite 14D vector")
+            tauff_target = np.asarray(gravity_tauff_fn(current_q.copy()), dtype=float).reshape(-1)
+            if tauff_target.shape != (14,) or not np.all(np.isfinite(tauff_target)):
+                raise RuntimeError("G1_29 Home gravity feed-forward must be a finite 14D vector")
+            max_abs_tauff = float(np.max(np.abs(tauff_target)))
+            last_max_abs_tauff = max_abs_tauff
+            if max_abs_tauff > gravity_torque_limit_nm:
+                raise RuntimeError(
+                    "G1_29_HOME_GRAVITY_TAUFF_OUT_OF_RANGE "
+                    f"max_abs_nm={max_abs_tauff:.6f} limit_nm={gravity_torque_limit_nm:.6f}"
+                )
+            with self.ctrl_lock:
+                self.q_target = home_target_q.copy()
+                self.tauff_target = tauff_target.copy()
             max_abs_error = float(np.max(np.abs(current_q - home_target_q)))
-            if max_abs_error < tolerance:
+            if max_abs_error < position_tolerance_rad:
                 if self.motion_mode:
                     for weight in np.linspace(1, 0, num=101):
                         self.msg.motor_cmd[G1_29_JointIndex.kNotUsedJoint0].q = weight;
                         time.sleep(0.02)
-                logger_mp.info("[G1_29_ArmController] both arms have reached the home position.")
+                logger_mp.info(
+                    "[G1_29_ArmController] both arms reached Home: max_abs_error=%.6f max_abs_tauff_nm=%.6f.",
+                    max_abs_error,
+                    max_abs_tauff,
+                )
                 return
             current_attempts += 1
             if current_attempts % 20 == 0:
                 logger_mp.info(
-                    "[HOME] progress attempt=%d/%d q=%s max_abs_error=%.6f",
+                    "[HOME] progress attempt=%d/%d q=%s max_abs_error=%.6f max_abs_tauff_nm=%.6f",
                     current_attempts,
                     max_attempts,
                     np.array2string(current_q, precision=4),
                     max_abs_error,
+                    max_abs_tauff,
                 )
-            time.sleep(0.05)
+            time.sleep(1.0 / gravity_update_hz)
         final_q = self.get_current_dual_arm_q().copy()
         logger_mp.error(
-            "[HOME] timeout: start_q=%s final_q=%s target_q=%s max_abs_error=%.6f tolerance=%.6f attempts=%d",
+            "[HOME] timeout: start_q=%s final_q=%s target_q=%s max_abs_error=%.6f tolerance=%.6f max_abs_tauff_nm=%.6f attempts=%d",
             np.array2string(start_q, precision=4),
             np.array2string(final_q, precision=4),
             np.array2string(home_target_q, precision=4),
             float(np.max(np.abs(final_q - home_target_q))),
-            tolerance,
+            position_tolerance_rad,
+            last_max_abs_tauff,
             max_attempts,
         )
 

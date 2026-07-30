@@ -392,7 +392,7 @@ def setup_dex1_tcp_fk(args, components: RealTeleopComponents, log) -> None:
         repo_root / "assets/dex1_1/dex1_1.urdf",
     )
     if bool(getattr(args, "record_mobile_training_state", False)):
-        apply_dex1_tcp_episode_metadata(components)
+        apply_dex1_tcp_episode_metadata(args, components)
     metadata = components.dex1_tcp_fk.metadata()
     log.info("[DEX1_TCP_FK] G1D FK URDF: %s", metadata["robot_fk_urdf"])
     log.info("[DEX1_TCP_FK] Dex1.1 model URDF: %s", metadata["eef_model_urdf"])
@@ -405,12 +405,24 @@ def setup_dex1_tcp_fk(args, components: RealTeleopComponents, log) -> None:
     )
 
 
-def apply_dex1_tcp_episode_metadata(components: RealTeleopComponents) -> None:
+def apply_dex1_tcp_episode_metadata(args, components: RealTeleopComponents) -> None:
     if components.dex1_tcp_fk is None:
         return
     if components.recorder is None:
         raise RuntimeError("Dex1 TCP recording metadata requires an EpisodeWriter")
-    components.recorder.update_episode_info(components.dex1_tcp_fk.metadata())
+    metadata = components.dex1_tcp_fk.metadata()
+    if bool(getattr(args, "record_mobile_training_state", False)):
+        velocity_only = bool(getattr(args, "record_base_velocity_only", False))
+        metadata.update(
+            {
+                "mobile_base_observation_mode": (
+                    "velocity_only_base_link" if velocity_only else "global_slam_map_and_velocity"
+                ),
+                "mobile_base_absolute_pose_recorded": not velocity_only,
+                "mobile_base_velocity_frame": str(getattr(args, "base_velocity_frame", "") or ""),
+            }
+        )
+    components.recorder.update_episode_info(metadata)
 
 
 def switch_recording_root(args, components: RealTeleopComponents, root_dir: str | Path, log) -> None:
@@ -432,7 +444,7 @@ def switch_recording_root(args, components: RealTeleopComponents, root_dir: str 
     args.task_dir = str(root.parent)
     args.task_name = root.name
     components.recorder = setup_recorder(args, validation_manager)
-    apply_dex1_tcp_episode_metadata(components)
+    apply_dex1_tcp_episode_metadata(args, components)
     components.recording_flow = setup_recording_flow(args, components, log)
     log.info("[RECORD_ROOT] switched recording root to %s", root)
 
@@ -451,15 +463,15 @@ def setup_cameras(args, log) -> CameraRuntime:
 
 def setup_base_state_receiver(args, log):
     mobile_mode = str(getattr(args, "mobile_manipulation_mode", "direct_ik")) == "mobile_ik_qp"
-    mobile_tcp23 = str(getattr(args, "online_inference_protocol_profile", "")) == "mobile_tcp23"
-    if not bool(getattr(args, "record_base", False)) and not mobile_mode and not mobile_tcp23:
+    mobile_profile = str(getattr(args, "online_inference_protocol_profile", "")) in {"mobile_tcp23", "mobile_joint_base"}
+    if not bool(getattr(args, "record_base", False)) and not mobile_mode and not mobile_profile:
         return None
     receiver = BaseStateReceiver(
         odom_topic=args.base_odom_topic,
         height_topic=args.base_height_topic,
         history_size=args.base_history_size,
         network_interface=args.network_interface,
-        record_slam_map_pose=bool(args.record_slam_map_pose or mobile_tcp23),
+        record_slam_map_pose=bool(args.record_slam_map_pose or mobile_profile),
         slam_pose_source_frame=args.slam_pose_source_frame,
         base_velocity_frame=args.base_velocity_frame,
         slam_chain_max_skew_ms=args.slam_chain_max_skew_ms,
@@ -477,7 +489,7 @@ def setup_base_state_receiver(args, log):
         "[BASE_STATE] enabled: odom_topic=%s, height_topic=%s, slam_pose_source_frame=%s, mobile_ik_qp=%s",
         args.base_odom_topic,
         args.base_height_topic or "<disabled>",
-        args.slam_pose_source_frame if (args.record_slam_map_pose or mobile_tcp23) else "<disabled>",
+        args.slam_pose_source_frame if (args.record_slam_map_pose or mobile_profile) else "<disabled>",
         mobile_mode,
     )
     return receiver

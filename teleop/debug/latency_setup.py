@@ -22,7 +22,7 @@ def setup_latency_tracker(args: Any, arm_ctrl: Any, log: Any) -> SimpleLatencyTr
         log_each_trace=file_trace_enabled,
         timeout_s=float(args.latency_timeout),
         ui_memory_provider_scope=(
-            {"online_inference", "lerobot_offline"}
+            {"xr", "online_inference", "lerobot_offline"}
             if memory_trace_enabled and not file_trace_enabled
             else None
         ),
