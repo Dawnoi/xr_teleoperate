@@ -52,6 +52,7 @@ from core.control.arm_workspace_safety import (
     clamp_dual_wrist_poses_to_tapered_workspace,
 )
 from teleop.sim.g1d_mujoco_builder import prepare_g1d_mobile_scene
+from core.input.teleop_input_provider import create_teleop_input_provider
 from core.input.xr_robotics_wrapper import XRRoboticsWrapper
 
 
@@ -87,6 +88,41 @@ def parse_args():
         choices=["controller", "hand"],
         default="controller",
         help="XR input source. hand uses XR hand wrist as arm locator and pinch as grip/deadman.",
+    )
+    parser.add_argument(
+        "--input-provider",
+        type=str,
+        choices=["xr", "vive"],
+        default="xr",
+        help="MuJoCo teleop input provider. Use vive to mirror real robot VIVE tracker input.",
+    )
+    parser.add_argument("--vive-left-tracker-topic", type=str, default="/vive_pose_l")
+    parser.add_argument("--vive-right-tracker-topic", type=str, default="/vive_pose_r")
+    parser.add_argument("--vive-tracker-timeout-sec", type=float, default=0.25)
+    parser.add_argument("--vive-position-scale", type=float, default=1.0)
+    parser.add_argument("--vive-offset-xyz", type=float, nargs=3, default=[0.0, 0.0, 0.0])
+    parser.add_argument("--vive-enable-left-topic", type=str, default="/vive/enable_left")
+    parser.add_argument("--vive-enable-right-topic", type=str, default="/vive/enable_right")
+    parser.add_argument("--vive-calibration-file", type=str, default="")
+    parser.add_argument(
+        "--vive-rotation-robot-from-vive",
+        type=float,
+        nargs=9,
+        default=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        metavar=("R00", "R01", "R02", "R10", "R11", "R12", "R20", "R21", "R22"),
+        help="Row-major 3x3 rotation that maps VIVE/lighthouse translation deltas into the robot IK/base frame.",
+    )
+    parser.add_argument(
+        "--vive-left-mount-rotation",
+        type=float,
+        nargs=9,
+        default=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+    )
+    parser.add_argument(
+        "--vive-right-mount-rotation",
+        type=float,
+        nargs=9,
+        default=[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
     )
     parser.add_argument("--ee", type=str, choices=["none", "dex1"], default="dex1")
     parser.add_argument("--xml", type=str, default=None)
@@ -131,7 +167,7 @@ def parse_args():
         "--controller-orientation-mode",
         type=str,
         choices=["absolute", "relative", "neutral"],
-        default="absolute",
+        default=None,
         help='Wrist orientation control. "absolute" matches the original main-branch controller feel most closely (controller orientation directly drives wrist orientation). "relative" uses controller rotation delta from the current grip anchor. "neutral" fixes wrist orientation.',
     )
     parser.add_argument(
@@ -193,7 +229,10 @@ def parse_args():
         action="store_true",
         help="Visualize raw/clamped wrist target points inside the MuJoCo viewer for workspace debugging.",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.controller_orientation_mode is None:
+        args.controller_orientation_mode = "relative" if args.input_provider == "vive" else "absolute"
+    return args
 
 
 def resolve_xml_path(args):
@@ -626,6 +665,7 @@ def main():
     print(
         f"XR-Robotics MuJoCo demo started: ee={args.ee}, viewer_robot={args.viewer_robot}, xml={xml_path}, "
         f"controller_deadman={args.controller_deadman}, "
+        f"input_provider={args.input_provider}, "
         f"head_reference_mode={normalized_head_mode}, "
         f"controller_mapping_mode={args.controller_mapping_mode}, "
         f"controller_orientation_mode={args.controller_orientation_mode}, "
@@ -674,7 +714,7 @@ def main():
             print("[ARM_WORKSPACE] markers: solid red/blue = actual robot EE, yellow/cyan = raw target, pink/light-blue = clamped target.")
     else:
         print("[ARM_WORKSPACE] disabled.")
-    calibration_required = normalized_head_mode in {"head_coupled", "hybrid"}
+    calibration_required = args.input_provider == "xr" and normalized_head_mode in {"head_coupled", "hybrid"}
     calibrated = not calibration_required
     calibration_requested = calibration_required and args.calibration_mode == "auto"
     printed_wait_live = False
@@ -694,12 +734,35 @@ def main():
             stop_requested = True
             print("[EXIT] keyboard Q pressed, closing MuJoCo teleop.")
 
-    xr_wrapper = XRRoboticsWrapper(
-        use_hand_tracking=args.input_mode == "hand",
-        head_reference_mode=args.head_reference_mode,
-        controller_orientation_mode=args.controller_orientation_mode,
-        controller_mapping_mode=args.controller_mapping_mode,
-    )
+    xr_wrapper = None
+    input_backend = None
+    if args.input_provider == "xr":
+        xr_wrapper = XRRoboticsWrapper(
+            use_hand_tracking=args.input_mode == "hand",
+            head_reference_mode=args.head_reference_mode,
+            controller_orientation_mode=args.controller_orientation_mode,
+            controller_mapping_mode=args.controller_mapping_mode,
+        )
+        input_backend = xr_wrapper
+    else:
+        input_backend = create_teleop_input_provider(args)
+
+    def sync_input_reference():
+        sync_fn = getattr(input_backend, "sync_reference_to_current_live_pose", None)
+        if callable(sync_fn):
+            sync_fn(require_live=False)
+
+    def fetch_tele_data(current_left_wrist_pose, current_right_wrist_pose):
+        if args.input_provider == "xr":
+            return xr_wrapper.get_tele_data(
+                current_left_robot_wrist_pose=current_left_wrist_pose,
+                current_right_robot_wrist_pose=current_right_wrist_pose,
+            )
+        sample = input_backend.get_sample(
+            current_left_robot_wrist_pose=current_left_wrist_pose,
+            current_right_robot_wrist_pose=current_right_wrist_pose,
+        )
+        return None if sample is None else sample.tele_data
 
     try:
         with mjv.launch_passive(
@@ -812,14 +875,16 @@ def main():
                         actual_left_world_pose,
                         actual_right_world_pose,
                     )
-                tele_data = xr_wrapper.get_tele_data(
-                    current_left_robot_wrist_pose=current_left_wrist_pose,
-                    current_right_robot_wrist_pose=current_right_wrist_pose,
-                )
-                if tele_data is None and args.input_mode == "hand":
+                tele_data = fetch_tele_data(current_left_wrist_pose, current_right_wrist_pose)
+                if tele_data is None and args.input_provider == "xr" and args.input_mode == "hand":
                     now = time.time()
                     if now - last_input_status_log_time > 1.0:
                         print(f"[XR_HAND] waiting for live hand/head data: {xr_wrapper.get_input_status()}")
+                        last_input_status_log_time = now
+                elif tele_data is None and args.input_provider != "xr":
+                    now = time.time()
+                    if now - last_input_status_log_time > 1.0:
+                        print(f"[{args.input_provider.upper()}] waiting for live tracker poses.")
                         last_input_status_log_time = now
                 if tele_data is not None:
                     raw_left_target_pose = np.asarray(tele_data.left_wrist_pose, dtype=float).copy()
@@ -846,7 +911,7 @@ def main():
                         if not bool(tele_data.left_ctrl_squeeze) and not bool(tele_data.right_ctrl_squeeze):
                             home_wait_grip_release = False
                             if normalized_head_mode in {"head_coupled", "hybrid"}:
-                                xr_wrapper.sync_reference_to_current_live_pose(require_live=False)
+                                sync_input_reference()
                                 print("[HOME] reference synced to current live pose after home return.")
                             reset_arm_ik_state(arm_ik, arm_q)
                             print("[HOME] IK state reset at current home pose.")
@@ -884,7 +949,7 @@ def main():
                     current_lr_arm_q = arm_q.copy()
                     if any_zero_takeover_this_frame:
                         if post_home_takeover_armed and normalized_head_mode in {"head_coupled", "hybrid"}:
-                            xr_wrapper.sync_reference_to_current_live_pose(require_live=False)
+                            sync_input_reference()
                         reset_arm_ik_state(arm_ik, current_lr_arm_q)
                         post_home_takeover_armed = False
                     left_target_pose = tele_data.left_wrist_pose
@@ -1080,8 +1145,8 @@ def main():
                 viewer.sync()
                 time.sleep(dt)
     finally:
-        if xr_wrapper is not None:
-            xr_wrapper.close()
+        if input_backend is not None:
+            input_backend.close()
 
 
 if __name__ == "__main__":

@@ -952,7 +952,39 @@ python teleop/sim/xrobotics_mujoco.py \
 
 ---
 
-## 9. 真机状态 MuJoCo 镜像
+## 9. MuJoCo：VIVE Tracker 预验证
+
+先启动 `vive_locator` 和 VIVE 专用键盘使能节点，再启动 MuJoCo。MuJoCo 使用与真机相同的 VIVE provider、AGX 三点标定文件、键盘 deadman 和 PICO 式 `relative` 姿态增量；不会连接 Unitree DDS。
+
+```bash
+# Terminal 1：复用已有缓存；首次无缓存时自动标定，结束后等待 5 秒启动 locator
+cd /data/codeBase/src/unitree_ws/src/xr_teleoperate
+bash scripts/start/start_vive_locator.sh
+
+# 基站移动后才需要强制重新标定：
+# VIVE_RECALIBRATE=1 bash scripts/start/start_vive_locator.sh
+
+# Terminal 2
+cd /data/codeBase/src/unitree_ws/src/xr_teleoperate
+source /opt/ros/humble/setup.bash
+python scripts/vive_keyboard_enable.py
+
+# Terminal 3（首次或基站移动后）
+python scripts/vive_axis_calibrator.py \
+  --pose-topic /vive_pose_l \
+  --output-file ~/.config/xr_teleoperate/vive_calibration.json
+
+# Terminal 4
+python teleop/sim/xrobotics_mujoco.py \
+  --input-provider vive \
+  --controller-deadman grip \
+  --controller-orientation-mode relative \
+  --vive-calibration-file ~/.config/xr_teleoperate/vive_calibration.json
+```
+
+MuJoCo 窗口中按 `R` 开始同步；键盘终端按 `space` 同时使能，`l`/`r` 单独使能，`0` 立即停止对应运动。未使能、Tracker 超时或断流的手臂保持当前 MuJoCo 腕位姿。仿真通过后，再运行下一节的真机启动命令。
+
+## 10. 真机状态 MuJoCo 镜像
 
 用途：
 
