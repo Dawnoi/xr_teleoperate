@@ -41,7 +41,6 @@ class G1DIkFrameKinematics:
             raise RuntimeError(f"missing G1D kinematics model: {urdf_path}")
         self._pin = pin
         self._model = pin.buildModelFromUrdf(str(urdf_path))
-        self._data = self._model.createData()
         self._agv_frame = self._model.getFrameId("AGV_link")
         self._torso_frame = self._model.getFrameId("torso_link")
         self._joint_ids = {name: self._model.getJointId(name) for name in ("LZ_mt_Joint", "LZ_it_Joint", "torso_Joint")}
@@ -57,9 +56,10 @@ class G1DIkFrameKinematics:
         for name in ("LZ_mt_Joint", "LZ_it_Joint"):
             q[int(self._model.idx_qs[self._joint_ids[name]])] = float(column_position) * 0.5
         q[int(self._model.idx_qs[self._joint_ids["torso_Joint"]])] = float(torso_yaw)
-        self._pin.forwardKinematics(self._model, self._data, q)
-        self._pin.updateFramePlacements(self._model, self._data)
-        agv_from_torso = self._data.oMf[self._agv_frame].inverse() * self._data.oMf[self._torso_frame]
+        data = self._model.createData()
+        self._pin.forwardKinematics(self._model, data, q)
+        self._pin.updateFramePlacements(self._model, data)
+        agv_from_torso = data.oMf[self._agv_frame].inverse() * data.oMf[self._torso_frame]
         agv_from_ik = np.eye(4)
         agv_from_ik[:3, :3] = agv_from_torso.rotation
         agv_from_ik[:3, 3] = agv_from_torso.translation

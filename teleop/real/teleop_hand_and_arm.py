@@ -183,7 +183,7 @@ def reset_arm_ik_state(arm_ik, arm_q):
 def get_robot_wrist_poses(arm_ik, arm_q):
     q = np.asarray(arm_q, dtype=float).copy()
     model = arm_ik.reduced_robot.model
-    data = arm_ik.reduced_robot.data
+    data = model.createData()
     pin.framesForwardKinematics(model, data, q)
     pin.updateFramePlacements(model, data)
 
@@ -269,6 +269,7 @@ def cleanup_real_teleop_resources(
     args,
     arm_ctrl,
     arm_ik,
+    recording_flow,
     tv_wrapper,
     listen_keyboard_thread,
     recorder,
@@ -344,6 +345,9 @@ def cleanup_real_teleop_resources(
             sim_state_subscriber.stop_subscribe()
     except Exception as e:
         logger_mp.error(f"Failed to stop sim state subscriber: {e}")
+
+    if recording_flow is not None:
+        recording_flow.close()
 
     if base_state_receiver is not None:
         base_state_receiver.close()
@@ -882,6 +886,110 @@ if __name__ == '__main__':
         home_return_active = False
         home_target_q = np.zeros_like(current_hold_q)
         post_home_takeover_armed = False
+        latest_teleop_input_perf_counter_ns = int(time.perf_counter_ns())
+        last_xr_input_poll_start_ns = None
+        xr_input_none_streak_start_ns = None
+        xr_input_none_count = 0
+        xr_input_poll_stall_threshold_ms = 2.5 * control_dt * 1000.0
+        base_z = 0.0
+        last_recorded_base_action = {
+            "vx_cmd": 0.0,
+            "vy_cmd": 0.0,
+            "wz_cmd": 0.0,
+            "z_cmd": 0.0,
+            "frame_id": "base_link",
+            "source": "initial_hold",
+            "base_control_mode": "initial_hold",
+        }
+
+        def publish_recording_sources() -> None:
+            if recording_flow is None or not recording_flow.needs_source_updates():
+                return
+            base_state_history_snapshot = None
+            base_height_history_snapshot = None
+            slam_tf_history_snapshot = None
+            if args.record_base:
+                if base_state_receiver is None:
+                    raise RuntimeError("--record-base is enabled but base_state_receiver is not initialized")
+                if not base_state_receiver.is_alive():
+                    raise RuntimeError("--record-base receiver thread is not alive")
+                cursors = recording_flow.source_history_cursors()
+                snapshot_since = getattr(base_state_receiver, "snapshot_histories_since", None)
+                if not callable(snapshot_since):
+                    raise RuntimeError(
+                        "BaseStateReceiver must provide snapshot_histories_since() for event-driven recording"
+                    )
+                (
+                    base_state_history_snapshot,
+                    base_height_history_snapshot,
+                    slam_tf_history_snapshot,
+                ) = snapshot_since(
+                    base_state_after_t_ns=cursors["base_state"],
+                    base_height_after_t_ns=cursors["base_height"],
+                    slam_tf_after_t_ns=cursors["slam_tf"],
+                )
+            recording_flow.publish_sources(
+                camera_sources=components.cameras.sources(),
+                state_history=state_history,
+                action_history=action_history,
+                teleop_input_perf_counter_ns=latest_teleop_input_perf_counter_ns,
+                arm_ik=arm_ik,
+                get_wrist_poses=get_robot_wrist_poses,
+                get_wrist_poses_base_link=(
+                    get_robot_wrist_poses_base_link
+                    if args.record_mobile_training_state
+                    else None
+                ),
+                get_dex1_tcp_poses_base_link=(
+                    get_robot_dex1_tcp_poses_base_link
+                    if args.record_mobile_training_state
+                    else None
+                ),
+                sim_state_subscriber=sim_state_subscriber,
+                base_state_history=base_state_history_snapshot,
+                base_height_history=base_height_history_snapshot,
+                base_action_history=base_action_history if args.record_base else None,
+                slam_tf_history=slam_tf_history_snapshot,
+            )
+
+        def publish_hold_recording_sources() -> None:
+            if recording_flow is None or not recording_flow.needs_source_updates():
+                return
+            hold_ee_sample = recording_flow._read_end_effector_sample()
+            hold_waist_yaw_target = arm_ctrl.waist_yaw_target
+            hold_command_monotonic_ns = int(time.monotonic_ns())
+            append_timed_sample(
+                action_history,
+                hold_command_monotonic_ns,
+                q=current_hold_q.copy(),
+                tauff=current_hold_tauff.copy(),
+                waist_yaw_target=(
+                    float(current_waist_yaw)
+                    if hold_waist_yaw_target is None
+                    else float(hold_waist_yaw_target)
+                ),
+                left_hand_action=list(hold_ee_sample["left_hand_action"]),
+                right_hand_action=list(hold_ee_sample["right_hand_action"]),
+            )
+            if args.record_base:
+                hold_base_action = {
+                    "vx_cmd": 0.0,
+                    "vy_cmd": 0.0,
+                    "wz_cmd": 0.0,
+                    "z_cmd": float(base_z),
+                    "frame_id": "base_link",
+                    "source": "hold",
+                    "base_control_mode": "hold",
+                }
+                last_recorded_base_action.clear()
+                last_recorded_base_action.update(hold_base_action)
+                append_timed_sample(
+                    base_action_history,
+                    hold_command_monotonic_ns,
+                    **hold_base_action,
+                )
+            publish_recording_sources()
+
         TAKEOVER_SETTLE_FRAMES = 0 if (
             args.controller_mapping_mode == "legacy_main" or args.input_provider in {"lerobot_offline", "online_inference"}
         ) else 2
@@ -955,13 +1063,6 @@ if __name__ == '__main__':
             current_waist_yaw = arm_ctrl.get_current_waist_yaw()
             state_read_t1_ns = time.monotonic_ns()
             current_state_sample_ns = int((state_read_t0_ns + state_read_t1_ns) // 2)
-            append_timed_sample(
-                state_history,
-                current_state_sample_ns,
-                q=current_lr_arm_q.copy(),
-                dq=current_lr_arm_dq.copy(),
-                waist_yaw=float(current_waist_yaw),
-            )
             (
                 left_gripper_feedback_q,
                 right_gripper_feedback_q,
@@ -975,6 +1076,17 @@ if __name__ == '__main__':
             )
             online_left_gripper_q = 0.0 if left_gripper_feedback_q is None else left_gripper_feedback_q
             online_right_gripper_q = 0.0 if right_gripper_feedback_q is None else right_gripper_feedback_q
+            if recording_flow is not None and recording_flow.needs_source_updates():
+                end_effector_history_sample = recording_flow._read_end_effector_sample()
+                append_timed_sample(
+                    state_history,
+                    current_state_sample_ns,
+                    q=current_lr_arm_q.copy(),
+                    dq=current_lr_arm_dq.copy(),
+                    waist_yaw=float(current_waist_yaw),
+                    left_ee_state=list(end_effector_history_sample["left_ee_state"]),
+                    right_ee_state=list(end_effector_history_sample["right_ee_state"]),
+                )
             if latency_tracker is not None:
                 latency_tracker.maybe_timeout()
                 latency_tracker.maybe_mark_execute(
@@ -1191,6 +1303,7 @@ if __name__ == '__main__':
             if provider_runtime.active_provider_kind == ActiveProviderKind.HOLD:
                 stop_base_once("provider_hold")
                 arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
+                publish_hold_recording_sources()
                 current_time = time.time()
                 time_elapsed = current_time - start_time
                 sleep_time = max(0, (1 / args.frequency) - time_elapsed)
@@ -1209,6 +1322,12 @@ if __name__ == '__main__':
 
             # get active provider tele data
             tele_fetch_start = time.perf_counter()
+            input_poll_start_ns = int(time.perf_counter_ns())
+            input_poll_gap_ms = None
+            if active_input_provider == "xr" and last_xr_input_poll_start_ns is not None:
+                input_poll_gap_ms = (input_poll_start_ns - last_xr_input_poll_start_ns) / 1e6
+            if active_input_provider == "xr":
+                last_xr_input_poll_start_ns = input_poll_start_ns
             provider_get_sample_kwargs = {
                 "current_left_robot_wrist_pose": current_left_wrist_pose,
                 "current_right_robot_wrist_pose": current_right_wrist_pose,
@@ -1245,9 +1364,14 @@ if __name__ == '__main__':
                 provider_runtime.stop_online_inference(reason="ui_stop_pending_after_inference_fetch")
                 set_online_inference_gripper_mode(gripper_ctrl, False)
                 arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
+                publish_hold_recording_sources()
                 logger_mp.info("[UI_INFERENCE] discarded fetched action because stop is pending -> HOLD.")
                 continue
             if sample is None:
+                if active_input_provider == "xr":
+                    if xr_input_none_streak_start_ns is None:
+                        xr_input_none_streak_start_ns = input_poll_start_ns
+                    xr_input_none_count += 1
                 if is_ui_raw_replay:
                     if bool(getattr(active_provider, "stop_interrupted", False)):
                         stop_base_once("raw_replay_stop_interrupted")
@@ -1259,6 +1383,7 @@ if __name__ == '__main__':
                     current_hold_q = current_lr_arm_q.copy()
                     current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
                     arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
+                    publish_hold_recording_sources()
                     logger_mp.info("[UI_REPLAY] raw replay provider finished -> HOLD.")
                     current_time = time.time()
                     time_elapsed = current_time - start_time
@@ -1275,10 +1400,41 @@ if __name__ == '__main__':
                     START = False
                     STOP = True
                     stop_base_once("offline_replay_finished")
+                    publish_hold_recording_sources()
                     continue
                 timing_debugger.maybe_report(arm_ctrl=arm_ctrl, gripper_ctrl=gripper_ctrl)
+                publish_hold_recording_sources()
                 time.sleep(0.01)
                 continue
+            xr_input_poll_diagnostics = {}
+            if active_input_provider == "xr":
+                input_none_streak_ms = (
+                    0.0
+                    if xr_input_none_streak_start_ns is None
+                    else (input_poll_start_ns - xr_input_none_streak_start_ns) / 1e6
+                )
+                poll_gap_ms = 0.0 if input_poll_gap_ms is None else float(input_poll_gap_ms)
+                xr_input_poll_diagnostics = {
+                    "input_poll_gap_ms": poll_gap_ms,
+                    "input_none_count": int(xr_input_none_count),
+                    "input_none_streak_ms": float(input_none_streak_ms),
+                    "input_poll_gap_threshold_ms": float(xr_input_poll_stall_threshold_ms),
+                }
+                if (
+                    xr_input_none_count > 0
+                    or poll_gap_ms > xr_input_poll_stall_threshold_ms
+                ):
+                    if latency_tracker is not None:
+                        latency_tracker.record_input_poll_stall(
+                            poll_start_ns=input_poll_start_ns,
+                            poll_gap_ms=poll_gap_ms,
+                            get_sample_ms=tele_fetch_dt * 1000.0,
+                            none_count=xr_input_none_count,
+                            none_streak_ms=input_none_streak_ms,
+                            threshold_ms=xr_input_poll_stall_threshold_ms,
+                        )
+                xr_input_none_streak_start_ns = None
+                xr_input_none_count = 0
             provider_runtime.note_sample(sample)
             tele_data = sample.tele_data
             motion_intent = sample.motion_intent
@@ -1310,8 +1466,10 @@ if __name__ == '__main__':
                 current_hold_q = current_lr_arm_q.copy()
                 current_hold_tauff = compute_arm_gravity_tauff(arm_ik, current_hold_q)
                 arm_ctrl.ctrl_dual_arm(current_hold_q.copy(), current_hold_tauff.copy())
+                publish_hold_recording_sources()
                 continue
             tele_data_recv_ts_ns = time.perf_counter_ns()
+            latest_teleop_input_perf_counter_ns = int(tele_data_recv_ts_ns)
             tele_fetch_ms = tele_fetch_dt * 1000.0
 
             if is_ui_raw_replay:
@@ -1495,18 +1653,25 @@ if __name__ == '__main__':
             base_vy = base_result.base_vy
             base_wz = base_result.base_wz
             base_z = base_result.base_z
-            if args.record_base:
+            if (
+                args.record_base
+                and recording_flow is not None
+                and recording_flow.needs_source_updates()
+            ):
                 base_action_source = "g1d_agv_bridge" if base_control_mode == "g1d_agv_async" else base_control_mode
+                last_recorded_base_action = {
+                    "vx_cmd": float(base_vx),
+                    "vy_cmd": float(base_vy),
+                    "wz_cmd": float(base_wz),
+                    "z_cmd": float(base_z),
+                    "frame_id": "base_link",
+                    "source": base_action_source,
+                    "base_control_mode": base_control_mode,
+                }
                 append_timed_sample(
                     base_action_history,
                     int(time.monotonic_ns()),
-                    vx_cmd=float(base_vx),
-                    vy_cmd=float(base_vy),
-                    wz_cmd=float(base_wz),
-                    z_cmd=float(base_z),
-                    frame_id="base_link",
-                    source=base_action_source,
-                    base_control_mode=base_control_mode,
+                    **last_recorded_base_action,
                 )
             if base_result.stop_requested:
                 stop_base_once("controller_stop")
@@ -1514,9 +1679,11 @@ if __name__ == '__main__':
                 STOP = True
             if base_result.base_stop_fault:
                 logger_mp.error("[BASE_CTRL] base stop fault; retrying STOP: %s", base_result.base_stop_error)
+                publish_hold_recording_sources()
                 time.sleep(control_dt)
                 continue
             if base_result.should_continue_frame:
+                publish_hold_recording_sources()
                 continue
 
             # solve arm command target, safety-limit it, and compute gravity compensation.
@@ -1561,6 +1728,7 @@ if __name__ == '__main__':
             except ValueError:
                 START = False
                 STOP = True
+                publish_hold_recording_sources()
                 continue
 
             sol_q = arm_command.sol_q
@@ -1569,6 +1737,11 @@ if __name__ == '__main__':
             current_hold_tauff = arm_command.current_hold_tauff
             provider_feedback = arm_command.provider_feedback
             ik_ms = arm_command.ik_ms
+            ik_ipopt_solve_ms = arm_command.ik_ipopt_solve_ms
+            ik_ipopt_iterations = arm_command.ik_ipopt_iterations
+            ik_filter_ms = arm_command.ik_filter_ms
+            ik_rnea_ms = arm_command.ik_rnea_ms
+            ik_total_ms = arm_command.ik_total_ms
             safety_ms = arm_command.safety_ms
             gravity_ms = arm_command.gravity_ms
             left_arm_enabled = arm_command.left_arm_enabled
@@ -1620,6 +1793,7 @@ if __name__ == '__main__':
                         recv_q=current_lr_arm_q,
                         extra={
                             **provider_trace_extra,
+                            **xr_input_poll_diagnostics,
                             "input_provider": str(active_input_provider),
                             "tele_fetch_ms": tele_fetch_ms,
                             "takeover_logic_ms": takeover_logic_ms,
@@ -1638,6 +1812,11 @@ if __name__ == '__main__':
                             "base_async_cycle_avg_ms": base_async_cycle_avg_ms,
                             "base_async_queue_avg_ms": base_async_queue_avg_ms,
                             "ik_ms": ik_ms,
+                            "ik_ipopt_solve_ms": ik_ipopt_solve_ms,
+                            "ik_ipopt_iterations": ik_ipopt_iterations,
+                            "ik_filter_ms": ik_filter_ms,
+                            "ik_rnea_ms": ik_rnea_ms,
+                            "ik_total_ms": ik_total_ms,
                             "wbc_ms": wbc_ms,
                             "safety_ms": safety_ms,
                             "gravity_ms": gravity_ms,
@@ -1668,17 +1847,21 @@ if __name__ == '__main__':
                     latency_tracker.set_fields(trace_seq, latency_trace_prepare_ms=latency_trace_prepare_ms)
 
             action_history_start = time.perf_counter()
-            action_command_monotonic_ns = int(time.monotonic_ns())
-            waist_yaw_target = arm_ctrl.waist_yaw_target
-            if args.record_mobile_training_state and waist_yaw_target is None:
-                raise RuntimeError("mobile training state requires an initialized waist yaw target")
-            append_timed_sample(
-                action_history,
-                action_command_monotonic_ns,
-                q=sol_q.copy(),
-                tauff=sol_tauff.copy(),
-                waist_yaw_target=(None if waist_yaw_target is None else float(waist_yaw_target)),
-            )
+            if recording_flow is not None and recording_flow.needs_source_updates():
+                action_command_monotonic_ns = int(time.monotonic_ns())
+                commanded_end_effector_sample = recording_flow._read_end_effector_sample()
+                waist_yaw_target = arm_ctrl.waist_yaw_target
+                if args.record_mobile_training_state and waist_yaw_target is None:
+                    raise RuntimeError("mobile training state requires an initialized waist yaw target")
+                append_timed_sample(
+                    action_history,
+                    action_command_monotonic_ns,
+                    q=sol_q.copy(),
+                    tauff=sol_tauff.copy(),
+                    waist_yaw_target=(None if waist_yaw_target is None else float(waist_yaw_target)),
+                    left_hand_action=list(commanded_end_effector_sample["left_hand_action"]),
+                    right_hand_action=list(commanded_end_effector_sample["right_hand_action"]),
+                )
             action_history_append_ms = (time.perf_counter() - action_history_start) * 1000.0
             if trace_seq is not None:
                 latency_tracker.set_fields(trace_seq, action_history_append_ms=action_history_append_ms)
@@ -1716,6 +1899,11 @@ if __name__ == '__main__':
                             "http_roundtrip_ms": metadata.get("online_obs_send_to_action_recv_ms"),
                             "tele_fetch_ms": float(tele_fetch_ms),
                             "ik_ms": float(ik_ms),
+                            "ik_ipopt_solve_ms": ik_ipopt_solve_ms,
+                            "ik_ipopt_iterations": ik_ipopt_iterations,
+                            "ik_filter_ms": ik_filter_ms,
+                            "ik_rnea_ms": ik_rnea_ms,
+                            "ik_total_ms": ik_total_ms,
                             "wbc_ms": wbc_ms,
                             "safety_ms": float(safety_ms),
                             "gravity_ms": float(gravity_ms),
@@ -1749,44 +1937,10 @@ if __name__ == '__main__':
                 calibration_hold_tauff = current_hold_tauff.copy()
                 logger_mp.info("[HOME] reached ready/calibration pose. Waiting for both grips to release before teleop resumes.")
 
-            # record data
+            # Publish the newly computed command as the future support for camera
+            # frames received during this control tick.
+            publish_recording_sources()
             if recording_flow is not None:
-                base_state_history_snapshot = None
-                base_height_history_snapshot = None
-                slam_tf_history_snapshot = None
-                if args.record_base:
-                    if base_state_receiver is None:
-                        raise RuntimeError("--record-base is enabled but base_state_receiver is not initialized")
-                    if not base_state_receiver.is_alive():
-                        raise RuntimeError("--record-base receiver thread is not alive")
-                    base_state_history_snapshot, base_height_history_snapshot = base_state_receiver.snapshot_histories()
-                    slam_tf_history_snapshot = base_state_receiver.snapshot_slam_tf_history()
-                frame_recording = recording_flow.process_frame(
-                    record_running=RECORD_RUNNING,
-                    camera_sources=camera_sources,
-                    state_history=state_history,
-                    action_history=action_history,
-                    teleop_input_perf_counter_ns=tele_data_recv_ts_ns,
-                    arm_ik=arm_ik,
-                    get_wrist_poses=get_robot_wrist_poses,
-                    get_wrist_poses_base_link=(
-                        get_robot_wrist_poses_base_link
-                        if args.record_mobile_training_state
-                        else None
-                    ),
-                    get_dex1_tcp_poses_base_link=(
-                        get_robot_dex1_tcp_poses_base_link
-                        if args.record_mobile_training_state
-                        else None
-                    ),
-                    sim_state_subscriber=sim_state_subscriber,
-                    base_state_history=base_state_history_snapshot,
-                    base_height_history=base_height_history_snapshot,
-                    base_action_history=base_action_history if args.record_base else None,
-                    slam_tf_history=slam_tf_history_snapshot,
-                )
-                RECORD_RUNNING = frame_recording.record_running
-                READY = frame_recording.ready
                 if ui_state_store is not None:
                     publish_ui_payload(
                         build_runtime_web_payload(
@@ -1810,9 +1964,6 @@ if __name__ == '__main__':
                             base_stop_state=base_stop_state,
                         )
                     )
-                if frame_recording.should_continue_frame:
-                    continue
-
             current_time = time.time()
             time_elapsed = current_time - start_time
             sleep_time = max(0, (1 / args.frequency) - time_elapsed)
@@ -1831,6 +1982,7 @@ if __name__ == '__main__':
             args=args,
             arm_ctrl=arm_ctrl or components.arm_ctrl,
             arm_ik=arm_ik or components.arm_ik,
+            recording_flow=recording_flow,
             tv_wrapper=tv_wrapper or components.tv_wrapper,
             listen_keyboard_thread=listen_keyboard_thread,
             recorder=recorder or components.recorder,

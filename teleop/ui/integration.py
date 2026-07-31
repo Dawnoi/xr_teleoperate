@@ -42,16 +42,23 @@ def build_runtime_recording_status(
 ) -> dict[str, Any]:
     task_root = Path(str(args.task_dir)) / str(args.task_name)
     flow_state = getattr(recording_flow, "state", None)
-    waiting_for_first_frame = bool(getattr(flow_state, "waiting_for_first_frame", False))
+    snapshot_fn = getattr(recording_flow, "status_snapshot", None)
+    alignment_status = snapshot_fn() if callable(snapshot_fn) else {}
+    waiting_for_first_frame = bool(
+        alignment_status.get("waiting_for_first_frame", getattr(flow_state, "waiting_for_first_frame", False))
+    )
     pending_samples = getattr(flow_state, "pending_samples", [])
-    pending_count = len(pending_samples) if pending_samples is not None else 0
-    active = bool(record_running or waiting_for_first_frame)
+    pending_count = int(alignment_status.get("pending_samples", len(pending_samples) if pending_samples is not None else 0))
+    finalizing = bool(alignment_status.get("finalizing", getattr(flow_state, "finalizing", False)))
+    active = bool(record_running or waiting_for_first_frame or finalizing)
     frame_index = int(getattr(recorder, "item_id", -1) or -1) + 1 if recorder is not None else 0
     if frame_index < 0:
         frame_index = 0
     session_dir = str(getattr(recorder, "episode_dir", "") or "")
-    phase = "recording" if record_running else "armed" if waiting_for_first_frame else "idle"
-    record_start_monotonic_ns = getattr(flow_state, "record_start_monotonic_ns", None)
+    phase = "recording" if record_running else "armed" if waiting_for_first_frame else "finalizing" if finalizing else "idle"
+    record_start_monotonic_ns = alignment_status.get(
+        "record_start_monotonic_ns", getattr(flow_state, "record_start_monotonic_ns", None)
+    )
     validation_manager = getattr(recording_flow, "validation_manager", None)
     validation_status = validation_manager.status() if validation_manager is not None else {}
     validation_pending = bool(validation_status.get("pending", False))
@@ -84,6 +91,19 @@ def build_runtime_recording_status(
         "last_alignment": {
             "waiting_for_first_frame": waiting_for_first_frame,
             "pending_samples": int(pending_count),
+            "max_pending_samples": int(alignment_status.get("max_pending_samples", 0)),
+            "oldest_pending_age_ms": float(alignment_status.get("oldest_pending_age_ms", 0.0)),
+            "processed_sample_count": int(alignment_status.get("processed_sample_count", 0)),
+            "dropped_sample_count": int(alignment_status.get("dropped_sample_count", 0)),
+            "worker_alive": bool(alignment_status.get("worker_alive", True)),
+            "worker_status": str(alignment_status.get("last_alignment_worker_status", "idle")),
+            "worker_last_ms": float(alignment_status.get("last_alignment_worker_ms", 0.0)),
+            "camera_feeder_alive": bool(alignment_status.get("camera_feeder_alive", True)),
+            "camera_feeder_status": str(alignment_status.get("camera_feeder_status", "idle")),
+            "camera_feeder_enqueued_sample_count": int(
+                alignment_status.get("camera_feeder_enqueued_sample_count", 0)
+            ),
+            "camera_feeder_last_frame_seq": alignment_status.get("camera_feeder_last_frame_seq"),
             "record_start_monotonic_ns": record_start_monotonic_ns,
         },
         "last_alert": {},

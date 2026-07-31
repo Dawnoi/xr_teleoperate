@@ -46,7 +46,7 @@ class LocalCameraStream:
         if len(self.fourcc) == 4:
             self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*self.fourcc))
 
-        self._lock = threading.Lock()
+        self._condition = threading.Condition()
         self._running = True
         self._frame = None
         self._meta = None
@@ -83,10 +83,11 @@ class LocalCameraStream:
                 "shape": [int(frame.shape[1]), int(frame.shape[0]), int(frame.shape[2]) if frame.ndim == 3 else 1],
             }
 
-            with self._lock:
+            with self._condition:
                 self._frame = frame
                 self._meta = meta
                 self._history.append((frame, dict(meta)))
+                self._condition.notify_all()
 
     @staticmethod
     def _meta_time_ns(meta: Dict[str, Any]) -> Optional[int]:
@@ -94,7 +95,7 @@ class LocalCameraStream:
         return int(value) if value is not None else None
 
     def get_latest(self, copy: bool = True) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
-        with self._lock:
+        with self._condition:
             if self._frame is None or self._meta is None:
                 return None, None
             frame = self._frame.copy() if copy else self._frame
@@ -109,7 +110,7 @@ class LocalCameraStream:
         copy: bool = True,
     ) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
         target_monotonic_ns = int(target_monotonic_ns)
-        with self._lock:
+        with self._condition:
             best_frame = None
             best_meta = None
             best_abs_delta = None
@@ -134,8 +135,57 @@ class LocalCameraStream:
             meta_out["delta_to_sample_ns"] = int(self._meta_time_ns(best_meta) - target_monotonic_ns)
         return frame_out, meta_out
 
+    def wait_for_next_frame(
+        self,
+        *,
+        after_receiver_frame_seq: Optional[int],
+        min_monotonic_ns: Optional[int] = None,
+        timeout_sec: float = 0.05,
+        copy: bool = False,
+    ) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
+        """Return the next locally received frame without consuming ``get_latest``.
+
+        ``frame_seq`` is assigned by this receiver, so a gap after a caller cursor
+        means the recorder fell behind this source's bounded history.
+        """
+        if timeout_sec <= 0.0:
+            raise ValueError("timeout_sec must be positive")
+        min_monotonic_ns = None if min_monotonic_ns is None else int(min_monotonic_ns)
+        deadline_ns = time.monotonic_ns() + int(float(timeout_sec) * 1e9)
+        with self._condition:
+            while self._running:
+                if self._history:
+                    oldest_meta = self._history[0][1]
+                    oldest_seq = int(oldest_meta["frame_seq"])
+                    if (
+                        after_receiver_frame_seq is not None
+                        and oldest_seq > int(after_receiver_frame_seq) + 1
+                    ):
+                        raise RuntimeError(
+                            f"[LocalCameraStream:{self.name}] recorder camera cursor overrun: "
+                            f"after_frame_seq={after_receiver_frame_seq} oldest_available_seq={oldest_seq}"
+                        )
+                    for frame, meta in self._history:
+                        frame_seq = int(meta["frame_seq"])
+                        if after_receiver_frame_seq is not None and frame_seq <= int(after_receiver_frame_seq):
+                            continue
+                        frame_time_ns = self._meta_time_ns(meta)
+                        if frame_time_ns is None:
+                            raise RuntimeError(f"[LocalCameraStream:{self.name}] frame metadata missing host monotonic timestamp")
+                        if min_monotonic_ns is not None and frame_time_ns < min_monotonic_ns:
+                            continue
+                        return (frame.copy() if copy else frame), dict(meta)
+
+                remaining_ns = deadline_ns - time.monotonic_ns()
+                if remaining_ns <= 0:
+                    return None, None
+                self._condition.wait(timeout=remaining_ns / 1e9)
+        return None, None
+
     def close(self):
         self._running = False
+        with self._condition:
+            self._condition.notify_all()
         if self._thread is not None:
             self._thread.join(timeout=1.0)
         try:

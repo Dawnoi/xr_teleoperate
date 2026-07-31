@@ -56,6 +56,7 @@ class SimpleLatencyTracker:
         self._latest_payload: Optional[Dict[str, object]] = None
         self._completed = 0
         self._dropped = 0
+        self._input_poll_event_count = 0
 
         if self.output_path is not None:
             out_dir = os.path.dirname(os.path.abspath(self.output_path))
@@ -70,6 +71,44 @@ class SimpleLatencyTracker:
         if self.ui_memory_provider_scope is None:
             return True
         return str(input_provider) in self.ui_memory_provider_scope
+
+    def record_input_poll_stall(
+        self,
+        *,
+        poll_start_ns: int,
+        poll_gap_ms: float,
+        get_sample_ms: float,
+        none_count: int,
+        none_streak_ms: float,
+        threshold_ms: float,
+    ) -> None:
+        """Persist only anomalous XR input polling gaps without affecting command tracing."""
+        if self.output_path is None:
+            return
+        if int(none_count) < 0:
+            raise ValueError(f"none_count must be non-negative, got {none_count}")
+        if float(poll_gap_ms) < 0.0 or float(get_sample_ms) < 0.0 or float(none_streak_ms) < 0.0:
+            raise ValueError(
+                "input poll timing values must be non-negative: "
+                f"poll_gap_ms={poll_gap_ms} get_sample_ms={get_sample_ms} none_streak_ms={none_streak_ms}"
+            )
+
+        with self._lock:
+            self._input_poll_event_count += 1
+            payload = {
+                "event_type": "input_poll_stall",
+                "status": "input_poll_stall",
+                "input_poll_event_seq": int(self._input_poll_event_count),
+                "t_poll_start_ns": int(poll_start_ns),
+                "input_poll_gap_ms": float(poll_gap_ms),
+                "get_sample_ms": float(get_sample_ms),
+                "input_none_count": int(none_count),
+                "input_none_streak_ms": float(none_streak_ms),
+                "input_poll_gap_threshold_ms": float(threshold_ms),
+            }
+
+        with open(self.output_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, ensure_ascii=False) + "\n")
 
     def begin_trace(self, recv_ts_ns: int, recv_q, extra: Optional[Dict[str, object]] = None) -> Optional[int]:
         recv_q = np.asarray(recv_q, dtype=float).copy()

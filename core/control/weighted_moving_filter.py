@@ -15,12 +15,10 @@ class WeightedMovingFilter:
         if len(self._data_queue) < self._window_size:
             return self._data_queue[-1]
 
-        data_array = np.array(self._data_queue)
-        temp_filtered_data = np.zeros(self._data_size)
-        for i in range(self._data_size):
-            temp_filtered_data[i] = np.convolve(data_array[:, i], self._weights, mode='valid')[-1]
-        
-        return temp_filtered_data
+        data_array = np.asarray(self._data_queue)
+        # np.convolve(history, weights, "valid")[-1] gives the newest sample
+        # the first weight. Reverse history once, then evaluate all joints together.
+        return self._weights @ data_array[::-1]
 
     def add_data(self, new_data):
         assert len(new_data) == self._data_size

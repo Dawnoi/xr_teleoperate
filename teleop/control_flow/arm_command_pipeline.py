@@ -44,6 +44,11 @@ class ArmCommandResult:
     current_hold_tauff: np.ndarray
     provider_feedback: Optional[dict]
     ik_ms: float
+    ik_ipopt_solve_ms: Optional[float]
+    ik_ipopt_iterations: Optional[int]
+    ik_filter_ms: Optional[float]
+    ik_rnea_ms: Optional[float]
+    ik_total_ms: Optional[float]
     safety_ms: float
     gravity_ms: float
     arm_cmd_input_ms: float
@@ -108,6 +113,43 @@ def _handle_takeover_reset(
     return False
 
 
+def _read_successful_ik_timing(arm_ik: Any) -> Optional[dict[str, Any]]:
+    if not hasattr(arm_ik, "last_solve_timing"):
+        return None
+    timing = getattr(arm_ik, "last_solve_timing", None)
+    if not isinstance(timing, Mapping):
+        raise RuntimeError(
+            "pose IK returned without current G1_29 solve timing; "
+            "IPOPT must complete successfully before a command can be published"
+        )
+
+    required_ms_fields = ("ipopt_solve_ms", "filter_ms", "rnea_ms", "total_ms")
+    result: dict[str, Any] = {}
+    for field_name in required_ms_fields:
+        value = timing.get(field_name)
+        if isinstance(value, bool) or not isinstance(value, (int, float, np.number)):
+            raise RuntimeError(f"G1_29 IK timing {field_name} must be a finite number, got {value!r}")
+        value = float(value)
+        if not np.isfinite(value) or value < 0.0:
+            raise RuntimeError(
+                f"G1_29 IK timing {field_name} must be finite and non-negative, got {value!r}"
+            )
+        result[field_name] = value
+
+    iterations = timing.get("ipopt_iterations")
+    if isinstance(iterations, bool) or not isinstance(iterations, np.integer | int):
+        raise RuntimeError(
+            f"G1_29 IK timing ipopt_iterations must be a non-negative integer, got {iterations!r}"
+        )
+    iterations = int(iterations)
+    if iterations < 0:
+        raise RuntimeError(
+            f"G1_29 IK timing ipopt_iterations must be non-negative, got {iterations}"
+        )
+    result["ipopt_iterations"] = iterations
+    return result
+
+
 def _solve_pose_target(
     *,
     arm_ik: Any,
@@ -123,7 +165,7 @@ def _solve_pose_target(
     is_online_inference: bool,
     timing_debugger: Any,
     log: Any,
-) -> tuple[np.ndarray, np.ndarray, float, Optional[dict]]:
+) -> tuple[np.ndarray, np.ndarray, float, Optional[dict[str, Any]], Optional[dict]]:
     left_target_pose = motion_intent.left_wrist_pose
     right_target_pose = motion_intent.right_wrist_pose
     provider_feedback = None
@@ -177,7 +219,7 @@ def _solve_pose_target(
     if callable(add_ik):
         add_ik(ik_dt)
     log.debug(f"ik:\t{round(ik_dt, 6)}")
-    return sol_q, sol_tauff, ik_dt * 1000.0, provider_feedback
+    return sol_q, sol_tauff, ik_dt * 1000.0, _read_successful_ik_timing(arm_ik), provider_feedback
 
 
 def _solve_motion_target(
@@ -197,7 +239,7 @@ def _solve_motion_target(
     is_online_inference: bool,
     timing_debugger: Any,
     log: Any,
-) -> tuple[np.ndarray, np.ndarray, float, Optional[dict]]:
+) -> tuple[np.ndarray, np.ndarray, float, Optional[dict[str, Any]], Optional[dict]]:
     motion_kind = str(getattr(motion_intent, "kind", "pose"))
     if motion_kind == "pose":
         return _solve_pose_target(
@@ -216,10 +258,10 @@ def _solve_motion_target(
             log=log,
         )
     if motion_kind == "joint_position":
-        return _require_finite_vector(motion_intent.arm_q, 14, "motion_intent.arm_q"), current_hold_tauff.copy(), 0.0, None
+        return _require_finite_vector(motion_intent.arm_q, 14, "motion_intent.arm_q"), current_hold_tauff.copy(), 0.0, None, None
     if motion_kind == "joint_velocity":
         arm_dq = _require_finite_vector(motion_intent.arm_dq, 14, "motion_intent.arm_dq")
-        return current_lr_arm_q + arm_dq * float(control_dt), current_hold_tauff.copy(), 0.0, None
+        return current_lr_arm_q + arm_dq * float(control_dt), current_hold_tauff.copy(), 0.0, None, None
 
     log.error("Unsupported motion intent kind: %s", motion_kind)
     raise UnsupportedMotionIntentError(f"Unsupported motion intent kind: {motion_kind}")
@@ -374,6 +416,7 @@ def build_arm_command(
     arm_cmd_input_ms = (time.perf_counter() - arm_cmd_input_start) * 1000.0
 
     ik_ms = 0.0
+    ik_timing: Optional[dict[str, Any]] = None
     provider_feedback = None
 
     arm_cmd_takeover_reset_start = time.perf_counter()
@@ -393,7 +436,7 @@ def build_arm_command(
         sol_tauff = current_hold_tauff.copy()
     elif left_arm_enabled or right_arm_enabled:
         try:
-            sol_q, sol_tauff, ik_ms, provider_feedback = _solve_motion_target(
+            sol_q, sol_tauff, ik_ms, ik_timing, provider_feedback = _solve_motion_target(
                 arm_ik=arm_ik,
                 motion_intent=motion_intent,
                 current_lr_arm_q=current_lr_arm_q,
@@ -502,6 +545,11 @@ def build_arm_command(
         current_hold_tauff=current_hold_tauff,
         provider_feedback=provider_feedback,
         ik_ms=ik_ms,
+        ik_ipopt_solve_ms=None if ik_timing is None else ik_timing["ipopt_solve_ms"],
+        ik_ipopt_iterations=None if ik_timing is None else ik_timing["ipopt_iterations"],
+        ik_filter_ms=None if ik_timing is None else ik_timing["filter_ms"],
+        ik_rnea_ms=None if ik_timing is None else ik_timing["rnea_ms"],
+        ik_total_ms=None if ik_timing is None else ik_timing["total_ms"],
         safety_ms=safety_ms,
         gravity_ms=gravity_ms,
         arm_cmd_input_ms=arm_cmd_input_ms,

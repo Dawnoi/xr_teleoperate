@@ -9,6 +9,7 @@ import os
 import sys
 import pickle
 import logging_mp
+import numbers
 logger_mp = logging_mp.getLogger(__name__)
 parent2_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(parent2_dir)
@@ -182,6 +183,7 @@ class G1_29_ArmIK:
 
         self.init_data = np.zeros(self.reduced_robot.model.nq)
         self.smooth_filter = WeightedMovingFilter(np.array([0.4, 0.3, 0.2, 0.1]), 14)
+        self.last_solve_timing = None
         self.vis = None
 
         if self.Visualization:
@@ -254,6 +256,9 @@ class G1_29_ArmIK:
         return robot_left_pose, robot_right_pose
 
     def solve_ik(self, left_wrist, right_wrist, current_lr_arm_motor_q = None, current_lr_arm_motor_dq = None):
+        solve_total_start = time.perf_counter()
+        # Never let a previous successful solve describe a failed current solve.
+        self.last_solve_timing = None
         if current_lr_arm_motor_q is not None:
             self.init_data = current_lr_arm_motor_q
         self.opti.set_initial(self.var_q, self.init_data)
@@ -268,12 +273,33 @@ class G1_29_ArmIK:
         self.opti.set_value(self.var_q_last, self.init_data) # for smooth
 
         try:
+            ipopt_solve_start = time.perf_counter()
             sol = self.opti.solve()
+            ipopt_solve_ms = (time.perf_counter() - ipopt_solve_start) * 1000.0
             # sol = self.opti.solve_limited()
 
+            solver_stats = self.opti.stats()
+            if not isinstance(solver_stats, dict):
+                raise RuntimeError(
+                    f"G1_29 IK IPOPT statistics must be a dict, got {type(solver_stats).__name__}"
+                )
+            ipopt_iterations = solver_stats.get("iter_count")
+            if isinstance(ipopt_iterations, bool) or not isinstance(ipopt_iterations, numbers.Integral):
+                raise RuntimeError(
+                    "G1_29 IK IPOPT statistics missing integer iter_count: "
+                    f"{ipopt_iterations!r}"
+                )
+            ipopt_iterations = int(ipopt_iterations)
+            if ipopt_iterations < 0:
+                raise RuntimeError(
+                    f"G1_29 IK IPOPT iter_count must be non-negative, got {ipopt_iterations}"
+                )
+
             sol_q = self.opti.value(self.var_q)
+            filter_start = time.perf_counter()
             self.smooth_filter.add_data(sol_q)
             sol_q = self.smooth_filter.filtered_data
+            filter_ms = (time.perf_counter() - filter_start) * 1000.0
 
             if current_lr_arm_motor_dq is not None:
                 v = current_lr_arm_motor_dq * 0.0
@@ -282,10 +308,29 @@ class G1_29_ArmIK:
 
             self.init_data = sol_q
 
+            rnea_start = time.perf_counter()
             sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
+            rnea_ms = (time.perf_counter() - rnea_start) * 1000.0
 
             if self.Visualization:
                 self.vis.display(sol_q)  # for visualization
+
+            total_ms = (time.perf_counter() - solve_total_start) * 1000.0
+            timing = {
+                "ipopt_solve_ms": float(ipopt_solve_ms),
+                "ipopt_iterations": int(ipopt_iterations),
+                "filter_ms": float(filter_ms),
+                "rnea_ms": float(rnea_ms),
+                "total_ms": float(total_ms),
+            }
+            for timing_name, timing_value in timing.items():
+                if timing_name == "ipopt_iterations":
+                    continue
+                if not np.isfinite(timing_value) or timing_value < 0.0:
+                    raise RuntimeError(
+                        f"G1_29 IK timing {timing_name} must be finite and non-negative, got {timing_value!r}"
+                    )
+            self.last_solve_timing = timing
 
             return sol_q, sol_tauff
         

@@ -8,6 +8,7 @@ import math
 import threading
 import time
 from collections import deque
+from numbers import Integral
 
 from data_pipeline.recording.alignment import append_timed_sample
 
@@ -243,6 +244,130 @@ class BaseStateReceiver:
         with self._lock:
             return deque(self._slam_tf_history, maxlen=self._slam_tf_history.maxlen)
 
+    @staticmethod
+    def _validate_t_ns(value, field_name: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, Integral):
+            raise ValueError(f"{field_name} must be an integer, got {value!r}")
+        return int(value)
+
+    @staticmethod
+    def _validate_after_cursor(after_t_ns: int | None, history_name: str) -> int | None:
+        if after_t_ns is None:
+            return None
+        return BaseStateReceiver._validate_t_ns(
+            after_t_ns, f"{history_name} after_t_ns"
+        )
+
+    @classmethod
+    def _append_timed_sample_strict(
+        cls,
+        history: deque,
+        timestamp_ns: int,
+        history_name: str,
+        **payload,
+    ) -> None:
+        t_ns = cls._validate_t_ns(timestamp_ns, f"{history_name} new t_ns")
+        if history:
+            previous_entry = history[-1]
+            if not isinstance(previous_entry, dict) or "t_ns" not in previous_entry:
+                raise ValueError(
+                    f"{history_name} last entry must contain integer field 't_ns'"
+                )
+            previous_t_ns = cls._validate_t_ns(
+                previous_entry["t_ns"], f"{history_name} last t_ns"
+            )
+            if t_ns <= previous_t_ns:
+                raise RuntimeError(
+                    f"{history_name} timestamps must be strictly increasing: "
+                    f"last t_ns={previous_t_ns}, new t_ns={t_ns}"
+                )
+        append_timed_sample(history, t_ns, **payload)
+
+    @staticmethod
+    def _incremental_history_snapshot(
+        history: deque,
+        after_t_ns: int | None,
+        history_name: str,
+    ) -> deque:
+        if after_t_ns is None:
+            return deque((dict(entry) for entry in history), maxlen=history.maxlen)
+        if not history:
+            return deque(maxlen=history.maxlen)
+
+        oldest_entry = history[0]
+        if not isinstance(oldest_entry, dict) or "t_ns" not in oldest_entry:
+            raise ValueError(f"{history_name} oldest entry must contain integer field 't_ns'")
+        oldest_t_ns = BaseStateReceiver._validate_t_ns(
+            oldest_entry["t_ns"], f"{history_name} oldest t_ns"
+        )
+        if after_t_ns < oldest_t_ns:
+            raise RuntimeError(
+                f"{history_name} cursor t_ns={after_t_ns} is older than the oldest "
+                f"retained sample t_ns={oldest_t_ns}; history window rolled over"
+            )
+
+        new_entries = deque(maxlen=history.maxlen)
+        for entry in reversed(history):
+            if not isinstance(entry, dict) or "t_ns" not in entry:
+                raise ValueError(
+                    f"{history_name} entry encountered while reading delta "
+                    "must contain integer field 't_ns'"
+                )
+            t_ns = BaseStateReceiver._validate_t_ns(
+                entry["t_ns"], f"{history_name} delta t_ns"
+            )
+            if t_ns <= after_t_ns:
+                break
+            new_entries.appendleft(dict(entry))
+        return new_entries
+
+    def snapshot_histories_since(
+        self,
+        *,
+        base_state_after_t_ns: int | None,
+        base_height_after_t_ns: int | None,
+        slam_tf_after_t_ns: int | None,
+    ) -> tuple[deque, deque, deque]:
+        """Return only samples newer than three independent monotonic-time cursors.
+
+        ``None`` is the explicit initial cursor and returns the currently retained
+        window for that stream.  An integer cursor is exclusive: samples with
+        ``t_ns <= after_t_ns`` are omitted.  If an integer cursor is older than the
+        oldest retained sample, the caller has missed data due to deque rollover and
+        this method raises instead of silently returning an incomplete delta.
+
+        The returned deques contain shallow copies of the sample dictionaries and
+        never expose the receiver's internal deque objects.  The third deque is
+        empty when SLAM recording is disabled.
+        """
+        with self._lock:
+            base_state_after_t_ns = self._validate_after_cursor(
+                base_state_after_t_ns, "base_state"
+            )
+            base_height_after_t_ns = self._validate_after_cursor(
+                base_height_after_t_ns, "base_height"
+            )
+            slam_tf_after_t_ns = self._validate_after_cursor(slam_tf_after_t_ns, "slam_tf")
+            return (
+                self._incremental_history_snapshot(
+                    self._base_state_history,
+                    base_state_after_t_ns,
+                    "base_state_history",
+                ),
+                self._incremental_history_snapshot(
+                    self._base_height_history,
+                    base_height_after_t_ns,
+                    "base_height_history",
+                ),
+                self._incremental_history_snapshot(
+                    self._slam_tf_history,
+                    slam_tf_after_t_ns,
+                    "slam_tf_history",
+                )
+                if self.record_slam_map_pose
+                else deque(maxlen=self._slam_tf_history.maxlen),
+            )
+
     def snapshot_latest(self):
         """Return the newest measured odometry and column samples without interpolation."""
         with self._lock:
@@ -283,9 +408,10 @@ class BaseStateReceiver:
             "source_topic": self.odom_topic,
         }
         with self._lock:
-            append_timed_sample(
+            self._append_timed_sample_strict(
                 self._base_state_history,
                 host_monotonic_ns,
+                "base_state_history",
                 world_pose=world_pose,
                 velocity=velocity,
                 source_topic=self.odom_topic,
@@ -403,9 +529,10 @@ class BaseStateReceiver:
 
     def _append_slam_map_pose(self, slam_map_pose: dict, timestamp_ns: int) -> None:
         with self._lock:
-            append_timed_sample(
+            self._append_timed_sample_strict(
                 self._slam_tf_history,
                 timestamp_ns,
+                "slam_tf_history",
                 **slam_map_pose,
             )
         self._slam_map_ready.set()
@@ -413,9 +540,10 @@ class BaseStateReceiver:
     def _handle_height(self, msg) -> None:
         host_monotonic_ns = int(time.monotonic_ns())
         with self._lock:
-            append_timed_sample(
+            self._append_timed_sample_strict(
                 self._base_height_history,
                 host_monotonic_ns,
+                "base_height_history",
                 height={
                     "z": _finite_float(_field(msg, "y"), "hispeed_state.y"),
                     "source_topic": self.height_topic,

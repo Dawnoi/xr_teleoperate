@@ -700,6 +700,7 @@ function renderRecord() {
       <div class="form record-prep-form"><label>采集 FPS<input id="recordFps" value="${esc(localStorage.recordFps || r.fps || 30)}" disabled></label><div><p class="mini">这里沿用参考 collector 的布局；实际 FPS、相机和目录来自启动参数，网页只发控制意图。</p><p class="row"><button onclick="startTeleop()" ${teleop.started ? "disabled" : ""}>开始接管</button><button class="secondary" onclick="homeTeleop()" ${teleop.started ? "" : "disabled"}>回到 Home</button><button class="secondary" onclick="recenterTeleop()" ${teleop.started ? "" : "disabled"}>重置头参考</button><button class="danger" onclick="stopTeleop()">停止退出</button></p><p class="row"><button onclick="startRec()" ${r.active || r.validation_pending || !teleop.started || !recordEnabled ? "disabled" : ""}>● 开始录制</button><button class="danger" onclick="stopRec()" ${r.active ? "" : "disabled"}>停止并保存</button><button class="secondary" onclick="cancelRec()" ${r.active ? "" : "disabled"}>取消录制</button>${recordEnabled ? "" : `<span class="pill"><span class="dot warn"></span>启动时未加 --record</span>`}</p></div></div>
       ${isRecording ? `<p class="mini">录制已进入 ${esc(r.phase || "recording")}；相机帧、机器人状态和 action 仍由主循环按 monotonic 时间对齐。</p>` : ""}
       ${baseRecordingSummary(r)}
+      ${recordingAlignmentSummary(r)}
       <div class="prep-panels"><div><div class="toolbar"><div><h2>相机来源</h2><p class="mini">当前仓库相机由 CLI 参数打开；网页不启动、不停止相机。</p></div><button class="secondary" onclick="refreshAll()">刷新</button></div><div class="table-wrap"><table><thead><tr><th>Stream ID</th><th>来源</th><th>名称</th><th>链路</th><th>状态</th></tr></thead><tbody>${rows || `<tr><td colspan="5">${empty("尚未收到运行时相机帧；请检查启动参数、ZMQ sender 和网络链路")}</td></tr>`}</tbody></table></div></div><div><div class="toolbar"><div><h2>运行中流</h2><p class="mini">${activeIds.length} active${state.cameraStatusError ? ` · ${esc(state.cameraStatusError)}` : ""}</p></div></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>名称</th><th>模式</th><th>实际输出</th><th>请求参数</th><th>帧年龄</th></tr></thead><tbody>${streams || `<tr><td colspan="6">${empty("暂无运行流；检查启动参数是否启用本地或 ZMQ 相机")}</td></tr>`}</tbody></table></div></div></div>
     </div>
     <div class="card full record-validation-card"><div class="card-head"><h2>单条 episode 完整性与时间对齐检查</h2>${qualityBadge(validationCardState(v))}</div>${validationSummary(v)}</div>
@@ -722,7 +723,7 @@ function recordLatencySummary() {
   const traceState = trace.status || "idle";
   const traceLabel = trace.input_provider === "xr" ? "XR trace" : trace.input_provider || traceState;
   return `<div class="card full record-latency-card"><div class="card-head"><div><h2>遥操链路延时</h2></div>${badge(traceState === "completed" ? "ok" : traceState === "pending" ? "running" : traceState, traceLabel)}</div>
-    <div class="metric-grid"><div class="metric"><span>XR 到 DDS 发布</span><b>${formatMs(trace.recv_to_pub_ms)}</b></div><div class="metric"><span>DDS 到反馈起动</span><b>${formatMs(trace.pub_to_exec_thread_ms)}</b></div><div class="metric"><span>XR 到反馈起动</span><b>${formatMs(trace.recv_to_exec_thread_ms)}</b></div><div class="metric"><span>传统 IK</span><b>${formatMs(trace.ik_ms)}</b></div><div class="metric"><span>WBC QP</span><b>${formatMs(trace.wbc_ms)}</b></div><div class="metric"><span>控制线程排队</span><b>${formatMs(trace.controller_wait_ms)}</b></div><div class="metric"><span>DDS 写入</span><b>${formatMs(trace.dds_write_ms)}</b></div></div>
+    <div class="metric-grid"><div class="metric"><span>XR 到 DDS 发布</span><b>${formatMs(trace.recv_to_pub_ms)}</b></div><div class="metric"><span>DDS 到反馈起动</span><b>${formatMs(trace.pub_to_exec_thread_ms)}</b></div><div class="metric"><span>XR 到反馈起动</span><b>${formatMs(trace.recv_to_exec_thread_ms)}</b></div><div class="metric"><span>传统 IK</span><b>${formatMs(trace.ik_ms)}</b></div><div class="metric"><span>IPOPT 求解</span><b>${formatMs(trace.ik_ipopt_solve_ms)}</b></div><div class="metric"><span>IPOPT 迭代</span><b>${trace.ik_ipopt_iterations ?? "-"}</b></div><div class="metric"><span>IK 滤波</span><b>${formatMs(trace.ik_filter_ms)}</b></div><div class="metric"><span>IK RNEA 重力</span><b>${formatMs(trace.ik_rnea_ms)}</b></div><div class="metric"><span>IK 内部总计</span><b>${formatMs(trace.ik_total_ms)}</b></div><div class="metric"><span>WBC QP</span><b>${formatMs(trace.wbc_ms)}</b></div><div class="metric"><span>控制线程排队</span><b>${formatMs(trace.controller_wait_ms)}</b></div><div class="metric"><span>DDS 写入</span><b>${formatMs(trace.dds_write_ms)}</b></div></div>
     <div class="metric-grid"><div class="metric"><span>主循环 avg / P95 / max</span><b>${formatMs(loop.avg_ms)} / ${formatMs(loop.p95_ms)} / ${formatMs(loop.max_ms)}</b><small class="mini">overrun ${Number(loop.overrun_count || 0)} / ${Number(loop.count || 0)}</small></div><div class="metric"><span>读取 XR 输入 P95</span><b>${formatMs(teleFetch.p95_ms)}</b></div><div class="metric"><span>传统 IK P95</span><b>${formatMs(ik.p95_ms)}</b></div><div class="metric"><span>WBC QP P95</span><b>${formatMs(wbc.p95_ms)}</b></div></div>
   </div>`;
 }
@@ -740,6 +741,22 @@ function baseRecordingSummary(recording) {
     <span><b>Odom</b> ${esc(base.odom_topic || "-")}</span>
     <span><b>Height</b> ${esc(base.height_topic || "-")}</span>
     <span><b>Max age</b> ${Number(base.state_max_age_ms || 0).toFixed(0)} / ${Number(base.action_max_age_ms || 0).toFixed(0)} ms</span>
+  </div>`;
+}
+
+function recordingAlignmentSummary(recording) {
+  const alignment = recording?.last_alignment || {};
+  const workerAlive = alignment.worker_alive !== false;
+  const feederAlive = alignment.camera_feeder_alive !== false;
+  return `<div class="base-record-status">
+    <span class="pill"><span class="dot ${workerAlive ? "ok" : "err"}"></span>Alignment worker ${workerAlive ? "alive" : "offline"}</span>
+    <span class="pill"><span class="dot ${feederAlive ? "ok" : "err"}"></span>Camera feeder ${feederAlive ? "alive" : "offline"}</span>
+    <span><b>状态</b> ${esc(alignment.worker_status || "idle")}</span>
+    <span><b>取图</b> ${esc(alignment.camera_feeder_status || "idle")} / ${Number(alignment.camera_feeder_enqueued_sample_count || 0)}</span>
+    <span><b>待对齐</b> ${Number(alignment.pending_samples || 0)} / peak ${Number(alignment.max_pending_samples || 0)}</span>
+    <span><b>最老等待</b> ${formatMs(alignment.oldest_pending_age_ms)}</span>
+    <span><b>worker</b> ${formatMs(alignment.worker_last_ms)}</span>
+    <span><b>已写入/丢弃</b> ${Number(alignment.processed_sample_count || 0)} / ${Number(alignment.dropped_sample_count || 0)}</span>
   </div>`;
 }
 
