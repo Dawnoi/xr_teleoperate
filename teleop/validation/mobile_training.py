@@ -71,6 +71,9 @@ def _validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
         "slam_tf_max_alignment_periods",
         "slam_tf_max_age_periods",
         "slam_tf_max_future_periods",
+        "source_gap_long_threshold_ms",
+        "source_gap_error_consecutive_count",
+        "source_gap_error_total_count",
     )
     validated_timing = {}
     for key in required_timing:
@@ -83,6 +86,9 @@ def _validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError(f"mobile training validation config.timing.{key} must be positive")
     if validated_timing["slam_tf_max_future_periods"] < 0.0:
         raise ValueError("mobile training validation config.timing.slam_tf_max_future_periods must be non-negative")
+    for key in ("source_gap_error_consecutive_count", "source_gap_error_total_count"):
+        if validated_timing[key] <= 0.0 or not validated_timing[key].is_integer():
+            raise ValueError(f"mobile training validation config.timing.{key} must be a positive integer")
 
     required_limits = (
         "map_speed_warning_mps",
@@ -117,6 +123,9 @@ def _validate_config(config: Mapping[str, Any]) -> dict[str, Any]:
             "slam_tf_max_future_ms": (
                 validated_timing["slam_tf_period_ms"] * validated_timing["slam_tf_max_future_periods"]
             ),
+            "source_gap_long_threshold_ms": validated_timing["source_gap_long_threshold_ms"],
+            "source_gap_error_consecutive_count": int(validated_timing["source_gap_error_consecutive_count"]),
+            "source_gap_error_total_count": int(validated_timing["source_gap_error_total_count"]),
         }
     )
     return {
@@ -176,7 +185,8 @@ def _validate_alignment(
         issues.append(_issue("MOBILE_MISSING_ALIGNMENT", "error", f"frame {frame_index} missing {key} alignment", frame_index=frame_index))
         return None
     delta_ms = float(entry["delta_to_sample_ns"]) / 1e6
-    if abs(delta_ms) > max_abs_delta_ms:
+    interpolation_mode = str(entry.get("interpolation_mode", ""))
+    if interpolation_mode not in {_EDGE_FUTURE_MODE, _EDGE_HOLD_MODE} and abs(delta_ms) > max_abs_delta_ms:
         issues.append(_issue("MOBILE_ALIGNMENT_EXCEEDED", "error", f"frame {frame_index} {key} delta {delta_ms:.1f}ms exceeds {max_abs_delta_ms:.1f}ms", frame_index=frame_index, delta_ms=delta_ms, limit_ms=max_abs_delta_ms))
     if require_past and delta_ms > 0.0:
         issues.append(_issue("MOBILE_ACTION_ALIGNMENT_FUTURE", "error", f"frame {frame_index} base action must be hold-last, got future delta {delta_ms:.1f}ms", frame_index=frame_index, delta_ms=delta_ms))
@@ -195,7 +205,7 @@ def _validate_base_action_alignment(
         issues.append(_issue("MOBILE_MISSING_ALIGNMENT", "error", f"frame {frame_index} missing base_action alignment", frame_index=frame_index))
         return None
     interpolation_mode = str(entry.get("interpolation_mode", ""))
-    if interpolation_mode not in {"exact", "linear", "nearest_fallback", "hold_last"}:
+    if interpolation_mode not in {"exact", "linear", "nearest_fallback", "hold_last", _EDGE_FUTURE_MODE, _EDGE_HOLD_MODE}:
         issues.append(
             _issue(
                 "MOBILE_BASE_ACTION_ALIGNMENT_MODE",
@@ -205,7 +215,7 @@ def _validate_base_action_alignment(
                 interpolation_mode=interpolation_mode,
             )
         )
-    if interpolation_mode == "hold_last":
+    if interpolation_mode in {"hold_last", _EDGE_FUTURE_MODE, _EDGE_HOLD_MODE}:
         sample_time_ns = timestamps.get("sample_monotonic_ns")
         source_time_ns = entry.get("support_source_t_ns")
         if not _finite_number(sample_time_ns):
@@ -226,12 +236,23 @@ def _validate_base_action_alignment(
                     frame_index=frame_index,
                 )
             )
-        elif float(source_time_ns) > float(sample_time_ns):
+        elif interpolation_mode == "hold_last" and float(source_time_ns) > float(sample_time_ns):
             issues.append(
                 _issue(
                     "MOBILE_BASE_ACTION_HOLD_LAST_FUTURE",
                     "error",
                     f"frame {frame_index} hold-last base action source must not be later than the sample",
+                    frame_index=frame_index,
+                    source_time_ns=int(source_time_ns),
+                    sample_time_ns=int(sample_time_ns),
+                )
+            )
+        elif interpolation_mode == _EDGE_FUTURE_MODE and float(source_time_ns) < float(sample_time_ns):
+            issues.append(
+                _issue(
+                    "MOBILE_BASE_ACTION_EDGE_FUTURE_PAST",
+                    "error",
+                    f"frame {frame_index} start-edge base action source must not precede the sample",
                     frame_index=frame_index,
                     source_time_ns=int(source_time_ns),
                     sample_time_ns=int(sample_time_ns),
@@ -254,6 +275,109 @@ def _validate_base_action_alignment(
             )
         )
     return support_delta_ms
+
+
+_EDGE_FUTURE_MODE = "edge_nearest_future"
+_EDGE_HOLD_MODE = "edge_hold_last"
+_INTERNAL_ALIGNMENT_MODES = {"", "exact", "linear", "nearest_fallback", "hold_last"}
+
+
+def _source_gap_report(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    key: str,
+    long_threshold_ms: float,
+    error_consecutive_count: int,
+    error_total_count: int,
+    issues: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize unique two-sided source intervals, never image-frame multiplicity."""
+    support_pairs: dict[tuple[int, int], list[int]] = {}
+    modes: list[tuple[int, str]] = []
+    for frame_index, item in enumerate(items):
+        timestamps = item.get("timestamps") if isinstance(item, Mapping) else None
+        entry = timestamps.get(key) if isinstance(timestamps, Mapping) else None
+        if not isinstance(entry, Mapping):
+            continue
+        mode = str(entry.get("interpolation_mode", ""))
+        modes.append((frame_index, mode))
+        if mode != "linear":
+            continue
+        previous = entry.get("support_prev_t_ns")
+        following = entry.get("support_next_t_ns")
+        if not _finite_number(previous) or not _finite_number(following):
+            issues.append(_issue("MOBILE_SOURCE_GAP_METADATA", "error", f"frame {frame_index} {key} linear alignment is missing support timestamps", frame_index=frame_index, key=key))
+            continue
+        previous_ns = int(previous)
+        following_ns = int(following)
+        if following_ns <= previous_ns:
+            issues.append(_issue("MOBILE_SOURCE_GAP_METADATA", "error", f"frame {frame_index} {key} has invalid support interval", frame_index=frame_index, key=key, support_prev_t_ns=previous_ns, support_next_t_ns=following_ns))
+            continue
+        support_pairs.setdefault((previous_ns, following_ns), []).append(frame_index)
+
+    normal_seen = False
+    hold_seen = False
+    edge_future_frames: list[int] = []
+    edge_hold_frames: list[int] = []
+    for frame_index, mode in modes:
+        if mode == _EDGE_FUTURE_MODE:
+            edge_future_frames.append(frame_index)
+            if normal_seen or hold_seen:
+                issues.append(_issue("MOBILE_EDGE_ALIGNMENT_INTERIOR", "error", f"frame {frame_index} {key} uses start-edge support after an internal sample", frame_index=frame_index, key=key, interpolation_mode=mode))
+            continue
+        if mode == _EDGE_HOLD_MODE:
+            edge_hold_frames.append(frame_index)
+            hold_seen = True
+            continue
+        if mode not in _INTERNAL_ALIGNMENT_MODES:
+            issues.append(_issue("MOBILE_ALIGNMENT_MODE_INVALID", "error", f"frame {frame_index} {key} has invalid interpolation_mode {mode!r}", frame_index=frame_index, key=key, interpolation_mode=mode))
+            continue
+        if hold_seen:
+            issues.append(_issue("MOBILE_EDGE_ALIGNMENT_INTERIOR", "error", f"frame {frame_index} {key} has an internal sample after end-edge support", frame_index=frame_index, key=key, interpolation_mode=mode))
+        normal_seen = True
+
+    intervals = []
+    previous_interval_end_ns: int | None = None
+    consecutive_run = 0
+    longest_consecutive_run = 0
+    long_intervals = []
+    threshold_ns = int(long_threshold_ms * 1e6)
+    for (previous_ns, following_ns), frame_indices in sorted(support_pairs.items()):
+        gap_ns = following_ns - previous_ns
+        is_long = gap_ns > threshold_ns
+        interval = {
+            "support_prev_t_ns": previous_ns,
+            "support_next_t_ns": following_ns,
+            "gap_ns": gap_ns,
+            "frame_indices": frame_indices,
+            "is_long": is_long,
+        }
+        intervals.append(interval)
+        if is_long:
+            long_intervals.append(interval)
+            consecutive_run = consecutive_run + 1 if previous_interval_end_ns == previous_ns else 1
+            longest_consecutive_run = max(longest_consecutive_run, consecutive_run)
+        else:
+            consecutive_run = 0
+        previous_interval_end_ns = following_ns
+
+    report = {
+        "long_gap_threshold_ms": float(long_threshold_ms),
+        "unique_interpolated_source_interval_count": len(intervals),
+        "long_gap_count": len(long_intervals),
+        "long_gap_intervals": long_intervals,
+        "longest_consecutive_long_gap_run": longest_consecutive_run,
+        "edge_nearest_future_frame_indices": edge_future_frames,
+        "edge_hold_last_frame_indices": edge_hold_frames,
+    }
+    if long_intervals:
+        issues.append(_issue("MOBILE_SOURCE_LONG_GAP", "warning", f"{key} has {len(long_intervals)} unique source gap(s) above {long_threshold_ms:.1f}ms", key=key, long_gap_count=len(long_intervals), long_gap_intervals=long_intervals))
+    if (
+        len(long_intervals) >= int(error_total_count)
+        or longest_consecutive_run >= int(error_consecutive_count)
+    ):
+        issues.append(_issue("MOBILE_SOURCE_LONG_GAP_PERSISTENT", "error", f"{key} source gaps exceed the episode policy", key=key, long_gap_count=len(long_intervals), longest_consecutive_long_gap_run=longest_consecutive_run, error_total_count=int(error_total_count), error_consecutive_count=int(error_consecutive_count)))
+    return report
 
 
 def _validate_tcp_metadata(info: Any, issues: list[dict[str, Any]]) -> None:
@@ -521,6 +645,26 @@ def validate_mobile_training(
     if not velocity_only_base and max_map_yaw_rate_radps > limits["map_yaw_rate_warning_radps"]:
         issues.append(_issue("MOBILE_MAP_YAW_JUMP", "warning", f"map pose max yaw rate {max_map_yaw_rate_radps:.3f}rad/s exceeds {limits['map_yaw_rate_warning_radps']:.3f}rad/s", max_yaw_rate_radps=max_map_yaw_rate_radps))
 
+    source_gap_reports = {
+        "base_state": _source_gap_report(
+            items,
+            key="base_state",
+            long_threshold_ms=limits["source_gap_long_threshold_ms"],
+            error_consecutive_count=limits["source_gap_error_consecutive_count"],
+            error_total_count=limits["source_gap_error_total_count"],
+            issues=issues,
+        )
+    }
+    if not velocity_only_base:
+        source_gap_reports["slam_tf"] = _source_gap_report(
+            items,
+            key="slam_tf",
+            long_threshold_ms=limits["source_gap_long_threshold_ms"],
+            error_consecutive_count=limits["source_gap_error_consecutive_count"],
+            error_total_count=limits["source_gap_error_total_count"],
+            issues=issues,
+        )
+
     errors = [issue for issue in issues if issue["severity"] == "error"]
     warnings = [issue for issue in issues if issue["severity"] == "warning"]
     return {
@@ -535,6 +679,7 @@ def validate_mobile_training(
         "max_slam_tf_age_ms": max_slam_tf_age_ms,
         "max_map_speed_mps": max_map_speed_mps,
         "max_map_yaw_rate_radps": max_map_yaw_rate_radps,
+        "source_gap_reports": source_gap_reports,
         "issues": issues,
         "errors": errors,
         "warnings": warnings,

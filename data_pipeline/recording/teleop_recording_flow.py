@@ -19,11 +19,11 @@ from data_pipeline.recording.alignment import (
     build_alignment_timestamp_entry,
     camera_frame_identity,
     camera_meta_monotonic_ns,
+    hold_last_timed_sample,
     interpolate_base_height_timed_sample_strict,
     interpolate_base_state_timed_sample_strict,
     interpolate_slam_tf_timed_sample_strict,
     interpolate_timed_sample_strict,
-    nearest_timed_sample,
     timed_buffer_bounds,
 )
 from data_pipeline.recording.base_recording import build_base_action_record, build_base_state_record
@@ -177,7 +177,6 @@ class TeleopRecordingFlow:
         self.action_align_max_delta_ns = self.state_align_max_delta_ns
         self.state_nearest_fallback_max_delta_ns = int(max(80_000_000, (2.5 / frequency) * 1e9))
         self.action_nearest_fallback_max_delta_ns = self.state_nearest_fallback_max_delta_ns
-        self.record_future_wait_timeout_ns = int(max(120_000_000, (2.0 / frequency) * 1e9))
         self.pending_sample_timeout_ns = int(1_000_000_000)
         self.max_pending_samples = max(120, int(frequency * 8.0))
         self.record_base = bool(getattr(args, "record_base", False))
@@ -383,6 +382,21 @@ class TeleopRecordingFlow:
             record_toggle=record_toggle,
             record_cancel=record_cancel,
         )
+
+    def cancel_for_safety(self, reason: str) -> None:
+        """Cancel an active episode after a control-path safety discontinuity."""
+        if not str(reason).strip():
+            raise ValueError("recording safety cancellation reason must not be empty")
+        with self._condition:
+            active = bool(
+                self.state.record_start_monotonic_ns is not None
+                or self.state.waiting_for_first_frame
+                or self.state.finalizing
+            )
+        if not active:
+            return
+        self._request_cancel()
+        self.log.error("[RECORD_CANCEL] safety cancellation: %s", reason)
 
     @staticmethod
     def _validate_camera_sources_for_feeder(camera_sources: dict[str, Any]) -> None:
@@ -759,6 +773,7 @@ class TeleopRecordingFlow:
         if primary_frame_id is None:
             raise RuntimeError(f"primary camera frame identity is unavailable: camera={primary_camera_name}")
         with self._condition:
+            enqueue_generation = int(self._episode_generation)
             already_pending = False
             if self.state.pending_samples:
                 last_pending = self.state.pending_samples[-1]
@@ -772,17 +787,43 @@ class TeleopRecordingFlow:
                 and primary_ts >= int(record_min_timestamp_ns)
                 and primary_frame_id is not None
                 and primary_frame_id != self.state.last_enqueued_primary_frame_id
+                and int(self._episode_generation) == enqueue_generation
                 and not self.state.finalizing
                 and not self.state.canceling
             ):
                 if len(self.state.pending_samples) >= self.max_pending_samples:
-                    raise RuntimeError(
-                        "RECORD_PENDING_QUEUE_OVERFLOW "
-                        f"pending={len(self.state.pending_samples)} limit={self.max_pending_samples}"
-                    )
+                    # Release the condition lock so cancellation or the alignment
+                    # worker can make progress. A sustained full queue remains a
+                    # hard error; this only avoids turning a concurrent cancel into
+                    # a feeder thread crash.
+                    deadline_ns = time.monotonic_ns() + 1_000_000_000
+                    while len(self.state.pending_samples) >= self.max_pending_samples:
+                        if (
+                            self.state.finalizing
+                            or self.state.canceling
+                            or int(self._episode_generation) != enqueue_generation
+                            or int(self.state.pending_samples[0]["generation"]) != enqueue_generation
+                        ):
+                            return
+                        remaining_ns = deadline_ns - time.monotonic_ns()
+                        if remaining_ns <= 0:
+                            raise RuntimeError(
+                                "RECORD_PENDING_QUEUE_OVERFLOW "
+                                f"pending={len(self.state.pending_samples)} limit={self.max_pending_samples} "
+                                f"worker_status={self.state.last_alignment_worker_status!r} "
+                                f"worker_last_ms={self.state.last_alignment_worker_ms:.3f}"
+                            )
+                        self.state.camera_feeder_status = "backpressured"
+                        self._condition.wait(timeout=min(0.05, remaining_ns / 1e9))
+                if (
+                    self.state.finalizing
+                    or self.state.canceling
+                    or int(self._episode_generation) != enqueue_generation
+                ):
+                    return
                 self.state.pending_samples.append(
                     {
-                        "generation": int(self._episode_generation),
+                        "generation": enqueue_generation,
                         "enqueue_wall_time_ns": int(time.time_ns()),
                         "sample_monotonic_ns": primary_ts,
                         "primary_camera_name": primary_camera_name,
@@ -905,7 +946,6 @@ class TeleopRecordingFlow:
         while True:
             with self._condition:
                 if self.state.canceling:
-                    self.state.canceling = False
                     self._latest_sources = None
                     action = "cancel"
                     pending = None
@@ -961,10 +1001,6 @@ class TeleopRecordingFlow:
                     waiting_generation = int(self._episode_generation)
                     waiting_finalizing = bool(self.state.finalizing)
                     waiting_pending = self.state.pending_samples[0] if self.state.pending_samples else None
-                    wait_deadline_ns = (
-                        int(pending["sample_monotonic_ns"])
-                        + int(self.record_future_wait_timeout_ns)
-                    )
                     while True:
                         if self._worker_shutdown_requested:
                             return
@@ -976,13 +1012,17 @@ class TeleopRecordingFlow:
                             break
                         if not self.state.pending_samples or self.state.pending_samples[0] is not waiting_pending:
                             break
-                        remaining_ns = wait_deadline_ns - int(time.monotonic_ns())
-                        if remaining_ns <= 0:
-                            break
-                        self._condition.wait(timeout=remaining_ns / 1e9)
+                        self._condition.wait()
                     continue
                 if self.state.pending_samples and self.state.pending_samples[0] is pending:
+                    stale_generation = int(pending["generation"]) != int(self._episode_generation)
                     self.state.pending_samples.popleft()
+                    if stale_generation:
+                        while (
+                            self.state.pending_samples
+                            and int(self.state.pending_samples[0]["generation"]) != int(self._episode_generation)
+                        ):
+                            self.state.pending_samples.popleft()
                     if status == "drop":
                         self.state.dropped_sample_count += 1
                     else:
@@ -1102,11 +1142,13 @@ class TeleopRecordingFlow:
             state_history,
             sample_monotonic_ns,
             min_timestamp_ns=record_min_timestamp_ns,
+            end_of_stream=end_of_stream,
         )
         aligned_action = self._aligned_sample(
             action_history,
             sample_monotonic_ns,
             min_timestamp_ns=record_min_timestamp_ns,
+            end_of_stream=end_of_stream,
         )
         if aligned_state is None:
             raise RuntimeError(
@@ -1145,7 +1187,7 @@ class TeleopRecordingFlow:
         end_of_stream: bool,
     ) -> str:
         if earliest is None or latest is None:
-            if end_of_stream or sample_age_ns > self.record_future_wait_timeout_ns:
+            if end_of_stream:
                 raise RuntimeError(
                     "RECORD_ALIGN_MISSING_REQUIRED_STREAM "
                     f"stream={stream_name} target_monotonic_ns={target_ns} "
@@ -1153,11 +1195,9 @@ class TeleopRecordingFlow:
                 )
             return "wait"
         if target_ns < earliest:
-            return "ready" if end_of_stream or sample_age_ns > self.record_future_wait_timeout_ns else "wait"
+            return "ready"
         if target_ns > latest:
-            if end_of_stream or sample_age_ns > self.record_future_wait_timeout_ns:
-                return "ready"
-            return "wait"
+            return "ready" if end_of_stream else "wait"
         return "ready"
 
     def _resolve_base_alignment(
@@ -1231,13 +1271,14 @@ class TeleopRecordingFlow:
             if watermark != "ready":
                 return watermark, None, None, None
 
-        aligned_base_state = self._interpolated_or_unbounded_nearest(
+        aligned_base_state = self._interpolated_or_edge_sample(
             interpolate_base_state_timed_sample_strict,
             base_state_history,
             sample_monotonic_ns,
             min_timestamp_ns=record_min_timestamp_ns,
+            end_of_stream=end_of_stream,
         )
-        aligned_base_action = self._aligned_sample(
+        aligned_base_action = self._interpolated_or_hold_last(
             base_action_history,
             sample_monotonic_ns,
             min_timestamp_ns=record_min_timestamp_ns,
@@ -1245,18 +1286,20 @@ class TeleopRecordingFlow:
         aligned_base_height = None
         aligned_slam_tf = None
         if self.base_height_required:
-            aligned_base_height = self._interpolated_or_unbounded_nearest(
+            aligned_base_height = self._interpolated_or_edge_sample(
                 interpolate_base_height_timed_sample_strict,
                 base_height_history,
                 sample_monotonic_ns,
                 min_timestamp_ns=record_min_timestamp_ns,
+                end_of_stream=end_of_stream,
             )
         if self.record_slam_map_pose:
-            aligned_slam_tf = self._interpolated_or_unbounded_nearest(
+            aligned_slam_tf = self._interpolated_or_edge_sample(
                 interpolate_slam_tf_timed_sample_strict,
                 slam_tf_history,
                 sample_monotonic_ns,
                 min_timestamp_ns=record_min_timestamp_ns,
+                end_of_stream=end_of_stream,
             )
 
         if aligned_base_state is None:
@@ -1285,7 +1328,7 @@ class TeleopRecordingFlow:
         return "ready", aligned_base_state, aligned_base_height, aligned_base_action
 
     @staticmethod
-    def _interpolated_or_unbounded_nearest(interpolator, buffer, target_ns, *, min_timestamp_ns):
+    def _interpolated_or_edge_sample(interpolator, buffer, target_ns, *, min_timestamp_ns, end_of_stream):
         aligned = interpolator(
             buffer,
             target_ns,
@@ -1294,15 +1337,12 @@ class TeleopRecordingFlow:
         )
         if aligned is not None:
             return aligned
-        aligned = nearest_timed_sample(
+        return TeleopRecordingFlow._edge_sample(
             buffer,
             target_ns,
-            max_delta_ns=None,
             min_timestamp_ns=min_timestamp_ns,
+            end_of_stream=end_of_stream,
         )
-        if aligned is not None:
-            aligned["interpolation_mode"] = "nearest_fallback"
-        return aligned
 
     def _add_record_item(
         self,
@@ -1378,13 +1418,8 @@ class TeleopRecordingFlow:
             entry["source_stamp_ns"] = int(source_stamp_ns)
         return entry
 
-    def _aligned_sample(self, buffer, target_ns, *, min_timestamp_ns):
-        """Align without using distance thresholds as a recording decision.
-
-        A pair of valid supports is always interpolated.  A one-sided support is
-        returned as an explicitly marked, unbounded nearest fallback after the
-        caller's future-wait policy has reached its deadline.
-        """
+    def _aligned_sample(self, buffer, target_ns, *, min_timestamp_ns, end_of_stream):
+        """Interpolate internal samples; only true episode edges may use one support."""
         aligned = interpolate_timed_sample_strict(
             buffer,
             target_ns,
@@ -1393,15 +1428,67 @@ class TeleopRecordingFlow:
         )
         if aligned is not None:
             return aligned
-        aligned = nearest_timed_sample(
+        return self._edge_sample(
+            buffer,
+            target_ns,
+            min_timestamp_ns=min_timestamp_ns,
+            end_of_stream=end_of_stream,
+        )
+
+    @staticmethod
+    def _interpolated_or_hold_last(buffer, target_ns, *, min_timestamp_ns):
+        aligned = interpolate_timed_sample_strict(
             buffer,
             target_ns,
             max_delta_ns=None,
             min_timestamp_ns=min_timestamp_ns,
         )
         if aligned is not None:
-            aligned["interpolation_mode"] = "nearest_fallback"
-        return aligned
+            return aligned
+        aligned = hold_last_timed_sample(
+            buffer,
+            target_ns,
+            max_age_ns=None,
+            min_timestamp_ns=min_timestamp_ns,
+        )
+        if aligned is not None:
+            return aligned
+        return TeleopRecordingFlow._edge_sample(
+            buffer,
+            target_ns,
+            min_timestamp_ns=min_timestamp_ns,
+            end_of_stream=False,
+        )
+
+    @staticmethod
+    def _edge_sample(buffer, target_ns, *, min_timestamp_ns, end_of_stream):
+        first = None
+        last = None
+        for entry in buffer:
+            timestamp_ns = int(entry["t_ns"])
+            if min_timestamp_ns is not None and timestamp_ns < int(min_timestamp_ns):
+                continue
+            if first is None:
+                first = entry
+            last = entry
+        if first is None or last is None:
+            return None
+
+        first_t_ns = int(first["t_ns"])
+        last_t_ns = int(last["t_ns"])
+        if int(target_ns) < first_t_ns:
+            result = dict(first)
+            result["target_monotonic_ns"] = int(target_ns)
+            result["delta_to_target_ns"] = first_t_ns - int(target_ns)
+            result["interpolation_mode"] = "edge_nearest_future"
+            return result
+        if int(target_ns) > last_t_ns and end_of_stream:
+            result = dict(last)
+            result["target_monotonic_ns"] = int(target_ns)
+            result["delta_to_target_ns"] = last_t_ns - int(target_ns)
+            result["interpolation_mode"] = "edge_hold_last"
+            return result
+        return None
 
     def _aligned_camera_frames(self, *, pending, camera_sources, sample_monotonic_ns, record_min_timestamp_ns):
         colors = {pending["primary_camera_name"]: pending["primary_frame"]}
