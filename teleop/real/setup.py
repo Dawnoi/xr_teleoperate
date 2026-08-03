@@ -372,7 +372,9 @@ def setup_recorder(args, validation_manager=None):
         frequency=args.frequency,
         image_size=[args.camera_width, args.camera_height],
         rerun_log=not args.headless,
-        episode_finalized_callback=(validation_manager.submit if validation_manager is not None else None),
+        episode_finalized_callback=(
+            validation_manager.validate_after_finalize if validation_manager is not None else None
+        ),
     )
 
 
