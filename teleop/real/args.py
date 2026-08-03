@@ -30,10 +30,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='direct_ik preserves the legacy path; mobile_ik_qp runs the measured-state G1-D whole-body velocity QP for both TCPs, arms, torso yaw, column, and base.')
     parser.add_argument('--mobile-state-timeout-sec', type=float, default=0.50,
                         help='Maximum age of required odom/column measurements in mobile_ik_qp mode.')
-    parser.add_argument('--mobile-height-raw-minimum', type=float, default=-0.263500,
-                        help='Calibrated rt/hispeed_state.y lower endpoint with a 0.5 mm measurement margin for the fully lowered G1D column.')
-    parser.add_argument('--mobile-height-raw-maximum', type=float, default=0.167790,
-                        help='Calibrated rt/hispeed_state.y value for the fully raised G1D column.')
+    parser.add_argument('--mobile-height-raw-minimum', type=float, default=-0.003078505,
+                        help='Calibrated rt/hispeed_state.y lower endpoint with a safety margin for the fully lowered G1D column.')
+    parser.add_argument('--mobile-height-raw-maximum', type=float, default=0.428324414,
+                        help='Calibrated rt/hispeed_state.y upper endpoint with a safety margin for the fully raised G1D column.')
     parser.add_argument('--mobile-column-travel-m', type=float, default=0.42,
                         help='Total physical G1D column travel used by mobile_ik_qp.')
     parser.add_argument('--mobile-max-torso-yaw-rate', type=float, default=0.50,

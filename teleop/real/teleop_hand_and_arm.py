@@ -1677,6 +1677,21 @@ if __name__ == '__main__':
                 stop_base_once("controller_stop")
                 START = False
                 STOP = True
+            if base_result.base_bridge_recovered:
+                recovery_reason = str(base_result.base_stop_error or "G1D AGV bridge fault")
+                logger_mp.error(
+                    "[BASE_CTRL] bridge recovered with STOP confirmed; entering HOLD and canceling the active episode: %s",
+                    recovery_reason,
+                )
+                if recording_flow is not None:
+                    recording_flow.cancel_for_safety(f"g1d_agv_bridge_recovered: {recovery_reason}")
+                RECORD_RUNNING = False
+                RECORD_TOGGLE = False
+                RECORD_CANCEL = False
+                operator_state_flow.require_safety_rearm("g1d_agv_bridge_recovered")
+                if active_input_provider != "xr":
+                    provider_runtime.set_hold(reason="g1d_agv_bridge_recovered")
+                START = False
             if base_result.base_stop_fault:
                 logger_mp.error("[BASE_CTRL] base stop fault; retrying STOP: %s", base_result.base_stop_error)
                 publish_hold_recording_sources()

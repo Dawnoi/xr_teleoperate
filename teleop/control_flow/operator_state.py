@@ -51,6 +51,14 @@ class OperatorStateFlow:
         self.prev_right_grip_pressed = False
         self.left_takeover_settle_frames = 0
         self.right_takeover_settle_frames = 0
+        self.safety_rearm_waiting = False
+        self.safety_rearm_reason = ""
+
+    def require_safety_rearm(self, reason: str) -> None:
+        if not str(reason).strip():
+            raise ValueError("safety rearm reason must not be empty")
+        self.safety_rearm_waiting = True
+        self.safety_rearm_reason = str(reason)
 
     def apply(
         self,
@@ -91,6 +99,15 @@ class OperatorStateFlow:
             right_arm_enabled=right_arm_enabled,
             tele_data=tele_data,
             normalized_head_mode=normalized_head_mode,
+            tv_wrapper=tv_wrapper,
+            arm_ik=arm_ik,
+            current_lr_arm_q=current_lr_arm_q,
+            reset_arm_ik_state=reset_arm_ik_state,
+        )
+        left_arm_enabled, right_arm_enabled = self._apply_safety_rearm_gate(
+            left_arm_enabled=left_arm_enabled,
+            right_arm_enabled=right_arm_enabled,
+            tele_data=tele_data,
             tv_wrapper=tv_wrapper,
             arm_ik=arm_ik,
             current_lr_arm_q=current_lr_arm_q,
@@ -214,6 +231,32 @@ class OperatorStateFlow:
         self.log.info("[HOME] IK state reset at current home pose.")
         self.log.info("[HOME] grip released -> teleop re-enabled.")
         return left_arm_enabled, right_arm_enabled, True
+
+    def _apply_safety_rearm_gate(
+        self,
+        *,
+        left_arm_enabled: bool,
+        right_arm_enabled: bool,
+        tele_data,
+        tv_wrapper,
+        arm_ik,
+        current_lr_arm_q,
+        reset_arm_ik_state: Callable[[Any, Any], None],
+    ) -> tuple[bool, bool]:
+        if not self.safety_rearm_waiting:
+            return left_arm_enabled, right_arm_enabled
+        if bool(tele_data.left_ctrl_squeeze) or bool(tele_data.right_ctrl_squeeze):
+            return False, False
+
+        self.safety_rearm_waiting = False
+        tv_wrapper.sync_reference_to_current_live_pose(require_live=False)
+        reset_arm_ik_state(arm_ik, current_lr_arm_q)
+        self.log.info(
+            "[SAFETY_REARM] grip release observed after %s; XR/IK re-anchored. Press grip again to take over.",
+            self.safety_rearm_reason,
+        )
+        self.safety_rearm_reason = ""
+        return False, False
 
     def _log_deadman_change(self, args, left_arm_enabled: bool, right_arm_enabled: bool) -> None:
         if left_arm_enabled == self.prev_left_arm_enabled and right_arm_enabled == self.prev_right_arm_enabled:

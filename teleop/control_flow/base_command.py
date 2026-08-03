@@ -37,6 +37,7 @@ class BaseCommandResult:
     base_stop_latched: bool = False
     base_stop_fault: bool = False
     base_stop_error: str = ""
+    base_bridge_recovered: bool = False
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class BaseStopResult:
     controller: str
     ack: str = ""
     error: str = ""
+    bridge_recovered: bool = False
 
 
 def _apply_deadzone(value: float, deadzone: float) -> float:
@@ -65,6 +67,30 @@ def stop_base_command(*, args: Any, loco_wrapper: Any = None, agv_bridge: Any = 
     if controller == "g1d_agv":
         if agv_bridge is None:
             raise RuntimeError("agv_bridge is required for --base-controller g1d_agv")
+        timing_before_stop = agv_bridge.get_timing_snapshot()
+        prior_fault = str(
+            timing_before_stop.get("fault_reason")
+            or timing_before_stop.get("last_error")
+            or "unknown bridge fault"
+        )
+        if not bool(timing_before_stop.get("healthy", True)):
+            recovery_ack = agv_bridge.recover_stop_sync()
+            if recovery_ack == "OK STOP 0 0":
+                return BaseStopResult(
+                    confirmed=True,
+                    controller=controller,
+                    ack=recovery_ack,
+                    error=f"bridge recovered after fault: {prior_fault}",
+                    bridge_recovered=True,
+                )
+            recovery_timing = agv_bridge.get_timing_snapshot()
+            recovery_error = str(recovery_timing.get("last_error") or "")
+            return BaseStopResult(
+                confirmed=False,
+                controller=controller,
+                ack=str(recovery_ack or ""),
+                error=recovery_error or prior_fault,
+            )
         ack = agv_bridge.stop_sync()
         confirmed = ack == "OK STOP 0 0"
         if confirmed:
@@ -72,7 +98,23 @@ def stop_base_command(*, args: Any, loco_wrapper: Any = None, agv_bridge: Any = 
         timing = agv_bridge.get_timing_snapshot()
         last_error = str(timing.get("last_error") or "")
         error = last_error or f"unexpected G1D AGV STOP acknowledgement: {ack!r}"
-        return BaseStopResult(confirmed=False, controller=controller, ack=str(ack or ""), error=error)
+        recovery_ack = agv_bridge.recover_stop_sync()
+        if recovery_ack == "OK STOP 0 0":
+            return BaseStopResult(
+                confirmed=True,
+                controller=controller,
+                ack=recovery_ack,
+                error=f"bridge recovered after fault: {error}",
+                bridge_recovered=True,
+            )
+        recovery_timing = agv_bridge.get_timing_snapshot()
+        recovery_error = str(recovery_timing.get("last_error") or "")
+        return BaseStopResult(
+            confirmed=False,
+            controller=controller,
+            ack=str(recovery_ack or ""),
+            error=recovery_error or error,
+        )
     raise ValueError(f"unsupported base_controller: {controller}")
 
 
@@ -270,6 +312,7 @@ def apply_base_command(
         result.base_stop_latched = stop_result.confirmed
         result.base_stop_fault = not stop_result.confirmed
         result.base_stop_error = stop_result.error
+        result.base_bridge_recovered = stop_result.bridge_recovered
         result.base_control_mode = "base_stop_fault" if result.base_stop_fault else "base_stop_recovered"
         result.should_continue_frame = True
         result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
@@ -282,6 +325,7 @@ def apply_base_command(
             result.base_stop_latched = stop_result.confirmed
             result.base_stop_fault = not stop_result.confirmed
             result.base_stop_error = stop_result.error
+            result.base_bridge_recovered = stop_result.bridge_recovered
         else:
             result.base_stop_latched = True
         result.base_control_mode = "provider_inactive"
@@ -358,6 +402,7 @@ def apply_base_command(
             result.base_stop_latched = stop_result.confirmed
             result.base_stop_fault = True
             result.base_stop_error = str(agv_timing_snapshot.get("fault_reason") or stop_result.error)
+            result.base_bridge_recovered = stop_result.bridge_recovered
             result.base_control_mode = "base_stop_fault"
             result.should_continue_frame = True
             result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0
@@ -376,6 +421,7 @@ def apply_base_command(
             result.base_stop_latched = stop_result.confirmed
             result.base_stop_fault = True
             result.base_stop_error = last_error
+            result.base_bridge_recovered = stop_result.bridge_recovered
             result.base_control_mode = "base_stop_fault"
             result.should_continue_frame = True
             result.base_control_ms = (time.perf_counter() - base_control_start) * 1000.0

@@ -29,7 +29,10 @@ MOVE_EPS = 1e-5
 HEIGHT_EPS = 1e-5
 MOVE_KEEPALIVE_SEC = 0.10
 HEIGHT_KEEPALIVE_SEC = 0.10
-RESPONSE_TIMEOUT_SEC = 1.0
+# The C++ AgvClient uses its documented 3 s RPC timeout. The parent must wait
+# slightly longer so that an SDK timeout is reported as an explicit ERR reply,
+# rather than treating a still-running RPC as a missing child response.
+RESPONSE_TIMEOUT_SEC = 3.25
 PROCESS_EXIT_TIMEOUT_SEC = 2.0
 PROCESS_POLL_SEC = 0.01
 HEALTH_MONITOR_SEC = 0.05
@@ -108,6 +111,7 @@ class G1DAgvBridge:
         self._io_lock = threading.Lock()
         self._cmd_lock = threading.Lock()
         self._cmd_cond = threading.Condition(self._cmd_lock)
+        self._recovery_lock = threading.Lock()
         self._running = True
         self._command_generation = 0
         self._pending_target = {
@@ -133,6 +137,9 @@ class G1DAgvBridge:
         self._last_error = ""
         self._fault_reason = ""
         self._fault_monotonic_ns = 0
+        self._recovery_count = 0
+        self._last_recovery_fault = ""
+        self._last_recovery_monotonic_ns = 0
         self._stderr_lines = deque(maxlen=50)
         self._stdout_buffer = b""
         self._stderr_thread = None
@@ -417,6 +424,12 @@ class G1DAgvBridge:
         changed = abs(float(height_value) - float(prev)) > HEIGHT_EPS
         if changed:
             return True
+        # HeightAdjust is a velocity command. A confirmed zero command remains
+        # stopped, so repeatedly publishing HEIGHT 0 only adds RPC load to the
+        # shared AGV control service. Non-zero motion still needs its watchdog
+        # keepalive below.
+        if abs(float(height_value)) <= HEIGHT_EPS:
+            return False
         if self._last_sent_height_ns <= 0:
             return True
         return (time.perf_counter_ns() - self._last_sent_height_ns) >= int(HEIGHT_KEEPALIVE_SEC * 1e9)
@@ -488,6 +501,60 @@ class G1DAgvBridge:
     def stop(self) -> str | None:
         return self.stop_sync()
 
+    def recover_stop_sync(self) -> str | None:
+        """Replace a faulted bridge child and confirm a zero-motion command.
+
+        A bridge timeout leaves the outstanding SDK operation's final effect
+        unknown. The old child is therefore never reused: it is terminated,
+        replaced, and the replacement must acknowledge STOP before this method
+        returns success. Callers must keep the robot in HOLD after recovery.
+        """
+        with self._recovery_lock:
+            with self._cmd_lock:
+                fault_reason = str(self._fault_reason or self._last_error or "unknown bridge fault")
+                self._running = False
+                self._has_pending = False
+                self._command_generation += 1
+                self._cmd_cond.notify_all()
+
+            self._terminate_startup_process()
+
+            worker = self._worker_thread
+            if worker is not None:
+                worker.join(timeout=RESPONSE_TIMEOUT_SEC)
+                if worker.is_alive():
+                    raise RuntimeError("G1D AGV bridge worker did not exit during fault recovery")
+            stderr_thread = self._stderr_thread
+            if stderr_thread is not None:
+                stderr_thread.join(timeout=RESPONSE_TIMEOUT_SEC)
+                if stderr_thread.is_alive():
+                    raise RuntimeError("G1D AGV bridge stderr reader did not exit during fault recovery")
+            health_thread = self._health_thread
+            if health_thread is not None:
+                health_thread.join(timeout=RESPONSE_TIMEOUT_SEC)
+                if health_thread.is_alive():
+                    raise RuntimeError("G1D AGV bridge health monitor did not exit during fault recovery")
+
+            with self._cmd_lock:
+                self._running = True
+                self._stdout_buffer = b""
+                self._fault_reason = ""
+                self._fault_monotonic_ns = 0
+                self._last_error = ""
+                self._worker_thread = None
+                self._stderr_thread = None
+                self._health_thread = None
+
+            self._start()
+            ack = self.stop_sync()
+            if not self._ack_is_success("STOP", ack):
+                return ack
+            with self._cmd_lock:
+                self._recovery_count += 1
+                self._last_recovery_fault = fault_reason
+                self._last_recovery_monotonic_ns = time.monotonic_ns()
+            return ack
+
     def get_timing_snapshot(self):
         self._refresh_health()
         with self._cmd_lock:
@@ -504,6 +571,9 @@ class G1DAgvBridge:
                 "healthy": not bool(getattr(self, "_fault_reason", "")),
                 "fault_reason": getattr(self, "_fault_reason", ""),
                 "fault_monotonic_ns": int(getattr(self, "_fault_monotonic_ns", 0)),
+                "recovery_count": int(getattr(self, "_recovery_count", 0)),
+                "last_recovery_fault": str(getattr(self, "_last_recovery_fault", "")),
+                "last_recovery_monotonic_ns": int(getattr(self, "_last_recovery_monotonic_ns", 0)),
                 "worker_alive": self._worker_thread.is_alive() if self._worker_thread is not None else False,
                 "process_alive": self.process is not None and (
                     getattr(self.process, "poll", None) is None or self.process.poll() is None
