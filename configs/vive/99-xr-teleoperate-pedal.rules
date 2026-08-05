@@ -1,0 +1,3 @@
+# Generic permission rule for keyboard-like foot pedals.
+# Install under /etc/udev/rules.d/, then reload rules and reconnect the pedal.
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess", GROUP="plugdev", MODE="0660"

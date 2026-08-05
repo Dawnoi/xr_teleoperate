@@ -12,6 +12,7 @@ import numpy as np
 
 from core.input.vive_provider import ViveTrackerInputProvider, vive_config_from_args
 from scripts.vive_axis_calibrator import solve_axis_calibration
+from scripts.vive_keyboard_enable import HoldEnableState, _resolve_input_paths
 
 
 IDENTITY_FLAT = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
@@ -22,6 +23,7 @@ def _provider() -> ViveTrackerInputProvider:
     provider._rclpy = SimpleNamespace(spin_once=lambda *_args, **_kwargs: None)
     provider._node = object()
     provider._timeout_sec = 0.25
+    provider._enable_timeout_sec = 0.5
     provider._position_scale = 1.0
     provider._orientation_mode = "relative"
     provider._r_robot_vive = np.eye(3)
@@ -37,11 +39,81 @@ def _provider() -> ViveTrackerInputProvider:
     provider._right_robot_anchor = None
     provider._left_enabled = False
     provider._right_enabled = False
+    provider._left_enable_recv_time = 0.0
+    provider._right_enable_recv_time = 0.0
     provider._frame_index = 0
     return provider
 
 
 class ViveInputTest(unittest.TestCase):
+    def test_pedal_chords_are_hold_to_enable(self):
+        state = HoldEnableState()
+
+        self.assertEqual(state.update("pedal", 56, 2), (False, False))
+        self.assertEqual(state.update("pedal", 38, 1), (False, False))
+        self.assertEqual(state.update("pedal", 56, 1), (True, False))
+        self.assertEqual(state.update("pedal", 19, 1), (True, True))
+        self.assertEqual(state.update("pedal", 38, 0), (False, True))
+        self.assertEqual(state.update("pedal", 56, 0), (False, False))
+
+    def test_pedal_sides_can_be_swapped(self):
+        state = HoldEnableState(swap_sides=True)
+
+        state.update("pedal", 56, 1)
+        self.assertEqual(state.update("pedal", 38, 1), (False, True))
+        self.assertEqual(state.update("pedal", 38, 0), (False, False))
+        self.assertEqual(state.update("pedal", 19, 1), (True, False))
+
+    def test_glob_rejects_multiple_devices(self):
+        with patch(
+            "scripts.vive_keyboard_enable.glob.glob",
+            return_value=["/dev/input/event1", "/dev/input/event2"],
+        ):
+            with self.assertRaisesRegex(RuntimeError, "unique pedal"):
+                _resolve_input_paths([], "/dev/input/event*")
+
+    def test_common_pedal_name_is_auto_selected_from_by_path(self):
+        with patch(
+            "scripts.vive_keyboard_enable.glob.glob",
+            return_value=[
+                "/dev/input/by-path/pci-0000-usb-0:1-event-kbd",
+                "/dev/input/by-path/pci-0000-usb-0:2-event-kbd",
+            ],
+        ), patch(
+            "scripts.vive_keyboard_enable._input_device_name",
+            side_effect=lambda path: "KM key08" if "0:2" in path else "Logitech Keyboard",
+        ):
+            paths, explicit = _resolve_input_paths([], "/dev/input/by-path/*-event-kbd")
+
+        self.assertFalse(explicit)
+        self.assertEqual(paths, ["/dev/input/by-path/pci-0000-usb-0:2-event-kbd"])
+
+    def test_two_common_pedals_are_auto_selected_by_physical_path(self):
+        candidates = [
+            "/dev/input/by-path/pci-0000-usb-0:1-event-kbd",
+            "/dev/input/by-path/pci-0000-usb-0:2-event-kbd",
+        ]
+        with patch("scripts.vive_keyboard_enable.glob.glob", return_value=candidates), patch(
+            "scripts.vive_keyboard_enable._input_device_name",
+            return_value="KM key08",
+        ):
+            paths, explicit = _resolve_input_paths([], "/dev/input/by-path/*-event-kbd")
+
+        self.assertFalse(explicit)
+        self.assertEqual(paths, candidates)
+
+    def test_two_exact_pedal_paths_are_supported(self):
+        paths, explicit = _resolve_input_paths(
+            ["/dev/input/by-path/left-event-kbd", "/dev/input/by-path/right-event-kbd"],
+            "/dev/input/event*",
+        )
+
+        self.assertTrue(explicit)
+        self.assertEqual(
+            paths,
+            ["/dev/input/by-path/left-event-kbd", "/dev/input/by-path/right-event-kbd"],
+        )
+
     def test_agx_axis_calibration_returns_rotation_and_origin_offset(self):
         rotation, offset = solve_axis_calibration(
             [2.0, 3.0, 4.0],
@@ -91,7 +163,7 @@ class ViveInputTest(unittest.TestCase):
 
         self.assertEqual(config["position_scale"], 0.7)
 
-    def test_keyboard_enable_is_required_and_reanchors_on_each_enable(self):
+    def test_pedal_enable_is_required_and_reanchors_on_each_enable(self):
         provider = _provider()
         current_left = np.eye(4)
         current_right = np.eye(4)
@@ -115,6 +187,24 @@ class ViveInputTest(unittest.TestCase):
         provider._on_left_enable(SimpleNamespace(data=False))
         self.assertIsNone(provider._left_tracker_anchor)
         self.assertIsNone(provider._left_robot_anchor)
+
+    def test_stale_pedal_heartbeat_disables_and_clears_anchor(self):
+        provider = _provider()
+        provider._on_left_enable(SimpleNamespace(data=True))
+        provider.get_sample(
+            current_left_robot_wrist_pose=np.eye(4),
+            current_right_robot_wrist_pose=np.eye(4),
+        )
+        self.assertIsNotNone(provider._left_tracker_anchor)
+
+        provider._left_enable_recv_time -= 1.0
+        sample = provider.get_sample(
+            current_left_robot_wrist_pose=np.eye(4),
+            current_right_robot_wrist_pose=np.eye(4),
+        )
+
+        self.assertEqual(sample.motion_intent.metadata["enabled_arms"], [])
+        self.assertIsNone(provider._left_tracker_anchor)
 
     def test_relative_orientation_matches_pico_anchor_semantics(self):
         provider = _provider()

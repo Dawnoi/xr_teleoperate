@@ -18,7 +18,7 @@ python teleop/sim/xrobotics_mujoco.py \
   --vive-calibration-file ~/.config/xr_teleoperate/vive_calibration.json
 ```
 
-MuJoCo 只复用 VIVE ROS 输入、标定、键盘使能和腕部 IK，不连接 Unitree DDS；按 `R` 开始同步。
+MuJoCo 只复用 VIVE ROS 输入、标定、踏板 deadman 和腕部 IK，不连接 Unitree DDS；按 `R` 开始同步。
 
 其他仿真相关实现：
 

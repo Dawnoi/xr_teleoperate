@@ -31,7 +31,8 @@ fi
 echo "[START_VIVE] real teleop entry: ${REAL_TELEOP_ENTRY}"
 echo "[START_VIVE] network interface: ${NETWORK_INTERFACE}"
 echo "[START_VIVE] calibration file: ${VIVE_CALIBRATION_FILE}"
-echo "[START_VIVE] keyboard enable required in another terminal: python scripts/vive_keyboard_enable.py"
+echo "[START_VIVE] pedal deadman required in another terminal: python scripts/vive_keyboard_enable.py --grab-input-devices"
+echo "[START_VIVE] add --swap-sides if the physical left/right pedals are reversed"
 
 exec python "${REAL_TELEOP_ENTRY}" \
   --input-provider vive \

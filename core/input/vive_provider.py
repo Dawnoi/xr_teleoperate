@@ -107,6 +107,7 @@ class ViveTrackerInputProvider(BaseTeleopInputProvider):
         right_mount_rotation=None,
         enable_left_topic: str = "/vive/enable_left",
         enable_right_topic: str = "/vive/enable_right",
+        enable_timeout_sec: float = 0.5,
     ):
         import rclpy
         from geometry_msgs.msg import PoseStamped
@@ -121,6 +122,9 @@ class ViveTrackerInputProvider(BaseTeleopInputProvider):
         self._node.create_subscription(Bool, enable_left_topic, self._on_left_enable, 5)
         self._node.create_subscription(Bool, enable_right_topic, self._on_right_enable, 5)
         self._timeout_sec = float(timeout_sec)
+        self._enable_timeout_sec = float(enable_timeout_sec)
+        if self._enable_timeout_sec <= 0.0:
+            raise ValueError("enable_timeout_sec must be positive")
         self._position_scale = float(position_scale)
         self._orientation_mode = str(orientation_mode)
         if self._orientation_mode not in {"absolute", "relative", "neutral"}:
@@ -146,6 +150,8 @@ class ViveTrackerInputProvider(BaseTeleopInputProvider):
         self._right_robot_anchor = None
         self._left_enabled = False
         self._right_enabled = False
+        self._left_enable_recv_time = 0.0
+        self._right_enable_recv_time = 0.0
         self._frame_index = 0
 
     def _on_left_pose(self, msg) -> None:
@@ -167,12 +173,14 @@ class ViveTrackerInputProvider(BaseTeleopInputProvider):
         if enabled != self._left_enabled:
             self._clear_anchor("left")
         self._left_enabled = enabled
+        self._left_enable_recv_time = time.monotonic()
 
     def _on_right_enable(self, msg) -> None:
         enabled = bool(msg.data)
         if enabled != self._right_enabled:
             self._clear_anchor("right")
         self._right_enabled = enabled
+        self._right_enable_recv_time = time.monotonic()
 
     def _clear_anchor(self, side: str) -> None:
         if side == "left":
@@ -189,6 +197,11 @@ class ViveTrackerInputProvider(BaseTeleopInputProvider):
             self._clear_anchor(side)
             return None
         return pose.copy()
+
+    def _enable_is_fresh(self, side: str, now: float) -> bool:
+        enabled = self._left_enabled if side == "left" else self._right_enabled
+        recv_time = self._left_enable_recv_time if side == "left" else self._right_enable_recv_time
+        return enabled and now - recv_time <= self._enable_timeout_sec
 
     def _map_tracker_pose(self, side: str, tracker_pose: np.ndarray) -> np.ndarray:
         mapped = np.eye(4, dtype=float)
@@ -239,14 +252,15 @@ class ViveTrackerInputProvider(BaseTeleopInputProvider):
             return None
 
         enabled_arms = []
+        deadman_enabled_arms = [side for side in ("left", "right") if self._enable_is_fresh(side, now)]
         left_target = current_left.copy()
         right_target = current_right.copy()
-        if left_tracker is not None and self._left_enabled:
+        if left_tracker is not None and "left" in deadman_enabled_arms:
             left_target = self._target_pose("left", left_tracker, current_left)
             enabled_arms.append("left")
         else:
             self._clear_anchor("left")
-        if right_tracker is not None and self._right_enabled:
+        if right_tracker is not None and "right" in deadman_enabled_arms:
             right_target = self._target_pose("right", right_tracker, current_right)
             enabled_arms.append("right")
         else:
@@ -274,9 +288,8 @@ class ViveTrackerInputProvider(BaseTeleopInputProvider):
             source="vive_tracker",
             metadata={
                 "enabled_arms": enabled_arms,
-                "keyboard_enabled_arms": [
-                    side for side, enabled in (("left", self._left_enabled), ("right", self._right_enabled)) if enabled
-                ],
+                "deadman_enabled_arms": deadman_enabled_arms,
+                "keyboard_enabled_arms": deadman_enabled_arms,
                 "rotation_robot_from_vive": self._r_robot_vive.tolist(),
                 "offset_xyz": self._offset_xyz.tolist(),
             },

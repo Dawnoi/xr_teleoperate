@@ -103,6 +103,7 @@ def parse_args():
     parser.add_argument("--vive-offset-xyz", type=float, nargs=3, default=[0.0, 0.0, 0.0])
     parser.add_argument("--vive-enable-left-topic", type=str, default="/vive/enable_left")
     parser.add_argument("--vive-enable-right-topic", type=str, default="/vive/enable_right")
+    parser.add_argument("--vive-enable-timeout-sec", type=float, default=0.5)
     parser.add_argument("--vive-calibration-file", type=str, default="")
     parser.add_argument(
         "--vive-rotation-robot-from-vive",

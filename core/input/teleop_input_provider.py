@@ -108,6 +108,7 @@ def _create_vive_provider(args) -> ViveTrackerInputProvider:
         right_mount_rotation=config["right_mount_rotation"],
         enable_left_topic=getattr(args, "vive_enable_left_topic", "/vive/enable_left"),
         enable_right_topic=getattr(args, "vive_enable_right_topic", "/vive/enable_right"),
+        enable_timeout_sec=getattr(args, "vive_enable_timeout_sec", 0.5),
     )
 
 
