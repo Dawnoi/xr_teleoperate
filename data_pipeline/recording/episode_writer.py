@@ -8,10 +8,31 @@ import struct
 import shutil
 from collections import deque
 from .rerun_visualizer import RerunLogger
-from queue import Queue, Empty
 from threading import Thread, Condition
 import logging_mp
 logger_mp = logging_mp.getLogger(__name__)
+
+
+CAMERA_HISTORY_SIZE = 60
+WRITER_QUEUE_SIZE = 60
+
+
+class _WriterQueueView:
+    """Compatibility view for queue depth and drain waits."""
+
+    def __init__(self, writer, maxsize: int):
+        self._writer = writer
+        self.maxsize = int(maxsize)
+
+    def qsize(self) -> int:
+        with self._writer._writer_condition:
+            return len(self._writer._pending_item_data)
+
+    def empty(self) -> bool:
+        return self.qsize() == 0
+
+    def join(self) -> None:
+        self._writer._wait_for_item_drain()
 
 
 def canonical_color_key(color_key: str) -> str:
@@ -84,7 +105,7 @@ class ZMQRawCameraReceiver:
         self._running = True
         self._frame = None
         self._meta = None
-        self._history = deque(maxlen=240)
+        self._history = deque(maxlen=CAMERA_HISTORY_SIZE)
         self._frame_seq_local = -1
         self._receiver_frame_seq = -1
         self._condition = Condition()
@@ -338,6 +359,7 @@ class EpisodeWriter():
 
         self.item_id = -1
         self.episode_id = -1
+        self._data_file = None
         if os.path.exists(self.task_dir):
             episode_dirs = [episode_dir for episode_dir in os.listdir(self.task_dir) if 'episode_' in episode_dir and not episode_dir.endswith('.zip')]
             episode_last = sorted(episode_dirs)[-1] if len(episode_dirs) > 0 else None
@@ -349,8 +371,14 @@ class EpisodeWriter():
         self.data_info()
 
         self.is_available = True  # Indicates whether the class is available for new operations
-        # Initialize the queue and worker thread
-        self.item_data_queue = Queue(-1)
+        # The writer thread is the only owner of frame writes, file finalization,
+        # and episode deletion. Producers only append data or lifecycle requests.
+        self._writer_condition = Condition()
+        self._pending_item_data = deque()
+        self._unfinished_item_count = 0
+        self._cancel_requested = False
+        self._worker_status = "idle"
+        self.item_data_queue = _WriterQueueView(self, WRITER_QUEUE_SIZE)
         self.stop_worker = False
         self.need_save = False  # Flag to indicate when save_episode is triggered
         self.worker_thread = Thread(target=self.process_queue)
@@ -359,7 +387,32 @@ class EpisodeWriter():
         logger_mp.info("==> EpisodeWriter initialized successfully.\n")
     
     def is_ready(self):
-        return self.is_available
+        self._assert_worker_healthy()
+        with self._writer_condition:
+            return self.is_available
+
+    def queue_status(self) -> dict[str, object]:
+        self._assert_worker_healthy()
+        with self._writer_condition:
+            return {
+                "depth": len(self._pending_item_data),
+                "capacity": int(self.item_data_queue.maxsize),
+                "unfinished": int(self._unfinished_item_count),
+                "worker_status": str(self._worker_status),
+                "cancel_requested": bool(self._cancel_requested),
+            }
+
+    def _assert_worker_healthy(self) -> None:
+        if not self.worker_thread.is_alive() and not self.stop_worker:
+            raise RuntimeError(
+                "episode writer thread exited unexpectedly; inspect the writer traceback above"
+            )
+
+    def _wait_for_item_drain(self) -> None:
+        with self._writer_condition:
+            while self._unfinished_item_count > 0:
+                self._writer_condition.wait(timeout=0.1)
+                self._assert_worker_healthy()
 
     def data_info(self, version='1.0.0', date=None, author=None):
         self.info = {
@@ -402,9 +455,15 @@ class EpisodeWriter():
         Note:
             Once successfully created, this function will only be available again after save_episode complete its save task.
         """
-        if not self.is_available:
-            logger_mp.info("==> The class is currently unavailable for new operations. Please wait until ongoing tasks are completed.")
-            return False  # Return False if the class is unavailable
+        self._assert_worker_healthy()
+        with self._writer_condition:
+            if not self.is_available:
+                logger_mp.info("==> The class is currently unavailable for new operations. Please wait until ongoing tasks are completed.")
+                return False  # Return False if the class is unavailable
+            if self._pending_item_data or self._unfinished_item_count:
+                raise RuntimeError(
+                    "episode writer is marked available while queued items still exist"
+                )
 
         normalized_enabled_cameras = normalize_enabled_cameras(enabled_cameras)
         self.info = {**self.info, "enabled_cameras": normalized_enabled_cameras}
@@ -428,11 +487,12 @@ class EpisodeWriter():
         os.makedirs(self.color_wrist_right_dir, exist_ok=True)
         os.makedirs(self.depth_dir, exist_ok=True)
         os.makedirs(self.audio_dir, exist_ok=True)
-        with open(self.json_path, "w", encoding="utf-8") as f:
-            f.write('{\n')
-            f.write('"info": ' + json.dumps(self.info, ensure_ascii=False, indent=4) + ',\n')
-            f.write('"text": ' + json.dumps(self.text, ensure_ascii=False, indent=4) + ',\n')
-            f.write('"data": [\n')
+        self._data_file = open(self.json_path, "w", encoding="utf-8", buffering=1024 * 1024)
+        self._data_file.write('{\n')
+        self._data_file.write('"info": ' + json.dumps(self.info, ensure_ascii=False, indent=4) + ',\n')
+        self._data_file.write('"text": ' + json.dumps(self.text, ensure_ascii=False, indent=4) + ',\n')
+        self._data_file.write('"data": [\n')
+        self._data_file.flush()
         self.first_item = True   # Flag to handle commas in JSON array
 
         if self.rerun_log:
@@ -452,45 +512,100 @@ class EpisodeWriter():
         else:
             self.online_logger = None
 
-        self.is_available = False  # After the episode is created, the class is marked as unavailable until the episode is successfully saved
+        with self._writer_condition:
+            self.need_save = False
+            self._cancel_requested = False
+            self.is_available = False
+            self._worker_status = "recording"
+            self._writer_condition.notify_all()
         logger_mp.info(f"==> New episode created: {self.episode_dir}")
         return True  # Return True if the episode is successfully created
         
     def add_item(self, colors, depths=None, states=None, actions=None, tactiles=None, audios=None, sim_state=None, timestamps=None, control_extras=None):
-        # Increment the item ID
-        self.item_id += 1
-        # Create the item data dictionary
-        item_data = {
-            'idx': self.item_id,
-            'colors': colors,
-            'depths': depths,
-            'states': states,
-            'actions': actions,
-            'tactiles': tactiles,
-            'audios': audios,
-            'sim_state': sim_state,
-            'timestamps': timestamps,
-        }
-        # `control_extras` is accepted for compatibility but intentionally not serialized.
-        # Enqueue the item data
-        self.item_data_queue.put(item_data)
+        self._assert_worker_healthy()
+        with self._writer_condition:
+            if self.is_available or self.need_save or self._cancel_requested:
+                raise RuntimeError(
+                    "episode writer rejected item because no writable episode is active"
+                )
+            if len(self._pending_item_data) >= self.item_data_queue.maxsize:
+                raise RuntimeError(
+                    "episode writer queue is full: "
+                    f"depth={len(self._pending_item_data)} capacity={self.item_data_queue.maxsize}"
+                )
+            self.item_id += 1
+            item_data = {
+                'idx': self.item_id,
+                'colors': colors,
+                'depths': depths,
+                'states': states,
+                'actions': actions,
+                'tactiles': tactiles,
+                'audios': audios,
+                'sim_state': sim_state,
+                'timestamps': timestamps,
+            }
+            # `control_extras` is accepted for compatibility but intentionally not serialized.
+            self._pending_item_data.append(item_data)
+            self._unfinished_item_count += 1
+            self._writer_condition.notify_all()
 
     def process_queue(self):
-        while not self.stop_worker or not self.item_data_queue.empty():
-            # Process items in the queue
-            try:
-                item_data = self.item_data_queue.get(timeout=1)
-                try:
-                    self._process_item_data(item_data)
-                except Exception as e:
-                    logger_mp.info(f"Error processing item_data (idx={item_data['idx']}): {e}")
-                self.item_data_queue.task_done()
-            except Empty:
-                pass
-        
-            # Check if save_episode was triggered
-            if self.need_save and self.item_data_queue.empty():
-                self._save_episode()
+        while True:
+            with self._writer_condition:
+                while (
+                    not self._cancel_requested
+                    and not self._pending_item_data
+                    and not self.need_save
+                    and not self.stop_worker
+                ):
+                    self._worker_status = "idle"
+                    self._writer_condition.wait()
+
+                if self._cancel_requested:
+                    dropped_count = len(self._pending_item_data)
+                    self._pending_item_data.clear()
+                    self._unfinished_item_count -= dropped_count
+                    self._worker_status = "canceling"
+                    action = "cancel"
+                    item_data = None
+                elif self._pending_item_data:
+                    item_data = self._pending_item_data.popleft()
+                    self._worker_status = "writing"
+                    action = "write"
+                elif self.need_save:
+                    self.need_save = False
+                    self._worker_status = "saving"
+                    action = "save"
+                    item_data = None
+                elif self.stop_worker:
+                    self._worker_status = "stopped"
+                    return
+                else:
+                    raise RuntimeError("episode writer reached an invalid worker state")
+
+            if action == "write":
+                self._process_item_data(item_data)
+                with self._writer_condition:
+                    self._unfinished_item_count -= 1
+                    self._writer_condition.notify_all()
+                continue
+
+            if action == "cancel":
+                self._cancel_episode()
+                with self._writer_condition:
+                    self._cancel_requested = False
+                    self.is_available = True
+                    self._worker_status = "idle"
+                    self._writer_condition.notify_all()
+                continue
+
+            self._save_episode()
+            with self._writer_condition:
+                if not self._cancel_requested:
+                    self.is_available = True
+                    self._worker_status = "idle"
+                self._writer_condition.notify_all()
 
     def _process_item_data(self, item_data):
         idx = item_data['idx']
@@ -500,11 +615,12 @@ class EpisodeWriter():
         timestamps = item_data.get('timestamps', {}) or {}
         rerun_colors = {}
         rerun_depths = {}
+        rerun_enabled = self.online_logger is not None
 
-        if colors:
+        if rerun_enabled and colors:
             for color_key, color in colors.items():
                 rerun_colors[color_key] = color.copy() if hasattr(color, "copy") else color
-        if depths:
+        if rerun_enabled and depths:
             for depth_key, depth in depths.items():
                 rerun_depths[depth_key] = depth.copy() if hasattr(depth, "copy") else depth
 
@@ -524,17 +640,18 @@ class EpisodeWriter():
                     f'{str(idx).zfill(6)}_{canonical_key}.jpg'
                 )
                 target_dir = os.path.join(self.color_dir, canonical_key)
-                os.makedirs(target_dir, exist_ok=True)
-                if not cv2.imwrite(os.path.join(target_dir, color_name), color):
-                    logger_mp.info(f"Failed to save color image.")
+                color_path = os.path.join(target_dir, color_name)
+                if not cv2.imwrite(color_path, color):
+                    raise RuntimeError(f"failed to save color image: {color_path}")
                 item_data['colors'][color_key] = os.path.join('colors', canonical_key, color_name)
 
         # Save depths
         if depths:
             for idx_depth, (depth_key, depth) in enumerate(depths.items()):
                 depth_name = f'{str(idx).zfill(6)}_{depth_key}.jpg'
-                if not cv2.imwrite(os.path.join(self.depth_dir, depth_name), depth):
-                    logger_mp.info(f"Failed to save depth image.")
+                depth_path = os.path.join(self.depth_dir, depth_name)
+                if not cv2.imwrite(depth_path, depth):
+                    raise RuntimeError(f"failed to save depth image: {depth_path}")
                 item_data['depths'][depth_key] = os.path.join('depths', depth_name)
 
         # Save audios
@@ -545,98 +662,101 @@ class EpisodeWriter():
                 item_data['audios'][mic] = os.path.join('audios', audio_name)
 
         # Update episode data
-        with open(self.json_path, "a", encoding="utf-8") as f:
-            if not self.first_item:
-                f.write(",\n")
-            f.write(json.dumps(item_data, ensure_ascii=False, indent=4))
-            self.first_item = False
+        if self._data_file is None:
+            raise RuntimeError("episode data file is not open while processing an item")
+        if not self.first_item:
+            self._data_file.write(",\n")
+        self._data_file.write(json.dumps(item_data, ensure_ascii=False, separators=(",", ":")))
+        self.first_item = False
 
         # Log data if necessary
-        if self.rerun_log:
-            curent_record_time = time.time()
-            logger_mp.info(f"==> episode_id:{self.episode_id}  item_id:{idx}  current_time:{curent_record_time}")
+        if rerun_enabled:
             rerun_item_data = dict(item_data)
             rerun_item_data['colors'] = rerun_colors
             rerun_item_data['depths'] = rerun_depths
-            if self.online_logger is not None:
-                self.online_logger.log_item_data(rerun_item_data)
+            self.online_logger.log_item_data(rerun_item_data)
 
     def save_episode(self):
         """
         Trigger the save operation. This sets the save flag, and the process_queue thread will handle it.
         """
-        self.need_save = True  # Set the save flag
+        self._assert_worker_healthy()
+        with self._writer_condition:
+            if self.is_available:
+                raise RuntimeError("episode save requested without an active episode")
+            if self._cancel_requested:
+                raise RuntimeError("episode save requested while cancellation is pending")
+            self.need_save = True
+            self._writer_condition.notify_all()
         logger_mp.info(f"==> Episode saved start...")
 
     def cancel_episode(self):
         """
         Drop the active episode and reuse its episode index for the next recording.
         """
-        if self.is_available:
-            return
-        self.need_save = False
-        while True:
-            try:
-                self.item_data_queue.get_nowait()
-                self.item_data_queue.task_done()
-            except Empty:
-                break
-        if self.rerun_log and self.online_logger is not None:
-            try:
-                self.online_logger.close()
-            except Exception:
-                pass
+        self._assert_worker_healthy()
+        with self._writer_condition:
+            if self.is_available:
+                return
+            self.need_save = False
+            self._cancel_requested = True
+            self._worker_status = "cancel_requested"
+            self._writer_condition.notify_all()
+        logger_mp.info("==> Episode cancel requested; writer thread will discard it asynchronously.")
+
+    def _cancel_episode(self):
+        if self.online_logger is not None:
+            self.online_logger.close()
             self.online_logger = None
+        if self._data_file is not None:
+            self._data_file.close()
+            self._data_file = None
         episode_dir = getattr(self, "episode_dir", None)
         if episode_dir and os.path.isdir(episode_dir):
-            shutil.rmtree(episode_dir, ignore_errors=True)
+            shutil.rmtree(episode_dir)
         self.item_id = -1
         self.episode_id = self.episode_id - 1
         self.first_item = True
-        self.is_available = True
         logger_mp.info("==> Episode canceled; next recording will reuse this episode index.")
 
     def _save_episode(self):
         """
         Save the episode data to a JSON file.
         """
-        with open(self.json_path, "a", encoding="utf-8") as f:
-            f.write("\n]\n}")      # Close the JSON array and object
+        if self._data_file is None:
+            raise RuntimeError("episode data file is not open while finalizing episode")
+        self._data_file.write("\n]\n}")
+        self._data_file.flush()
+        self._data_file.close()
+        self._data_file = None
 
-        if self.rerun_log and self.online_logger is not None:
-            try:
-                self.online_logger.close()
-                logger_mp.info(f"==> Rerun recording finalized at {os.path.join(self.episode_dir, 'rerun.rrd')}.")
-            except Exception:
-                pass
+        if self.online_logger is not None:
+            self.online_logger.close()
+            logger_mp.info(f"==> Rerun recording finalized at {os.path.join(self.episode_dir, 'rerun.rrd')}.")
             self.online_logger = None
 
         if self.episode_finalized_callback is not None:
             self.episode_finalized_callback(self.episode_dir)
 
-        self.need_save = False     # Reset the save flag
-        self.is_available = True   # Mark the class as available after saving
         logger_mp.info(f"==> Episode saved successfully to {self.json_path}.")
 
     def close(self):
         """
         Stop the worker thread and ensure all tasks are completed.
         """
-        self.item_data_queue.join()
-        if not self.is_available:  # If self.is_available is False, it means there is still data not saved.
-            self.save_episode()
-        while not self.is_available:
-            time.sleep(0.01)
-        self.stop_worker = True
+        self._assert_worker_healthy()
+        with self._writer_condition:
+            if not self.is_available and not self._cancel_requested:
+                self.need_save = True
+                self._writer_condition.notify_all()
+            while not self.is_available:
+                self._writer_condition.wait(timeout=0.1)
+                self._assert_worker_healthy()
+            self.stop_worker = True
+            self._writer_condition.notify_all()
         self.worker_thread.join()
         if self.online_logger is not None:
-            try:
-                self.online_logger.close()
-            except Exception:
-                pass
+            self.online_logger.close()
             self.online_logger = None
         if self.rerun_logger is not None:
-            try:
-                self.rerun_logger.close()
-            except Exception:
-                pass
+            self.rerun_logger.close()

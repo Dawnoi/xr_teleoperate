@@ -20,6 +20,29 @@ KEY_BY_COMMAND = {
 }
 
 
+def summarize_validation_report(report: Any) -> dict[str, Any]:
+    if not isinstance(report, dict) or not report:
+        return {}
+    errors = report.get("errors", [])
+    warnings = report.get("warnings", [])
+    if not isinstance(errors, list) or not isinstance(warnings, list):
+        raise TypeError("validation report errors and warnings must be lists")
+    level = str(report.get("level", "unknown") or "unknown")
+    return {
+        "checked_at_ns": int(report.get("checked_at_ns", 0) or 0),
+        "episode_name": str(report.get("episode_name", "") or ""),
+        "episode_dir": str(report.get("episode_dir", "") or ""),
+        "level": level,
+        "status": str(report.get("status", level) or level),
+        "error_count": len(errors),
+        "warning_count": len(warnings),
+        "frame_count": int(report.get("frame_count", 0) or 0),
+        "duration_sec": float(report.get("duration_sec", 0.0) or 0.0),
+        "observed_fps": float(report.get("observed_fps", 0.0) or 0.0),
+        "expected_fps": float(report.get("expected_fps", 0.0) or 0.0),
+    }
+
+
 def dispatch_ui_commands(commands: list[UiCommand], on_press: Callable[[str], None]) -> list[str]:
     pressed_keys: list[str] = []
     for command in commands:
@@ -50,19 +73,22 @@ def build_runtime_recording_status(
     pending_samples = getattr(flow_state, "pending_samples", [])
     pending_count = int(alignment_status.get("pending_samples", len(pending_samples) if pending_samples is not None else 0))
     finalizing = bool(alignment_status.get("finalizing", getattr(flow_state, "finalizing", False)))
-    active = bool(record_running or waiting_for_first_frame or finalizing)
+    canceling = bool(alignment_status.get("canceling", getattr(flow_state, "canceling", False)))
+    recording_error = str(alignment_status.get("last_failure", "") or "")
+    active = bool(record_running or waiting_for_first_frame or finalizing or canceling)
     frame_index = int(getattr(recorder, "item_id", -1) or -1) + 1 if recorder is not None else 0
     if frame_index < 0:
         frame_index = 0
     session_dir = str(getattr(recorder, "episode_dir", "") or "")
-    phase = "recording" if record_running else "armed" if waiting_for_first_frame else "finalizing" if finalizing else "idle"
+    phase = "canceling" if canceling else "error" if recording_error else "recording" if record_running else "armed" if waiting_for_first_frame else "finalizing" if finalizing else "idle"
     record_start_monotonic_ns = alignment_status.get(
         "record_start_monotonic_ns", getattr(flow_state, "record_start_monotonic_ns", None)
     )
     validation_manager = getattr(recording_flow, "validation_manager", None)
     validation_status = validation_manager.status() if validation_manager is not None else {}
     validation_pending = bool(validation_status.get("pending", False))
-    last_validation = validation_status.get("last_validation", {})
+    last_validation = summarize_validation_report(validation_status.get("last_validation", {}))
+    writer_queue = recorder.queue_status() if recorder is not None and callable(getattr(recorder, "queue_status", None)) else {}
     if validation_pending and not active:
         phase = "validating"
     base_enabled = bool(getattr(args, "record_base", False))
@@ -87,7 +113,7 @@ def build_runtime_recording_status(
         "active_root_dir": str(task_root),
         "fps": float(args.frequency),
         "frame_index": frame_index,
-        "error": "",
+        "error": recording_error,
         "last_alignment": {
             "waiting_for_first_frame": waiting_for_first_frame,
             "pending_samples": int(pending_count),
@@ -105,6 +131,11 @@ def build_runtime_recording_status(
             ),
             "camera_feeder_last_frame_seq": alignment_status.get("camera_feeder_last_frame_seq"),
             "record_start_monotonic_ns": record_start_monotonic_ns,
+            "writer_queue_depth": int(writer_queue.get("depth", 0)),
+            "writer_queue_capacity": int(writer_queue.get("capacity", 0)),
+            "writer_unfinished_items": int(writer_queue.get("unfinished", 0)),
+            "writer_status": str(writer_queue.get("worker_status", "disabled")),
+            "writer_cancel_requested": bool(writer_queue.get("cancel_requested", False)),
         },
         "last_alert": {},
         "alert_seq": 0,

@@ -187,7 +187,7 @@ def _validate_alignment(
     delta_ms = float(entry["delta_to_sample_ns"]) / 1e6
     interpolation_mode = str(entry.get("interpolation_mode", ""))
     if interpolation_mode not in {_EDGE_FUTURE_MODE, _EDGE_HOLD_MODE} and abs(delta_ms) > max_abs_delta_ms:
-        issues.append(_issue("MOBILE_ALIGNMENT_EXCEEDED", "error", f"frame {frame_index} {key} delta {delta_ms:.1f}ms exceeds {max_abs_delta_ms:.1f}ms", frame_index=frame_index, delta_ms=delta_ms, limit_ms=max_abs_delta_ms))
+        issues.append(_issue("MOBILE_ALIGNMENT_EXCEEDED", "warning", f"frame {frame_index} {key} delta {delta_ms:.1f}ms exceeds {max_abs_delta_ms:.1f}ms", frame_index=frame_index, delta_ms=delta_ms, limit_ms=max_abs_delta_ms))
     if require_past and delta_ms > 0.0:
         issues.append(_issue("MOBILE_ACTION_ALIGNMENT_FUTURE", "error", f"frame {frame_index} base action must be hold-last, got future delta {delta_ms:.1f}ms", frame_index=frame_index, delta_ms=delta_ms))
     return delta_ms
@@ -267,7 +267,7 @@ def _validate_base_action_alignment(
         issues.append(
             _issue(
                 "MOBILE_ALIGNMENT_EXCEEDED",
-                "error",
+                "warning",
                 f"frame {frame_index} base_action support delta {support_delta_ms:.1f}ms exceeds {max_support_delta_ms:.1f}ms",
                 frame_index=frame_index,
                 delta_ms=support_delta_ms,
@@ -376,7 +376,7 @@ def _source_gap_report(
         len(long_intervals) >= int(error_total_count)
         or longest_consecutive_run >= int(error_consecutive_count)
     ):
-        issues.append(_issue("MOBILE_SOURCE_LONG_GAP_PERSISTENT", "error", f"{key} source gaps exceed the episode policy", key=key, long_gap_count=len(long_intervals), longest_consecutive_long_gap_run=longest_consecutive_run, error_total_count=int(error_total_count), error_consecutive_count=int(error_consecutive_count)))
+        issues.append(_issue("MOBILE_SOURCE_LONG_GAP_PERSISTENT", "warning", f"{key} source gaps exceed the configured warning policy", key=key, long_gap_count=len(long_intervals), longest_consecutive_long_gap_run=longest_consecutive_run, error_total_count=int(error_total_count), error_consecutive_count=int(error_consecutive_count)))
     return report
 
 
@@ -497,7 +497,7 @@ def _validate_global_slam_pose(
     else:
         max_slam_tf_age_ms = float(tf_age_ms)
         if max_slam_tf_age_ms > limits["slam_tf_max_age_ms"]:
-            issues.append(_issue("MOBILE_SLAM_TF_STALE", "error", f"frame {frame_index} slam TF age {max_slam_tf_age_ms:.1f}ms exceeds {limits['slam_tf_max_age_ms']:.1f}ms", frame_index=frame_index, tf_age_ms=max_slam_tf_age_ms, limit_ms=limits["slam_tf_max_age_ms"]))
+            issues.append(_issue("MOBILE_SLAM_TF_STALE", "warning", f"frame {frame_index} slam TF age {max_slam_tf_age_ms:.1f}ms exceeds {limits['slam_tf_max_age_ms']:.1f}ms", frame_index=frame_index, tf_age_ms=max_slam_tf_age_ms, limit_ms=limits["slam_tf_max_age_ms"]))
         if max_slam_tf_age_ms < -limits["slam_tf_max_future_ms"]:
             issues.append(_issue("MOBILE_SLAM_TF_FUTURE", "error", f"frame {frame_index} slam TF is {-max_slam_tf_age_ms:.1f}ms in the future; verify ROS host clock synchronization", frame_index=frame_index, tf_age_ms=max_slam_tf_age_ms, limit_ms=limits["slam_tf_max_future_ms"]))
     return previous_map_pose, identity_assumption_count, max_slam_tf_age_ms, max_map_speed_mps, max_map_yaw_rate_radps

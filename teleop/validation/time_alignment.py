@@ -152,6 +152,7 @@ def _read_signal_times(
     issues: list[dict[str, Any]] = []
     strictly_increasing = True
     previous: float | None = None
+    edge_hold_started = False
     path = f"timestamps.{source_name}.host_monotonic_ns"
     for frame_index, item in enumerate(items):
         timestamps = item.get("timestamps") if isinstance(item, Mapping) else None
@@ -168,7 +169,23 @@ def _read_signal_times(
             strictly_increasing = False
             continue
         current = float(value)
-        if previous is not None and current <= previous:
+        interpolation_mode = source.get("interpolation_mode")
+        is_terminal_edge_hold = interpolation_mode == "edge_hold_last"
+        if edge_hold_started and not is_terminal_edge_hold:
+            issues.append(
+                _issue(
+                    f"nonterminal_{source_name}_edge_hold",
+                    "error",
+                    f"{path} resumes after terminal edge_hold_last support",
+                    frame_index=frame_index,
+                    path=path,
+                    interpolation_mode=interpolation_mode,
+                )
+            )
+            strictly_increasing = False
+        if is_terminal_edge_hold:
+            edge_hold_started = True
+        if previous is not None and (current < previous or (current == previous and not is_terminal_edge_hold)):
             code = f"repeated_{source_name}_timestamp" if current == previous else f"backward_{source_name}_timestamp"
             issues.append(_issue(code, "error", f"{path} must be strictly increasing", frame_index=frame_index, path=path, previous=previous, current=current))
             strictly_increasing = False
@@ -293,8 +310,8 @@ def _sample_interval_report(
         severity = "warning"
         report["issues"].append(_issue("long_sample_interval", "warning", "sample interval exceeds configured warning threshold", frame_indices=offending, threshold_ns=threshold))
     if len(offending) >= min_error_count or report["longest_consecutive_long_gap_run"] >= int(config["error_consecutive_count"]):
-        severity = "error"
-        report["issues"].append(_issue("persistent_long_sample_interval", "error", "sample intervals exceed the configured error policy", frame_indices=offending, threshold_ns=threshold))
+        severity = "warning" if STATUS_ORDER.get(severity, 2) < STATUS_ORDER["error"] else severity
+        report["issues"].append(_issue("persistent_long_sample_interval", "warning", "sample intervals exceed the configured warning policy", frame_indices=offending, threshold_ns=threshold))
     report["status"] = severity
     return report, list(report["issues"]), mean_interval
 
@@ -361,8 +378,8 @@ def _source_report(
                 severity = "warning"
             report["issues"].append(_issue("camera_frame_reuse", "warning", f"{source_name} reuses an already received camera image", source=source_name, frame_indices=reuse_indices, count=reuse_count, fraction=report["camera_frame_reuse_fraction"]))
         if reuse_count >= error_count or report["longest_consecutive_camera_frame_reuse_run"] >= int(config["camera_reuse_error_consecutive_count"]):
-            severity = "error"
-            report["issues"].append(_issue("persistent_camera_frame_reuse", "error", f"{source_name} camera image reuse exceeds the configured error policy", source=source_name, frame_indices=reuse_indices, count=reuse_count, fraction=report["camera_frame_reuse_fraction"]))
+            severity = "warning" if STATUS_ORDER.get(severity, 2) < STATUS_ORDER["error"] else severity
+            report["issues"].append(_issue("persistent_camera_frame_reuse", "warning", f"{source_name} camera image reuse exceeds the configured warning policy", source=source_name, frame_indices=reuse_indices, count=reuse_count, fraction=report["camera_frame_reuse_fraction"]))
     if sample_interval_ns is None:
         report["status"] = "error" if source_issues else "warning"
         return report, list(report["issues"])
@@ -402,8 +419,8 @@ def _source_report(
         and len(error_indices) >= min_error_count
     ) or report["longest_consecutive_error_run"] >= int(config["error_consecutive_count"])
     if persistent_error:
-        severity = "error"
-        report["issues"].append(_issue("persistent_alignment_error", "error", f"{source_name} exceeds the configured alignment error policy", source=source_name, frame_indices=error_indices, threshold_ns=error_threshold))
+        severity = "warning" if STATUS_ORDER.get(severity, 2) < STATUS_ORDER["error"] else severity
+        report["issues"].append(_issue("persistent_alignment_error", "warning", f"{source_name} exceeds the configured warning policy", source=source_name, frame_indices=error_indices, threshold_ns=error_threshold))
     report["status"] = severity
     return report, list(report["issues"])
 
@@ -425,7 +442,7 @@ def _action_support_report(
             issues.append(_issue("missing_action_support", "error", f"frame {frame_index} is missing timestamps.action support metadata", frame_index=frame_index))
             continue
         mode = action.get("interpolation_mode")
-        if mode not in {"exact", "linear", "nearest_fallback"}:
+        if mode not in {"exact", "linear", "nearest_fallback", "edge_nearest_future", "edge_hold_last"}:
             issues.append(_issue("invalid_action_interpolation_mode", "error", f"frame {frame_index} has invalid action interpolation_mode", frame_index=frame_index, value=mode))
             continue
         max_delta = action.get("support_max_abs_delta_ns")
@@ -453,6 +470,8 @@ def _action_support_report(
         "linear_count": modes.count("linear"),
         "exact_count": modes.count("exact"),
         "nearest_fallback_count": modes.count("nearest_fallback"),
+        "edge_nearest_future_count": modes.count("edge_nearest_future"),
+        "edge_hold_last_count": modes.count("edge_hold_last"),
         "nearest_fallback_frame_indices": [index for index, mode in enumerate(modes) if mode == "nearest_fallback"],
         "support_nearest_abs_delta_mean_ns": sum(support_nearest_abs_delta_ns) / len(support_nearest_abs_delta_ns) if support_nearest_abs_delta_ns else None,
         "support_nearest_abs_delta_p95_ns": _percentile(support_nearest_abs_delta_ns, 0.95),
@@ -528,8 +547,8 @@ def _action_support_report(
         or report["longest_consecutive_nearest_fallback_run"] >= int(config["error_consecutive_count"])
     )
     if persistent_error:
-        severity = "error"
-        report["issues"].append(_issue("persistent_action_support_error", "error", "action interpolation support exceeds the configured error policy", frame_indices=sorted(set(error_indices + fallback_indices))))
+        severity = "warning" if STATUS_ORDER.get(severity, 2) < STATUS_ORDER["error"] else severity
+        report["issues"].append(_issue("persistent_action_support_error", "warning", "action interpolation support exceeds the configured warning policy", frame_indices=sorted(set(error_indices + fallback_indices))))
     report["status"] = severity
     return report, list(report["issues"])
 

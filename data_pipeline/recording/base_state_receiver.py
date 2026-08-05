@@ -130,6 +130,7 @@ class BaseStateReceiver:
         if self.slam_chain_max_skew_ns <= 0:
             raise ValueError("slam_chain_max_skew_ms must be positive")
         self._lock = threading.Lock()
+        self._sample_condition = threading.Condition(self._lock)
         self._base_state_history = deque(maxlen=self.history_size)
         self._base_height_history = deque(maxlen=self.history_size)
         self._slam_tf_history = deque(maxlen=self.history_size * 5)
@@ -371,9 +372,51 @@ class BaseStateReceiver:
     def snapshot_latest(self):
         """Return the newest measured odometry and column samples without interpolation."""
         with self._lock:
-            odom = dict(self._base_state_history[-1]) if self._base_state_history else None
-            height = dict(self._base_height_history[-1]) if self._base_height_history else None
+            odom, height = self._snapshot_latest_locked()
         return odom, height
+
+    def wait_for_new_samples(
+        self,
+        *,
+        odom_after_t_ns: int | None,
+        height_after_t_ns: int | None,
+        timeout_sec: float,
+    ) -> tuple[dict | None, dict | None]:
+        """Wait until each requested stream advances past its supplied cursor.
+
+        A cursor of ``None`` means that stream is already fresh and need not
+        advance. The returned snapshots are always copies and callers must
+        still validate their ages after this wait: a delayed DDS callback can
+        deliver a new but already stale sample.
+        """
+        if odom_after_t_ns is not None:
+            odom_after_t_ns = self._validate_t_ns(odom_after_t_ns, "odom_after_t_ns")
+        if height_after_t_ns is not None:
+            height_after_t_ns = self._validate_t_ns(height_after_t_ns, "height_after_t_ns")
+        if not math.isfinite(timeout_sec) or timeout_sec <= 0.0:
+            raise ValueError("timeout_sec must be positive and finite")
+
+        with self._sample_condition:
+            def requested_streams_advanced() -> bool:
+                odom, height = self._snapshot_latest_locked()
+                odom_advanced = (
+                    odom_after_t_ns is None
+                    or (odom is not None and int(odom["t_ns"]) > odom_after_t_ns)
+                )
+                height_advanced = (
+                    height_after_t_ns is None
+                    or (height is not None and int(height["t_ns"]) > height_after_t_ns)
+                )
+                return odom_advanced and height_advanced
+
+            self._sample_condition.wait_for(requested_streams_advanced, timeout=float(timeout_sec))
+            return self._snapshot_latest_locked()
+
+    def _snapshot_latest_locked(self):
+        return (
+            dict(self._base_state_history[-1]) if self._base_state_history else None,
+            dict(self._base_height_history[-1]) if self._base_height_history else None,
+        )
 
     def _handle_odom(self, msg) -> None:
         host_monotonic_ns = int(time.monotonic_ns())
@@ -417,6 +460,7 @@ class BaseStateReceiver:
                 source_topic=self.odom_topic,
                 source_stamp_ns=_stamp_to_ns(_field(header, "stamp")),
             )
+            self._sample_condition.notify_all()
         self._odom_ready.set()
 
     def _handle_tf_message(self, message) -> None:
@@ -550,6 +594,7 @@ class BaseStateReceiver:
                 },
                 source_topic=self.height_topic,
             )
+            self._sample_condition.notify_all()
         self._height_ready.set()
 
 

@@ -494,6 +494,7 @@ def _read_host_timestamps(
     path = f"timestamps.{source_name}.host_monotonic_ns"
     times: list[float | None] = []
     previous: float | None = None
+    edge_hold_started = False
     for frame_index, item in enumerate(items):
         if not isinstance(item, Mapping):
             times.append(None)
@@ -510,7 +511,22 @@ def _read_host_timestamps(
             times.append(None)
             continue
         current = float(value)
-        if previous is not None and current <= previous:
+        interpolation_mode = source.get("interpolation_mode")
+        is_terminal_edge_hold = interpolation_mode == "edge_hold_last"
+        if edge_hold_started and not is_terminal_edge_hold:
+            issues.append(
+                _issue(
+                    "nonterminal_edge_hold_timestamp",
+                    "error",
+                    f"{path} resumes after terminal edge_hold_last support",
+                    frame_index=frame_index,
+                    path=path,
+                    interpolation_mode=interpolation_mode,
+                )
+            )
+        if is_terminal_edge_hold:
+            edge_hold_started = True
+        if previous is not None and (current < previous or (current == previous and not is_terminal_edge_hold)):
             issues.append(_issue("non_monotonic_host_timestamp", "error", f"{path} must be strictly increasing", frame_index=frame_index, previous=previous, current=current, path=path))
         previous = current
         times.append(current)

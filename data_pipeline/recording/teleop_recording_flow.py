@@ -90,6 +90,7 @@ class TeleopRecordingState:
     camera_feeder_last_frame_seq: int | None = None
     camera_feeder_last_sample_monotonic_ns: int | None = None
     camera_feeder_status: str = "idle"
+    last_failure: str = ""
 
 
 @dataclass(frozen=True)
@@ -177,7 +178,7 @@ class TeleopRecordingFlow:
         self.action_align_max_delta_ns = self.state_align_max_delta_ns
         self.state_nearest_fallback_max_delta_ns = int(max(80_000_000, (2.5 / frequency) * 1e9))
         self.action_nearest_fallback_max_delta_ns = self.state_nearest_fallback_max_delta_ns
-        self.pending_sample_timeout_ns = int(1_000_000_000)
+        self.pending_sample_timeout_ns = int(8_000_000_000)
         self.max_pending_samples = max(120, int(frequency * 8.0))
         self.record_base = bool(getattr(args, "record_base", False))
         self.record_slam_map_pose = bool(getattr(args, "record_slam_map_pose", False))
@@ -291,6 +292,7 @@ class TeleopRecordingFlow:
                 "camera_feeder_enqueued_sample_count": int(self.state.camera_feeder_enqueued_sample_count),
                 "camera_feeder_last_frame_seq": self.state.camera_feeder_last_frame_seq,
                 "camera_feeder_last_sample_monotonic_ns": self.state.camera_feeder_last_sample_monotonic_ns,
+                "last_failure": str(self.state.last_failure),
                 "finalizing": bool(self.state.finalizing),
                 "canceling": bool(self.state.canceling),
                 "save_requested": bool(self.state.save_requested),
@@ -319,6 +321,11 @@ class TeleopRecordingFlow:
     ) -> RecordingCommandResult:
         """Consume operator recording commands and update episode lifecycle state."""
         self.assert_worker_healthy()
+        with self._condition:
+            recording_failed = bool(self.state.last_failure)
+            canceling = bool(self.state.canceling)
+        if recording_failed:
+            record_running = False
         if record_cancel:
             record_cancel = False
             if record_running or self.state.waiting_for_first_frame or self.state.finalizing:
@@ -330,7 +337,9 @@ class TeleopRecordingFlow:
 
         if record_toggle:
             record_toggle = False
-            if not record_running and not self.state.waiting_for_first_frame and not self.state.finalizing:
+            if canceling:
+                self.log.warning("[RECORD_FAIL] recording start rejected while the failed episode is being canceled.")
+            elif not record_running and not self.state.waiting_for_first_frame and not self.state.finalizing:
                 if self.validation_manager is not None and self.validation_manager.is_busy():
                     status = self.validation_manager.status()
                     active_episode = status.get("current_episode_dir") or "queued episode"
@@ -365,6 +374,7 @@ class TeleopRecordingFlow:
                         self.state.camera_feeder_last_frame_seq = None
                         self.state.camera_feeder_last_sample_monotonic_ns = None
                         self.state.camera_feeder_status = "waiting_for_first_frame"
+                        self.state.last_failure = ""
                         self._camera_sources = dict(camera_sources)
                         self._latest_sources = None
                         self._condition.notify_all()
@@ -471,7 +481,9 @@ class TeleopRecordingFlow:
             self.state.finalizing = False
             self.state.canceling = False
             self.state.save_requested = False
-            self.state.camera_feeder_status = "idle"
+            failure = str(self.state.last_failure)
+            self.state.last_alignment_worker_status = "failed" if failure else "idle"
+            self.state.camera_feeder_status = "failed" if failure else "idle"
             self._latest_sources = None
             self._camera_sources = {}
             self._static_camera_sources = None
@@ -505,16 +517,21 @@ class TeleopRecordingFlow:
 
     def _request_cancel(self) -> None:
         with self._condition:
-            self._episode_generation += 1
-            self.state.waiting_for_first_frame = False
-            self.state.finalizing = False
-            self.state.canceling = True
-            self.state.save_requested = False
-            self.state.pending_samples.clear()
-            self.state.last_enqueued_primary_frame_id = None
-            self.state.last_alignment_worker_status = "canceling"
-            self.state.camera_feeder_status = "canceling"
-            self._condition.notify_all()
+            self._request_episode_cancel_locked(status="canceling")
+
+    def _request_episode_cancel_locked(self, *, status: str, failure: str = "") -> None:
+        if failure:
+            self.state.last_failure = str(failure)
+        self._episode_generation += 1
+        self.state.waiting_for_first_frame = False
+        self.state.finalizing = False
+        self.state.canceling = True
+        self.state.save_requested = False
+        self.state.pending_samples.clear()
+        self.state.last_enqueued_primary_frame_id = None
+        self.state.last_alignment_worker_status = str(status)
+        self.state.camera_feeder_status = str(status)
+        self._condition.notify_all()
 
     def _publish_source_snapshot(
         self,
@@ -807,12 +824,15 @@ class TeleopRecordingFlow:
                             return
                         remaining_ns = deadline_ns - time.monotonic_ns()
                         if remaining_ns <= 0:
-                            raise RuntimeError(
+                            failure = (
                                 "RECORD_PENDING_QUEUE_OVERFLOW "
                                 f"pending={len(self.state.pending_samples)} limit={self.max_pending_samples} "
                                 f"worker_status={self.state.last_alignment_worker_status!r} "
                                 f"worker_last_ms={self.state.last_alignment_worker_ms:.3f}"
                             )
+                            self._request_episode_cancel_locked(status="failed", failure=failure)
+                            self.log.error("[RECORD_FAIL] %s; canceling episode without stopping teleop.", failure)
+                            return
                         self.state.camera_feeder_status = "backpressured"
                         self._condition.wait(timeout=min(0.05, remaining_ns / 1e9))
                 if (
@@ -978,6 +998,12 @@ class TeleopRecordingFlow:
 
             if action == "cancel":
                 self.recorder.cancel_episode()
+                recorder_ready = getattr(self.recorder, "is_ready", None)
+                if callable(recorder_ready):
+                    with self._condition:
+                        self.state.last_alignment_worker_status = "canceling_writer"
+                    while not recorder_ready():
+                        time.sleep(0.005)
                 if self.reset_callback is not None:
                     self.reset_callback()
                 self._reset_active_state()
@@ -996,7 +1022,18 @@ class TeleopRecordingFlow:
             with self._condition:
                 self.state.last_alignment_worker_ms = float(elapsed_ms)
                 self.state.last_alignment_worker_status = str(status)
-                if status == "wait":
+                if self._is_wait_status(status):
+                    pending_age_ns = time.monotonic_ns() - int(pending["sample_monotonic_ns"])
+                    if pending_age_ns >= self.pending_sample_timeout_ns:
+                        stream_name = status.removeprefix("wait:")
+                        failure = (
+                            "RECORD_ALIGN_STREAM_STALLED "
+                            f"stream={stream_name} pending_age_ms={pending_age_ns / 1e6:.1f} "
+                            f"timeout_ms={self.pending_sample_timeout_ns / 1e6:.1f}"
+                        )
+                        self._request_episode_cancel_locked(status="failed", failure=failure)
+                        self.log.error("[RECORD_FAIL] %s; canceling episode without stopping teleop.", failure)
+                        continue
                     waiting_source_version = int(self._source_version)
                     waiting_generation = int(self._episode_generation)
                     waiting_finalizing = bool(self.state.finalizing)
@@ -1012,7 +1049,12 @@ class TeleopRecordingFlow:
                             break
                         if not self.state.pending_samples or self.state.pending_samples[0] is not waiting_pending:
                             break
-                        self._condition.wait()
+                        remaining_ns = self.pending_sample_timeout_ns - (
+                            time.monotonic_ns() - int(waiting_pending["sample_monotonic_ns"])
+                        )
+                        if remaining_ns <= 0:
+                            break
+                        self._condition.wait(timeout=remaining_ns / 1e9)
                     continue
                 if self.state.pending_samples and self.state.pending_samples[0] is pending:
                     stale_generation = int(pending["generation"]) != int(self._episode_generation)
@@ -1083,7 +1125,7 @@ class TeleopRecordingFlow:
         )
         if not self._pending_generation_is_current(pending):
             return "drop"
-        self._add_record_item(
+        record_status = self._add_record_item(
             pending=pending,
             sample_monotonic_ns=sample_monotonic_ns,
             aligned_state=aligned_state,
@@ -1098,7 +1140,7 @@ class TeleopRecordingFlow:
             camera_timestamps=camera_timestamps,
             sim_state_subscriber=sources.sim_state_subscriber,
         )
-        return "recorded"
+        return record_status
 
     def _resolve_pending_alignment(
         self,
@@ -1135,8 +1177,10 @@ class TeleopRecordingFlow:
             sample_age_ns=sample_age_ns,
             end_of_stream=end_of_stream,
         )
-        if state_watermark == "wait" or action_watermark == "wait":
-            return "wait", None, None, None, None, None
+        if self._is_wait_status(state_watermark):
+            return state_watermark, None, None, None, None, None
+        if self._is_wait_status(action_watermark):
+            return action_watermark, None, None, None, None, None
 
         aligned_state = self._aligned_sample(
             state_history,
@@ -1193,12 +1237,16 @@ class TeleopRecordingFlow:
                     f"stream={stream_name} target_monotonic_ns={target_ns} "
                     f"record_min_timestamp_ns={record_min_timestamp_ns}"
                 )
-            return "wait"
+            return f"wait:{stream_name}"
         if target_ns < earliest:
             return "ready"
         if target_ns > latest:
-            return "ready" if end_of_stream else "wait"
+            return "ready" if end_of_stream else f"wait:{stream_name}"
         return "ready"
+
+    @staticmethod
+    def _is_wait_status(status: str) -> bool:
+        return str(status).startswith("wait:")
 
     def _resolve_base_alignment(
         self,
@@ -1360,7 +1408,23 @@ class TeleopRecordingFlow:
         actions,
         camera_timestamps,
         sim_state_subscriber=None,
-    ) -> None:
+    ) -> str:
+        queue_status_fn = getattr(self.recorder, "queue_status", None)
+        if callable(queue_status_fn):
+            queue_status = queue_status_fn()
+            queue_depth = int(queue_status["depth"])
+            queue_capacity = int(queue_status["capacity"])
+            if queue_capacity <= 0:
+                raise RuntimeError("recording writer queue capacity must be positive")
+            if queue_depth >= queue_capacity:
+                failure = (
+                    "RECORD_WRITER_QUEUE_OVERFLOW "
+                    f"depth={queue_depth} capacity={queue_capacity}"
+                )
+                with self._condition:
+                    self._request_episode_cancel_locked(status="failed", failure=failure)
+                self.log.error("[RECORD_FAIL] %s; canceling episode without stopping teleop.", failure)
+                return "failed"
         timestamps = {
             "sample_wall_time_ns": int(time.time_ns()),
             "sample_monotonic_ns": int(sample_monotonic_ns),
@@ -1407,6 +1471,7 @@ class TeleopRecordingFlow:
                 timestamps=timestamps,
                 control_extras=control_extras,
             )
+        return "recorded"
 
     def _alignment_timestamp_with_source(self, aligned_entry: dict, sample_monotonic_ns: int):
         entry = build_alignment_timestamp_entry(aligned_entry, sample_monotonic_ns)
