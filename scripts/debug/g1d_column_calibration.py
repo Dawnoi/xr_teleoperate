@@ -137,6 +137,12 @@ def _parse_args() -> argparse.Namespace:
         default=0.0008,
         help="Maximum raw y span accepted while marking an endpoint.",
     )
+    parser.add_argument(
+        "--endpoint-safety-margin-m",
+        type=float,
+        default=0.001,
+        help="Outward raw-height margin added to both endpoint values in suggested teleop arguments.",
+    )
     args = parser.parse_args()
     if not args.network_interface:
         raise ValueError("--network-interface is required (or set NETWORK_INTERFACE)")
@@ -150,6 +156,8 @@ def _parse_args() -> argparse.Namespace:
         raise ValueError("--endpoint-window-sec must be positive")
     if float(args.endpoint_max_span_m) <= 0.0:
         raise ValueError("--endpoint-max-span-m must be positive")
+    if float(args.endpoint_safety_margin_m) < 0.0:
+        raise ValueError("--endpoint-safety-margin-m must be non-negative")
     return args
 
 
@@ -157,7 +165,7 @@ def _signal_exit(signum, _frame) -> None:
     raise SystemExit(f"received signal {signum}; stopping column calibration")
 
 
-def _print_endpoint_summary(lower: float | None, upper: float | None) -> None:
+def _print_endpoint_summary(lower: float | None, upper: float | None, *, safety_margin_m: float) -> None:
     print()
     if lower is None:
         print("lower endpoint: not marked")
@@ -174,9 +182,11 @@ def _print_endpoint_summary(lower: float | None, upper: float | None) -> None:
             f"invalid endpoints: upper={upper:+.9f} must be greater than lower={lower:+.9f}"
         )
     print(f"raw range: {upper - lower:.9f} m")
-    print("Suggested teleop arguments:")
-    print(f"  --mobile-height-raw-minimum {lower:.9f} \\")
-    print(f"  --mobile-height-raw-maximum {upper:.9f}")
+    minimum = lower - float(safety_margin_m)
+    maximum = upper + float(safety_margin_m)
+    print(f"Suggested teleop arguments (outward safety margin {safety_margin_m * 1e3:.3f}mm):")
+    print(f"  --mobile-height-raw-minimum {minimum:.9f} \\")
+    print(f"  --mobile-height-raw-maximum {maximum:.9f}")
 
 
 def main() -> None:
@@ -266,7 +276,11 @@ def main() -> None:
                     )
                     print(f"\nmarked upper raw_height_y={upper_endpoint:+.9f}")
                 elif key == "p":
-                    _print_endpoint_summary(lower_endpoint, upper_endpoint)
+                    _print_endpoint_summary(
+                        lower_endpoint,
+                        upper_endpoint,
+                        safety_margin_m=float(args.endpoint_safety_margin_m),
+                    )
                 elif key == "q":
                     break
                 elif key:
@@ -292,7 +306,11 @@ def main() -> None:
         bridge.close()
         subscriber.Close()
 
-    _print_endpoint_summary(lower_endpoint, upper_endpoint)
+    _print_endpoint_summary(
+        lower_endpoint,
+        upper_endpoint,
+        safety_margin_m=float(args.endpoint_safety_margin_m),
+    )
 
 
 if __name__ == "__main__":

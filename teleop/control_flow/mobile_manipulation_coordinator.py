@@ -219,7 +219,6 @@ class LegacyWorkspaceGovernorCoordinator:
 @dataclass(frozen=True)
 class WholeBodyCoordinatorResult:
     arm_q_target: np.ndarray
-    waist_yaw_target: float
     final_body_command: np.ndarray
     qp_velocity: np.ndarray
     active: bool
@@ -230,7 +229,10 @@ class MobileManipulationCoordinator:
 
     ``mobile_ik_qp`` used to invoke a workspace governor and then the legacy
     G1_29 inverse kinematics.  It now owns the complete kinematic allocation:
-    two Dex1 TCP tasks, torso yaw, both column joints and planar base motion.
+    two Dex1 TCP tasks, both column joints and planar base motion. The torso
+    yaw joint is deliberately outside this controller: it remains an
+    independently commanded hardware joint and is not part of the WBC state,
+    optimization, or output.
     The legacy IK frame is used only to interpret the existing XR input pose.
     """
 
@@ -376,9 +378,8 @@ class MobileManipulationCoordinator:
         }
         _, velocity = self._wbc.solve(measured_qpos, target_matrices, dt=dt)
         arm_target = self._lookahead_arm_target(measured_qpos, velocity)
-        torso_target = self._lookahead_joint_target(measured_qpos, velocity, "torso_Joint")
         final_body_command = self._resolve_base_command(velocity, nominal_body_command)
-        return WholeBodyCoordinatorResult(arm_target, torso_target, final_body_command, velocity.copy(), bool(any(enabled.values())))
+        return WholeBodyCoordinatorResult(arm_target, final_body_command, velocity.copy(), bool(any(enabled.values())))
 
     def _hold_result(
         self,
@@ -391,8 +392,7 @@ class MobileManipulationCoordinator:
             raise ValueError("mobile WBC hold arm_q must be a finite 14D vector")
         return WholeBodyCoordinatorResult(
             arm_q.copy(),
-            float(mobile_state.torso_yaw),
-            np.zeros(4),
+            np.zeros(3),
             np.zeros(self._wbc.model.nv),
             bool(any(enabled.values())),
         )
@@ -402,10 +402,13 @@ class MobileManipulationCoordinator:
         if arm_q.shape != (14,) or not np.all(np.isfinite(arm_q)):
             raise ValueError("mobile WBC arm_q must be a finite 14D measured vector")
         qpos = self._wbc.home_qpos
-        base_from_ik = self._ik_kinematics.agv_from_ik(column_position=float(state.column_position), torso_yaw=float(state.torso_yaw))
+        # The physical torso is held by the independent arm controller. Its
+        # measured angle must not enter WBC, otherwise the QP is still reading
+        # and allocating the waist yaw despite having no output authority.
+        base_from_ik = self._ik_kinematics.agv_from_ik(column_position=float(state.column_position), torso_yaw=0.0)
         world_from_base = np.asarray(state.global_from_ik, dtype=float) @ np.linalg.inv(base_from_ik)
         yaw = float(np.arctan2(world_from_base[1, 0], world_from_base[0, 0]))
-        for name, value in (("joint_x", world_from_base[0, 3]), ("joint_y", world_from_base[1, 3]), ("joint_th", yaw), ("LZ_mt_Joint", state.column_position * 0.5), ("LZ_it_Joint", state.column_position * 0.5), ("torso_Joint", state.torso_yaw)):
+        for name, value in (("joint_x", world_from_base[0, 3]), ("joint_y", world_from_base[1, 3]), ("joint_th", yaw), ("LZ_mt_Joint", state.column_position * 0.5), ("LZ_it_Joint", state.column_position * 0.5)):
             qpos[int(self._wbc.model.joint(name).qposadr[0])] = float(value)
         for name, value in zip(self._ARM_JOINT_NAMES, arm_q):
             qpos[int(self._wbc.model.joint(name).qposadr[0])] = float(value)
@@ -414,7 +417,7 @@ class MobileManipulationCoordinator:
         return qpos
 
     def _world_from_base(self, state: MobileStateSample, world_from_ik: np.ndarray) -> np.ndarray:
-        base_from_ik = self._ik_kinematics.agv_from_ik(column_position=float(state.column_position), torso_yaw=float(state.torso_yaw))
+        base_from_ik = self._ik_kinematics.agv_from_ik(column_position=float(state.column_position), torso_yaw=0.0)
         return world_from_ik @ np.linalg.inv(base_from_ik)
 
     def _update_targets(self, intent, enabled, rising, world_from_ik, world_from_base, measured_qpos) -> bool:
@@ -490,12 +493,12 @@ class MobileManipulationCoordinator:
 
     def _resolve_base_command(self, velocity: np.ndarray, nominal: np.ndarray) -> np.ndarray:
         nominal = np.asarray(nominal, dtype=float).reshape(-1)
-        if nominal.shape != (4,) or not np.all(np.isfinite(nominal)):
-            raise ValueError("mobile WBC nominal body command must be a finite [vx, wz, z, torso_rate]")
+        if nominal.shape != (3,) or not np.all(np.isfinite(nominal)):
+            raise ValueError("mobile WBC nominal body command must be a finite [vx, wz, z]")
         if np.any(np.abs(nominal[:3]) > 1e-9):
             return nominal.copy()
         base = self._wbc.base_velocity_command
         left_lift = float(velocity[int(self._wbc.model.joint("LZ_mt_Joint").dofadr[0])])
         right_lift = float(velocity[int(self._wbc.model.joint("LZ_it_Joint").dofadr[0])])
         column_normalized = float(np.clip((left_lift + right_lift) / 0.10, -1.0, 1.0))
-        return np.array([base[0], base[1], column_normalized, 0.0], dtype=float)
+        return np.array([base[0], base[1], column_normalized], dtype=float)

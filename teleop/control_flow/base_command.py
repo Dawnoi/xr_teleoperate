@@ -273,6 +273,32 @@ def integrate_manual_torso_yaw_target(
     return target, not math.isclose(target, raw_target, abs_tol=1e-12)
 
 
+def resolve_waist_yaw_position_target(
+    *,
+    mobile_manipulation_mode: str,
+    current_target_rad: float | None,
+    manual_yaw_rate_radps: float,
+    dt: float,
+) -> tuple[float, bool]:
+    """Return the position target for the independently controlled waist joint.
+
+    The whole-body QP has no torso-yaw output authority. Its explicit hardware
+    contract is therefore a fixed mechanical-zero position target, rather than
+    retaining an unspecified target left by a previous control mode.
+    """
+    if mobile_manipulation_mode == "mobile_ik_qp":
+        return 0.0, False
+    if mobile_manipulation_mode != "direct_ik":
+        raise ValueError(f"unsupported mobile manipulation mode: {mobile_manipulation_mode!r}")
+    if current_target_rad is None:
+        raise RuntimeError("manual waist yaw requires an initialized waist yaw target")
+    return integrate_manual_torso_yaw_target(
+        current_target_rad=float(current_target_rad),
+        yaw_rate_radps=float(manual_yaw_rate_radps),
+        dt=float(dt),
+    )
+
+
 def apply_base_command(
     *,
     args: Any,

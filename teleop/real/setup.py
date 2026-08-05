@@ -371,7 +371,7 @@ def setup_recorder(args, validation_manager=None):
         task_steps=args.task_steps,
         frequency=args.frequency,
         image_size=[args.camera_width, args.camera_height],
-        rerun_log=not args.headless,
+        rerun_log=bool(args.rerun_live),
         episode_finalized_callback=(
             validation_manager.validate_after_finalize if validation_manager is not None else None
         ),

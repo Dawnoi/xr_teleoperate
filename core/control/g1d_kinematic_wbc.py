@@ -443,7 +443,10 @@ G1D_VELOCITY_LIMITS = {
     # Despite its vendor name, this is the waist pitch joint (Y axis).  Keep
     # the measured startup angle but remove it from WBC motion allocation.
     "Yaw_Joint": 0.0,
-    "torso_Joint": 1.0,
+    # Torso yaw is held by the arm controller, not allocated by WBC. Keeping
+    # this hard zero also prevents an accidental internal WBC integration from
+    # reintroducing torso motion before the hardware dispatch layer sees it.
+    "torso_Joint": 0.0,
     **{
         f"{side}_{joint}_joint": 0.5
         for side in ("left", "right")

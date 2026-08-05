@@ -27,21 +27,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--home-gravity-torque-limit-nm', type=float, default=10.0,
                         help='Maximum absolute per-joint gravity feed-forward torque accepted during G1_29 Home; values beyond this abort Home.')
     parser.add_argument('--mobile-manipulation-mode', choices=['direct_ik', 'mobile_ik_qp'], default='direct_ik',
-                        help='direct_ik preserves the legacy path; mobile_ik_qp runs the measured-state G1-D whole-body velocity QP for both TCPs, arms, torso yaw, column, and base.')
+                        help='direct_ik preserves the legacy path; mobile_ik_qp runs the measured-state G1-D whole-body velocity QP for both TCPs, arms, column, and base. mobile_ik_qp leaves waist yaw at its existing hardware hold target.')
     parser.add_argument('--mobile-state-timeout-sec', type=float, default=0.50,
                         help='Maximum age of required odom/column measurements in mobile_ik_qp mode.')
-    parser.add_argument('--mobile-height-raw-minimum', type=float, default=-0.003078505,
+    parser.add_argument('--mobile-state-retry-count', type=int, default=3,
+                        help='Number of fail-closed fresh-state retries after mobile_ik_qp detects stale odom or column feedback.')
+    parser.add_argument('--mobile-state-retry-interval-sec', type=float, default=0.50,
+                        help='Maximum wait for each fresh-state retry after mobile_ik_qp has entered arm/base hold.')
+    parser.add_argument('--mobile-height-raw-minimum', type=float, default=-0.0015,
                         help='Calibrated rt/hispeed_state.y lower endpoint with a safety margin for the fully lowered G1D column.')
-    parser.add_argument('--mobile-height-raw-maximum', type=float, default=0.428324414,
+    parser.add_argument('--mobile-height-raw-maximum', type=float, default=0.431062324,
                         help='Calibrated rt/hispeed_state.y upper endpoint with a safety margin for the fully raised G1D column.')
     parser.add_argument('--mobile-column-travel-m', type=float, default=0.42,
                         help='Total physical G1D column travel used by mobile_ik_qp.')
     parser.add_argument('--mobile-max-torso-yaw-rate', type=float, default=0.50,
                         help='Maximum independent waist-yaw rate in rad/s from the right thumbstick X axis.')
     parser.add_argument('--mobile-wbc-command-horizon-sec', type=float, default=0.10,
-                        help='Position lookahead horizon applied to mobile_ik_qp arm and torso QP velocities.')
+                        help='Position lookahead horizon applied to mobile_ik_qp arm QP velocities.')
     parser.add_argument('--mobile-wbc-max-position-lead-rad', type=float, default=0.12,
-                        help='Maximum QP position lookahead from measured arm/torso joint state in radians.')
+                        help='Maximum QP position lookahead from measured arm joint state in radians.')
     parser.add_argument('--disable-mobile-wbc-collision-avoidance', action='store_true',
                         help='Disable mobile_ik_qp WBC collision constraints. This is a high-risk explicit override.')
     parser.add_argument('--base-max-vx', type=float, default=0.3,
@@ -198,6 +202,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument('--motion', action='store_true',
                         help='Use the arm SDK DDS command route (rt/arm_sdk) for real-robot arms.')
     parser.add_argument('--headless', action='store_true', help='Enable headless mode (no display)')
+    parser.add_argument('--rerun-live', action='store_true',
+                        help='Enable live Rerun logging and viewer for recorded episodes. Disabled by default.')
     parser.add_argument('--sim', action = 'store_true', help = 'Enable isaac simulation mode')
     parser.add_argument('--affinity', action = 'store_true', help = 'Enable high priority and set CPU affinity mode')
     parser.add_argument('--no-gripper', action='store_true',
@@ -254,8 +260,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv=None):
     args = build_arg_parser().parse_args(argv)
-    if args.ui:
+    if args.ui and not args.rerun_live:
         args.headless = True
+    if args.headless and args.rerun_live:
+        raise ValueError('--rerun-live cannot be combined with --headless; use --ui --rerun-live to enable both explicitly')
     if args.home_position_tolerance_rad <= 0.0:
         raise ValueError('--home-position-tolerance-rad must be positive')
     if args.home_gravity_update_hz <= 0.0:
@@ -269,6 +277,8 @@ def parse_args(argv=None):
             raise ValueError('mobile_ik_qp requires --arm G1_29 --base-controller g1d_agv --base-motion')
         if args.mobile_state_timeout_sec <= 0.0 or args.mobile_column_travel_m <= 0.0:
             raise ValueError('mobile_ik_qp state timeout and column travel must be positive')
+        if args.mobile_state_retry_count < 0 or args.mobile_state_retry_interval_sec <= 0.0:
+            raise ValueError('mobile_ik_qp state retry count must be non-negative and retry interval must be positive')
         if args.mobile_height_raw_maximum <= args.mobile_height_raw_minimum:
             raise ValueError('mobile_ik_qp raw height limits must be ordered')
         if args.mobile_wbc_command_horizon_sec <= 0.0 or args.mobile_wbc_max_position_lead_rad <= 0.0:

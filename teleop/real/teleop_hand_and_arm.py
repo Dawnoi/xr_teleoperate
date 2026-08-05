@@ -2,7 +2,6 @@
 
 import time
 import threading
-from copy import copy
 from collections import deque
 import numpy as np
 import logging_mp
@@ -33,7 +32,6 @@ import pinocchio as pin
 
 from teleop.real.args import parse_args
 from data_pipeline.recording.alignment import append_timed_sample
-from core.input.online_inference_provider import create_online_inference_provider
 from core.input.base import BaseCommandIntent, MotionIntent
 from core.input.teleop_input_provider import validate_lerobot_offline_episode
 from teleop.debug.inference_pose_debug import wrist_pose_to_debug_sample
@@ -51,16 +49,17 @@ from teleop.control_flow.base_command import (
     integrate_manual_torso_yaw_target,
     map_base_command,
     map_manual_torso_yaw_rate,
+    resolve_waist_yaw_position_target,
     resolve_runtime_base_command_source,
     stop_base_command,
 )
 from teleop.control_flow.mobile_manipulation_coordinator import (
-    column_position_from_raw_height,
     G1DIkFrameKinematics,
     legacy_g1_29_torso_from_ik_urdf,
     MobileManipulationCoordinator,
-    MobileStateSample,
 )
+from teleop.control_flow.mobile_state_provider import MobileStateProvider
+from teleop.control_flow.mobile_base_kinematics import MobileBaseKinematicsProvider
 from teleop.control_flow.arm_workspace_config import build_arm_side_workspaces
 from teleop.control_flow.arm_command_pipeline import build_arm_command
 from teleop.control_flow.operator_state import OperatorStateFlow, rebase_xr_takeover_after_provider_switch
@@ -69,6 +68,7 @@ from teleop.control_flow.end_effector_command import (
     read_dual_gripper_snapshot,
 )
 from teleop.runtime.provider_switch import ActiveProviderKind, TeleopProviderRuntime
+from teleop.runtime.mobile_inference_inputs import MobileOnlineInferenceInputs
 from teleop.ui.command_bus import UiCommandBus, UiCommandName
 from teleop.ui.integration import (
     build_runtime_camera_status,
@@ -77,6 +77,7 @@ from teleop.ui.integration import (
 )
 from teleop.ui.server import TeleopUiServer
 from teleop.ui.state_store import UiStateStore
+from teleop.ui.online_inference_runtime import OnlineInferenceUiRuntime
 from sshkeyboard import listen_keyboard, stop_listening
 
 # state transition
@@ -464,6 +465,7 @@ if __name__ == '__main__':
         mobile_coordinator = None
         mobile_kinematics = None
         dex1_tcp_fk = components.dex1_tcp_fk
+        mobile_base_kinematics = None
         need_g1d_kinematics = (
             args.mobile_manipulation_mode == "mobile_ik_qp"
             or bool(args.record_mobile_training_state)
@@ -472,6 +474,11 @@ if __name__ == '__main__':
         if need_g1d_kinematics:
             mobile_kinematics = G1DIkFrameKinematics(
                 torso_from_ik=legacy_g1_29_torso_from_ik_urdf(),
+            )
+            mobile_base_kinematics = MobileBaseKinematicsProvider(
+                g1d_kinematics=mobile_kinematics,
+                legacy_wrist_pose_solver=get_robot_wrist_poses,
+                dex1_tcp_fk=dex1_tcp_fk,
             )
         if args.mobile_manipulation_mode == "mobile_ik_qp":
             if base_state_receiver is None:
@@ -493,256 +500,21 @@ if __name__ == '__main__':
         elif args.record_mobile_training_state:
             logger_mp.info("[MOBILE_RECORD] enabled: base_link-local EEF pose and SLAM map base state")
 
-        def current_mobile_state() -> MobileStateSample:
-            odom_sample, height_sample = base_state_receiver.snapshot_latest()
-            if odom_sample is None or height_sample is None:
-                raise RuntimeError("MOBILE_STATE_MISSING")
-            now_monotonic_ns = time.monotonic_ns()
-            odom_age_ms = (now_monotonic_ns - int(odom_sample["t_ns"])) / 1e6
-            height_age_ms = (now_monotonic_ns - int(height_sample["t_ns"])) / 1e6
-            timeout_ms = float(args.mobile_state_timeout_sec) * 1e3
-            if odom_age_ms > timeout_ms or height_age_ms > timeout_ms:
-                raise RuntimeError(
-                    "MOBILE_STATE_STALE "
-                    f"odom_age_ms={odom_age_ms:.1f} height_age_ms={height_age_ms:.1f} "
-                    f"timeout_ms={timeout_ms:.1f}"
-                )
-            pose = odom_sample["world_pose"]
-            yaw = float(pose["yaw"])
-            cosine, sine = float(np.cos(yaw)), float(np.sin(yaw))
-            odom_world_from_agv = np.array([
-                [cosine, -sine, 0.0, float(pose["x"])],
-                [sine, cosine, 0.0, float(pose["y"])],
-                [0.0, 0.0, 1.0, float(pose["z"])],
-                [0.0, 0.0, 0.0, 1.0],
-            ])
-            column_position = column_position_from_raw_height(
-                raw_height=float(height_sample["height"]["z"]),
-                raw_minimum=float(args.mobile_height_raw_minimum),
-                raw_maximum=float(args.mobile_height_raw_maximum),
-                column_travel_m=float(args.mobile_column_travel_m),
-            )
-            torso_yaw = arm_ctrl.get_current_waist_yaw()
-            global_from_ik = mobile_kinematics.global_from_ik(
-                odom_world_from_agv=odom_world_from_agv,
-                column_position=column_position,
-                torso_yaw=torso_yaw,
-            )
-            return MobileStateSample(
-                global_from_ik=global_from_ik,
-                monotonic_ns=min(int(odom_sample["t_ns"]), int(height_sample["t_ns"])),
-                column_position=column_position,
-                torso_yaw=torso_yaw,
-            )
-
-        def get_robot_wrist_poses_base_link(arm_ik_obj, arm_q, column_height_m, waist_yaw):
-            if mobile_kinematics is None:
-                raise RuntimeError("base_link wrist kinematics is not initialized")
-            # Current collection calibration explicitly defines base_link == AGV_link.
-            base_link_from_ik = mobile_kinematics.agv_from_ik(
-                column_position=float(column_height_m),
-                torso_yaw=float(waist_yaw),
-            )
-            left_ik_pose, right_ik_pose = get_robot_wrist_poses(arm_ik_obj, arm_q)
-            return base_link_from_ik @ left_ik_pose, base_link_from_ik @ right_ik_pose
-
-        def get_robot_dex1_tcp_poses_base_link(arm_q, column_height_m, waist_yaw):
-            if dex1_tcp_fk is None:
-                raise RuntimeError("Dex1 TCP FK is not initialized")
-            return dex1_tcp_fk.compute_tcp_poses(
-                arm_q,
-                column_height_m,
-                waist_yaw,
-            )
-
-        def current_online_mobile_inputs(arm_q, *, include_tcp: bool):
-            profile_name = "mobile_tcp23" if include_tcp else "mobile_joint_base"
-            if base_state_receiver is None:
-                raise RuntimeError(f"{profile_name} requires initialized base state")
-            if include_tcp and (dex1_tcp_fk is None or mobile_kinematics is None):
-                raise RuntimeError("mobile_tcp23 requires initialized TCP FK and G1D kinematics")
-            if not base_state_receiver.is_alive():
-                raise RuntimeError(f"{profile_name} base state receiver is not alive")
-            odom_sample, height_sample = base_state_receiver.snapshot_latest()
-            slam_history = base_state_receiver.snapshot_slam_tf_history()
-            if odom_sample is None or height_sample is None or slam_history is None or not slam_history:
-                raise RuntimeError(f"{profile_name.upper()}_STATE_MISSING")
-            slam_sample = dict(slam_history[-1])
-            now_ns = time.monotonic_ns()
-            timeout_ns = int(float(args.mobile_state_timeout_sec) * 1e9)
-            ages = {
-                "odom": now_ns - int(odom_sample["t_ns"]),
-                "height": now_ns - int(height_sample["t_ns"]),
-                "slam_tf": now_ns - int(slam_sample["t_ns"]),
-            }
-            stale = {name: age for name, age in ages.items() if age < 0 or age > timeout_ns}
-            if stale:
-                raise RuntimeError(
-                    f"{profile_name.upper()}_STATE_STALE "
-                    + " ".join(f"{name}_age_ms={age / 1e6:.1f}" for name, age in stale.items())
-                    + f" timeout_ms={timeout_ns / 1e6:.1f}"
-                )
-            if str(slam_sample.get("frame_id")) != "slamware_map" or str(slam_sample.get("child_frame_id")) != "base_link":
-                raise RuntimeError(
-                    f"{profile_name.upper()}_SLAM_FRAME_INVALID "
-                    f"frame_id={slam_sample.get('frame_id')!r} child_frame_id={slam_sample.get('child_frame_id')!r}"
-                )
-            velocity = odom_sample.get("velocity")
-            if not isinstance(velocity, dict) or str(velocity.get("frame_id")) != "base_link":
-                raise RuntimeError(f"{profile_name.upper()}_BASE_VELOCITY_FRAME_INVALID: expected base_link")
-            column_height = column_position_from_raw_height(
-                raw_height=float(height_sample["height"]["z"]),
-                raw_minimum=float(args.mobile_height_raw_minimum),
-                raw_maximum=float(args.mobile_height_raw_maximum),
-                column_travel_m=float(args.mobile_column_travel_m),
-            )
-            map_pose = np.asarray(
-                [slam_sample["x"], slam_sample["y"], slam_sample["yaw"]],
-                dtype=float,
-            )
-            base_velocity = np.asarray([velocity["vx"], velocity["wz"]], dtype=float)
-            if not np.all(np.isfinite(map_pose)) or not np.all(np.isfinite(base_velocity)):
-                raise RuntimeError(f"{profile_name.upper()}_BASE_STATE_NONFINITE")
-            if not include_tcp:
-                return {
-                    "current_map_base_pose": map_pose,
-                    "current_base_velocity_base_link": base_velocity,
-                    "current_column_height_m": column_height,
-                }
-
-            waist_yaw = float(arm_ctrl.get_current_waist_yaw())
-            left_tcp, right_tcp = get_robot_dex1_tcp_poses_base_link(
-                arm_q,
-                column_height,
-                waist_yaw,
-            )
-            base_link_from_ik = mobile_kinematics.agv_from_ik(
-                column_position=column_height,
-                torso_yaw=waist_yaw,
-            )
-            ik_from_base_link = np.linalg.inv(base_link_from_ik)
-
-            def tcp_target_to_ik_wrist(side, tcp_target):
-                legacy_ee_base_link = dex1_tcp_fk.legacy_g1_29_ik_ee_pose_from_tcp_target(
-                    side,
-                    tcp_target,
-                )
-                legacy_ee_ik = ik_from_base_link @ legacy_ee_base_link
-                if legacy_ee_ik.shape != (4, 4) or not np.all(np.isfinite(legacy_ee_ik)):
-                    raise RuntimeError(f"MOBILE_TCP23_IK_EE_TARGET_INVALID: side={side}")
-                return legacy_ee_ik
-
-            return {
-                "current_left_robot_tcp_pose_base_link": left_tcp,
-                "current_right_robot_tcp_pose_base_link": right_tcp,
-                "current_map_base_pose": map_pose,
-                "current_base_velocity_base_link": base_velocity,
-                "current_column_height_m": column_height,
-                "mobile_tcp_to_wrist_transformer": tcp_target_to_ik_wrist,
-            }
-
-        def mobile_tcp23_runtime_error() -> str:
-            missing: list[str] = []
-            if str(args.arm) != "G1_29":
-                missing.append("--arm G1_29")
-            if str(args.ee) != "dex1" or bool(args.no_gripper):
-                missing.append("--ee dex1 without --no-gripper")
-            if args.mobile_manipulation_mode != "direct_ik":
-                missing.append("--mobile-manipulation-mode direct_ik")
-            if args.base_controller != "g1d_agv" or not args.base_motion:
-                missing.append("--base-controller g1d_agv --base-motion")
-            if args.base_velocity_frame != "base_link":
-                missing.append("--base-velocity-frame base_link")
-            if not args.record_slam_map_pose:
-                missing.append("--record-slam-map-pose")
-            if dex1_tcp_fk is None:
-                missing.append("Dex1 TCP FK")
-            if mobile_kinematics is None:
-                missing.append("G1D base_link kinematics")
-            if base_state_receiver is None:
-                missing.append("base state receiver (--record-base)")
-            elif not base_state_receiver.is_alive():
-                missing.append("live base state receiver")
-            if missing:
-                return "mobile_tcp23 unavailable: requires " + ", ".join(missing)
-            return ""
-
-        def mobile_joint_base_runtime_error() -> str:
-            missing: list[str] = []
-            if str(args.arm) != "G1_29":
-                missing.append("--arm G1_29")
-            if str(args.ee) != "dex1" or bool(args.no_gripper):
-                missing.append("--ee dex1 without --no-gripper")
-            if args.mobile_manipulation_mode == "mobile_ik_qp":
-                missing.append("mobile_ik_qp disabled")
-            if args.base_controller != "g1d_agv" or not args.base_motion:
-                missing.append("--base-controller g1d_agv --base-motion")
-            if args.base_velocity_frame != "base_link":
-                missing.append("--base-velocity-frame base_link")
-            if base_state_receiver is None:
-                missing.append("base state receiver")
-            elif not base_state_receiver.is_alive():
-                missing.append("live base state receiver")
-            if missing:
-                return "mobile_joint_base unavailable: requires " + ", ".join(missing)
-            return ""
-
-        def ui_inference_profiles() -> list[dict[str, object]]:
-            mobile_error = mobile_tcp23_runtime_error()
-            mobile_joint_error = mobile_joint_base_runtime_error()
-            return [
-                {
-                    "id": "pi05_dual_arm_20d",
-                    "label": "pi0.5 双臂 20D",
-                    "available": True,
-                    "reason": "",
-                },
-                {
-                    "id": "mobile_tcp23",
-                    "label": "移动操作 TCP23",
-                    "available": not bool(mobile_error),
-                    "reason": mobile_error,
-                },
-                {
-                    "id": "mobile_joint_base",
-                    "label": "移动操作 Joint19",
-                    "available": not bool(mobile_joint_error),
-                    "reason": mobile_joint_error,
-                },
-            ]
-
-        def ui_inference_profile_error(protocol_profile: str) -> str:
-            selected = str(protocol_profile or "").strip()
-            for profile in ui_inference_profiles():
-                if selected == profile["id"]:
-                    return "" if bool(profile["available"]) else str(profile["reason"])
-            return f"unknown UI online inference protocol_profile: {selected!r}"
-
-        def create_ui_online_provider(*, prompt: str, protocol_profile: str):
-            profile_error = ui_inference_profile_error(protocol_profile)
-            if profile_error:
-                raise RuntimeError(profile_error)
-            inference_args = copy(args)
-            inference_args.input_provider = "online_inference"
-            inference_args.online_inference_transport = "http"
-            inference_args.online_inference_base_url = (
-                str(getattr(args, "online_inference_base_url", "") or "").strip() or "http://127.0.0.1:18027"
-            )
-            inference_args.online_inference_protocol_profile = str(protocol_profile)
-            inference_args.online_inference_arm_side = "both"
-            inference_args.online_inference_prompt = str(prompt)
-            inference_args.online_inference_enable_motion = True
-            inference_args.online_inference_dry_run = False
-            inference_args.online_inference_transform_config = (
-                str(getattr(args, "online_inference_transform_config", "") or "").strip()
-                or "configs/inference/unitree_dual_arm_identity_transform.json"
-            )
-            return create_online_inference_provider(inference_args)
+        mobile_online_inputs = MobileOnlineInferenceInputs(
+            args=args,
+            base_state_receiver=base_state_receiver,
+            mobile_base_kinematics=mobile_base_kinematics,
+            waist_yaw_getter=arm_ctrl.get_current_waist_yaw,
+        )
+        ui_online_inference = OnlineInferenceUiRuntime(
+            args=args,
+            mobile_inputs=mobile_online_inputs,
+        )
 
         provider_runtime = TeleopProviderRuntime(
             live_provider=tv_wrapper,
             live_provider_name=args.input_provider,
-            online_provider_factory=create_ui_online_provider,
+            online_provider_factory=ui_online_inference.create_provider,
         )
 
         def stop_base_once(reason: str) -> bool:
@@ -767,6 +539,30 @@ if __name__ == '__main__':
         sim_state_subscriber = components.sim_state_subscriber
         base_state_receiver = components.base_state_receiver
         latency_tracker = components.latency_tracker
+        mobile_state_provider = None
+        if args.mobile_manipulation_mode == "mobile_ik_qp":
+            if base_state_receiver is None or mobile_kinematics is None:
+                raise RuntimeError("mobile_ik_qp requires initialized base state and G1D kinematics")
+
+            def enter_mobile_state_retry_hold() -> None:
+                hold_q = arm_ctrl.get_current_dual_arm_q()
+                hold_tauff = compute_arm_gravity_tauff(arm_ik, hold_q)
+                arm_ctrl.ctrl_dual_arm(hold_q, hold_tauff)
+                if not stop_base_once("mobile_state_stale_retry"):
+                    raise RuntimeError("MOBILE_STATE_RETRY_STOP_UNCONFIRMED")
+
+            mobile_state_provider = MobileStateProvider(
+                receiver=base_state_receiver,
+                kinematics=mobile_kinematics,
+                state_timeout_sec=float(args.mobile_state_timeout_sec),
+                retry_count=int(args.mobile_state_retry_count),
+                retry_interval_sec=float(args.mobile_state_retry_interval_sec),
+                raw_height_minimum=float(args.mobile_height_raw_minimum),
+                raw_height_maximum=float(args.mobile_height_raw_maximum),
+                column_travel_m=float(args.mobile_column_travel_m),
+                enter_fail_closed_hold=enter_mobile_state_retry_hold,
+                log=logger_mp,
+            )
         if args.ui:
             ui_command_bus = UiCommandBus()
             ui_state_store = UiStateStore(
@@ -790,7 +586,7 @@ if __name__ == '__main__':
                 state_store=ui_state_store,
                 camera_status_getter=lambda: build_runtime_camera_status(components.cameras),
                 camera_frame_getter=lambda camera_id: get_camera_frame_by_id(components.cameras, camera_id),
-                inference_profiles_getter=ui_inference_profiles,
+                inference_profiles_getter=ui_online_inference.profiles,
                 host=args.ui_host,
                 port=args.ui_port,
                 publish_rate_hz=args.ui_preview_fps,
@@ -936,12 +732,12 @@ if __name__ == '__main__':
                 arm_ik=arm_ik,
                 get_wrist_poses=get_robot_wrist_poses,
                 get_wrist_poses_base_link=(
-                    get_robot_wrist_poses_base_link
+                    mobile_base_kinematics.wrist_poses_base_link
                     if args.record_mobile_training_state
                     else None
                 ),
                 get_dex1_tcp_poses_base_link=(
-                    get_robot_dex1_tcp_poses_base_link
+                    mobile_base_kinematics.dex1_tcp_poses_base_link
                     if args.record_mobile_training_state
                     else None
                 ),
@@ -1262,7 +1058,7 @@ if __name__ == '__main__':
                         logger_mp.error("[UI_INFERENCE] rejected: raw replay is active.")
                     else:
                         protocol_profile = str(payload.get("protocol_profile", "")).strip()
-                        profile_error = ui_inference_profile_error(protocol_profile)
+                        profile_error = ui_online_inference.profile_error(protocol_profile)
                         missing_cameras = missing_online_inference_camera_names(components.cameras)
                         if profile_error:
                             stop_base_once("online_inference_rejected_protocol")
@@ -1344,11 +1140,11 @@ if __name__ == '__main__':
                 active_profile = str(getattr(getattr(active_session, "config", None), "protocol_profile", ""))
                 if active_profile == "mobile_tcp23":
                     provider_get_sample_kwargs.update(
-                        current_online_mobile_inputs(current_lr_arm_q, include_tcp=True)
+                        mobile_online_inputs.current(current_lr_arm_q, include_tcp=True)
                     )
                 elif active_profile == "mobile_joint_base":
                     provider_get_sample_kwargs.update(
-                        current_online_mobile_inputs(current_lr_arm_q, include_tcp=False)
+                        mobile_online_inputs.current(current_lr_arm_q, include_tcp=False)
                     )
             if is_ui_raw_replay and ui_command_bus is not None:
                 provider_get_sample_kwargs["raw_replay_stop_requested"] = ui_command_bus.raw_replay_stop_requested
@@ -1543,7 +1339,10 @@ if __name__ == '__main__':
             active_protocol_profile = str(
                 getattr(getattr(getattr(active_provider, "session", None), "config", None), "protocol_profile", "")
             )
-            if active_input_provider == "online_inference" and active_protocol_profile == "mobile_joint_base":
+            if (
+                args.mobile_manipulation_mode == "mobile_ik_qp"
+                or (active_input_provider == "online_inference" and active_protocol_profile == "mobile_joint_base")
+            ):
                 manual_torso_yaw_rate = 0.0
             else:
                 manual_torso_yaw_rate = map_manual_torso_yaw_rate(
@@ -1553,6 +1352,10 @@ if __name__ == '__main__':
                 )
             wbc_ms = None
             if args.mobile_manipulation_mode == "mobile_ik_qp" and not is_ui_raw_replay:
+                if mobile_coordinator is None:
+                    raise RuntimeError("mobile_ik_qp coordinator is not initialized")
+                if mobile_state_provider is None:
+                    raise RuntimeError("mobile_ik_qp state provider is not initialized")
                 nominal_source = runtime_base_source or "controller"
                 nominal_intent = map_base_command(
                     args=args,
@@ -1574,9 +1377,8 @@ if __name__ == '__main__':
                         nominal_intent.vx,
                         nominal_intent.wz,
                         nominal_intent.z,
-                        manual_torso_yaw_rate,
                     ]),
-                    mobile_state=current_mobile_state(),
+                    mobile_state=mobile_state_provider.current(),
                     arm_q=current_lr_arm_q,
                     now_monotonic_ns=time.monotonic_ns(),
                     dt=control_dt,
@@ -1594,7 +1396,6 @@ if __name__ == '__main__':
                     source="mobile_ik_qp:wbc",
                     metadata=motion_intent.metadata,
                 )
-                arm_ctrl.set_waist_yaw_target(coordinated.waist_yaw_target)
                 final_base_intent = BaseCommandIntent(
                     vx=float(coordinated.final_body_command[0]),
                     vy=0.0,
@@ -1606,23 +1407,22 @@ if __name__ == '__main__':
                 base_intent = final_base_intent
                 base_provider_active = True
             else:
-                if not is_ui_raw_replay:
-                    if arm_ctrl.waist_yaw_target is None:
-                        raise RuntimeError("manual waist yaw requires an initialized waist yaw target")
-                    waist_yaw_target, waist_yaw_saturated = integrate_manual_torso_yaw_target(
-                        current_target_rad=float(arm_ctrl.waist_yaw_target),
-                        yaw_rate_radps=manual_torso_yaw_rate,
-                        dt=control_dt,
-                    )
-                    arm_ctrl.set_waist_yaw_target(waist_yaw_target)
-                    if waist_yaw_saturated and not manual_waist_yaw_limit_state["active"]:
-                        logger_mp.warning(
-                            "[WAIST_YAW] manual target saturated at %.4f rad (limit=[-2.7053, 2.7053])",
-                            waist_yaw_target,
-                        )
-                    manual_waist_yaw_limit_state["active"] = waist_yaw_saturated
                 base_intent = getattr(sample, "base_intent", None)
                 base_provider_active = active_input_provider in {"lerobot_offline", "online_inference"} or is_ui_raw_replay
+            if not is_ui_raw_replay:
+                waist_yaw_target, waist_yaw_saturated = resolve_waist_yaw_position_target(
+                    mobile_manipulation_mode=str(args.mobile_manipulation_mode),
+                    current_target_rad=arm_ctrl.waist_yaw_target,
+                    manual_yaw_rate_radps=manual_torso_yaw_rate,
+                    dt=control_dt,
+                )
+                arm_ctrl.set_waist_yaw_target(waist_yaw_target)
+                if args.mobile_manipulation_mode != "mobile_ik_qp" and waist_yaw_saturated and not manual_waist_yaw_limit_state["active"]:
+                    logger_mp.warning(
+                        "[WAIST_YAW] manual target saturated at %.4f rad (limit=[-2.7053, 2.7053])",
+                        waist_yaw_target,
+                    )
+                manual_waist_yaw_limit_state["active"] = waist_yaw_saturated
             base_result = apply_base_command(
                 args=args,
                 tele_data=tele_data,
