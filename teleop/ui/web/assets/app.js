@@ -26,6 +26,7 @@ function esc(value) {
 const state = {
   active: "record",
   snapshot: {},
+  validationReport: {},
   cameras: [],
   cameraStatus: {},
   realsenseDevices: [],
@@ -38,6 +39,7 @@ const state = {
   exportRangeInput: "",
   lastAlertSeq: 0,
   selectedPreviewCameraId: 0,
+  livePreviewEnabled: false,
   liveCurveHistory: [],
   playbackCurves: null,
   playbackSelectedCameraId: null,
@@ -101,6 +103,27 @@ function effectiveRecordRoot() {
   const runtime = runtimeRecordRoot();
   if (!saved || saved === "~/data/record/") return runtime || saved || "~/data/record/";
   return saved;
+}
+
+function sameValidationReport(a, b) {
+  return String(a?.episode_name || "") === String(b?.episode_name || "")
+    && Number(a?.checked_at_ns || 0) === Number(b?.checked_at_ns || 0);
+}
+
+function activeValidationReport(summary) {
+  return sameValidationReport(summary, state.validationReport) ? state.validationReport : (summary || {});
+}
+
+async function refreshValidationReport(summary) {
+  if (!summary?.episode_name || !summary?.checked_at_ns || sameValidationReport(summary, state.validationReport)) return;
+  const response = await api("/recording/validation?" + qs({
+    root_dir: runtimeRecordRoot(),
+    episode: summary.episode_name,
+  }));
+  const currentSummary = state.snapshot?.recording?.last_validation || {};
+  if (!sameValidationReport(summary, currentSummary)) return;
+  state.validationReport = response.validation || {};
+  if (state.active === "record" && document.activeElement?.tagName !== "INPUT") render();
 }
 
 function connectionIsOffline() {
@@ -644,7 +667,7 @@ function mobileTrainingSummary(v) {
 
 function renderRecord() {
   const r = state.snapshot?.recording || {};
-  const v = { ...(r.last_validation || {}), pending: !!r.validation_pending };
+  const v = { ...activeValidationReport(r.last_validation), pending: !!r.validation_pending };
   const teleop = state.snapshot?.teleop || {};
   const isRecording = !!r.active;
   const recordEnabled = r.enabled !== false;
@@ -701,12 +724,11 @@ function renderRecord() {
       ${isRecording ? `<p class="mini">录制已进入 ${esc(r.phase || "recording")}；相机帧、机器人状态和 action 仍由主循环按 monotonic 时间对齐。</p>` : ""}
       ${baseRecordingSummary(r)}
       ${recordingAlignmentSummary(r)}
-      <div class="prep-panels"><div><div class="toolbar"><div><h2>相机来源</h2><p class="mini">当前仓库相机由 CLI 参数打开；网页不启动、不停止相机。</p></div><button class="secondary" onclick="refreshAll()">刷新</button></div><div class="table-wrap"><table><thead><tr><th>Stream ID</th><th>来源</th><th>名称</th><th>链路</th><th>状态</th></tr></thead><tbody>${rows || `<tr><td colspan="5">${empty("尚未收到运行时相机帧；请检查启动参数、ZMQ sender 和网络链路")}</td></tr>`}</tbody></table></div></div><div><div class="toolbar"><div><h2>运行中流</h2><p class="mini">${activeIds.length} active${state.cameraStatusError ? ` · ${esc(state.cameraStatusError)}` : ""}</p></div></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>名称</th><th>模式</th><th>实际输出</th><th>请求参数</th><th>帧年龄</th></tr></thead><tbody>${streams || `<tr><td colspan="6">${empty("暂无运行流；检查启动参数是否启用本地或 ZMQ 相机")}</td></tr>`}</tbody></table></div></div></div>
+      <div class="prep-panels"><div><div class="toolbar"><div><h2>相机来源</h2><p class="mini">当前仓库相机由 CLI 参数打开；网页不启动、不停止相机。</p></div><button class="secondary" onclick="refreshAll()">刷新</button></div><div class="table-wrap"><table><thead><tr><th>Stream ID</th><th>来源</th><th>名称</th><th>链路</th><th>状态</th></tr></thead><tbody>${rows || `<tr><td colspan="5">${empty("尚未收到运行时相机帧；请检查启动参数、ZMQ sender 和网络链路")}</td></tr>`}</tbody></table></div></div><div class="camera-live-preview-panel"><div class="toolbar"><div><h2>多相机实时预览</h2><p class="mini">预览会在控制进程内编码 JPEG，默认关闭以保护遥操周期。</p></div><label class="toggle"><input type="checkbox" ${state.livePreviewEnabled ? "checked" : ""} onchange="setLivePreviewEnabled(this.checked)">实时预览</label></div><div class="preview-grid layout-placeholder">${previews || empty("暂无可预览相机；请检查启动参数和相机链路")}</div></div><div><div class="toolbar"><div><h2>运行中流</h2><p class="mini">${activeIds.length} active${state.cameraStatusError ? ` · ${esc(state.cameraStatusError)}` : ""}</p></div></div><div class="table-wrap"><table><thead><tr><th>ID</th><th>名称</th><th>模式</th><th>实际输出</th><th>请求参数</th><th>帧年龄</th></tr></thead><tbody>${streams || `<tr><td colspan="6">${empty("暂无运行流；检查启动参数是否启用本地或 ZMQ 相机")}</td></tr>`}</tbody></table></div></div></div>
     </div>
     <div class="card full record-validation-card"><div class="card-head"><h2>单条 episode 完整性与时间对齐检查</h2>${qualityBadge(validationCardState(v))}</div>${validationSummary(v)}</div>
     <div class="card full record-action-semantics-card"><div class="card-head"><h2>动作语义与异常动作</h2>${actionSemanticsBadge(v)}</div>${actionSemanticsSummary(v)}</div>
     ${recordLatencySummary()}
-    <div class="card full"><div class="card-head"><div><h2>多相机实时预览</h2><p class="mini">预览只读取当前进程已有 latest frame；不重启相机，不参与录制写盘。</p></div><span class="pill">${streamItems.length} live</span></div><div class="preview-grid layout-placeholder">${previews || empty("暂无可预览相机；请检查启动参数和相机链路")}</div></div>
     <div class="card full"><div class="card-head"><div><h2>实时数据曲线</h2><p class="mini">四图布局：左/右臂 J1-J7 与左/右夹爪分别显示，不再用线型区分。</p></div><span class="pill">4 charts</span></div><div class="curve-quad"><div class="curve-panel"><div class="curve-title"><b>Left J1-J7</b><span>q_fb</span></div><canvas id="liveLeftJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="liveLeftJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right J1-J7</b><span>q_fb</span></div><canvas id="liveRightJointCurveCanvas" height="220"></canvas><div class="curve-legend" id="liveRightJointLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Left Gripper</b><span>q_fb</span></div><canvas id="liveLeftGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveLeftGripperLegend"></div></div><div class="curve-panel"><div class="curve-title"><b>Right Gripper</b><span>q_fb</span></div><canvas id="liveRightGripperCurveCanvas" height="180"></canvas><div class="curve-legend" id="liveRightGripperLegend"></div></div></div></div>
     <div class="modal ${state.cameraConfigOpen ? "show" : ""}" onclick="if(event.target===this) closeCameraConfig()"><div class="modal-card"><div class="card-head"><div><h2>相机启动参数说明</h2><p class="mini">当前仓库相机在 Python 进程启动时打开，网页只读取 latest frame。</p></div><button class="secondary" onclick="closeCameraConfig()">关闭</button></div><div class="form compact-form"><label>宽<input id="camWidth" value="${esc(localStorage.camWidth || "1280")}" disabled></label><label>高<input id="camHeight" value="${esc(localStorage.camHeight || "720")}" disabled></label><label>FPS<input id="camFps" value="${esc(localStorage.camFps || "30")}" disabled></label><label>模式<select id="camMode" disabled><option value="rgb" ${(localStorage.camMode || "rgb") === "rgb" ? "selected" : ""}>RGB</option><option value="depth" ${localStorage.camMode === "depth" ? "selected" : ""}>Depth</option></select></label><label>名称<input id="camName" placeholder="head / left_wrist / right_wrist" value="${esc(localStorage.camName || "")}" disabled></label><label>角色<input id="camRole" value="${esc(localStorage.camRole || "runtime")}" disabled></label></div><p class="mini">请用 --head-camera-id / --left-camera-id / --right-camera-id 或 --head-zmq-endpoint / --left-zmq-endpoint / --right-zmq-endpoint 配置。这样录制线程和 UI 预览共享同一个相机 source，不会因为网页操作重启相机而破坏对齐。</p></div></div>
   </div>`;
@@ -756,6 +778,7 @@ function recordingAlignmentSummary(recording) {
     <span><b>待对齐</b> ${Number(alignment.pending_samples || 0)} / peak ${Number(alignment.max_pending_samples || 0)}</span>
     <span><b>最老等待</b> ${formatMs(alignment.oldest_pending_age_ms)}</span>
     <span><b>worker</b> ${formatMs(alignment.worker_last_ms)}</span>
+    <span><b>写盘队列</b> ${Number(alignment.writer_queue_depth || 0)} / ${Number(alignment.writer_queue_capacity || 0)}</span>
     <span><b>已写入/丢弃</b> ${Number(alignment.processed_sample_count || 0)} / ${Number(alignment.dropped_sample_count || 0)}</span>
   </div>`;
 }
@@ -1146,8 +1169,10 @@ function setTab(id) {
   render();
   if (id === "playback") {
     api("/ui/provider/hold")
-      .then(() => refreshAll())
+      .then(() => refreshAll({ includeEpisodes: true }))
       .catch((e) => showBanner(`切换 HOLD 失败：${e?.message || e}`, "error"));
+  } else if (id === "export") {
+    refreshAll({ includeEpisodes: true }).catch((e) => showBanner(`加载 episode 列表失败：${e?.message || e}`, "error"));
   } else if (id === "record" && state.snapshot?.provider?.active_provider !== "online_inference") {
     api("/ui/provider/xr")
       .then(() => refreshAll())
@@ -1197,8 +1222,12 @@ function applySnapshot(payload) {
     showBanner(`${alert.level || "warning"} · ${alert.code || ""} · ${alert.message || ""}`, alert.level === "error" ? "error" : "warning");
   }
   const changedRecording = !!r.active !== !!prevR.active;
-  const changedValidation = (r.last_validation?.checked_at_ns || 0) !== (prevR.last_validation?.checked_at_ns || 0);
-  if (prevR.active && !r.active) window.setTimeout(() => refreshAll(), 1200);
+  const changedValidation = !sameValidationReport(r.last_validation, prevR.last_validation);
+  if (changedValidation && r.last_validation?.checked_at_ns) {
+    refreshValidationReport(r.last_validation).catch((error) => {
+      showBanner(`加载 validation 报告失败：${error?.message || error}`, "error");
+    });
+  }
   const teleop = state.snapshot.teleop || {};
   const prevTeleop = prev.teleop || {};
   const changedTeleop = (
@@ -1302,13 +1331,14 @@ async function setGlobalRecordRoot(value) {
   if (state.active !== "record" || !state.snapshot?.recording?.active) render();
 }
 
-async function refreshAll() {
+async function refreshAll({ includeEpisodes = false } = {}) {
   if (state.shuttingDown) return;
   try { await refreshCameraStatusOnly(false); } catch (_) {}
   try { state.realsenseDevices = (await api("/camera/realsense_list")).devices || []; } catch (_) { state.realsenseDevices = []; }
   const recordingStatus = await api("/recording/status");
   state.snapshot = { ...(state.snapshot || {}), recording: recordingStatus };
-  await refreshEpisodes();
+  await refreshValidationReport(recordingStatus.last_validation || {});
+  if (includeEpisodes) await refreshEpisodes();
   try { state.convertStatus = await api("/convert/status", { allowApplicationError: true }); } catch (_) {}
   state.inferenceStatus = await api("/inference/status");
   state.inferenceProfiles = (await api("/inference/profiles")).profiles || [];
@@ -1774,7 +1804,7 @@ function drawInferenceDualTcp3D() {
 }
 
 function updatePreviewLoop() {
-  if (state.active !== "record" && state.active !== "inference") return;
+  if (!state.livePreviewEnabled || (state.active !== "record" && state.active !== "inference")) return;
   document.querySelectorAll("img[data-live-camera], img[data-inference-camera]").forEach((img) => {
     if (img.dataset.previewRequestPending === "1") return;
     const cameraId = img.dataset.liveCamera ?? img.dataset.inferenceCamera ?? "0";
@@ -1796,6 +1826,11 @@ function updatePreviewLoop() {
     if (hint && !img.getAttribute("src")) hint.textContent = `等待 cam${cameraId}...`;
     img.src = url;
   });
+}
+
+function setLivePreviewEnabled(enabled) {
+  state.livePreviewEnabled = Boolean(enabled);
+  render();
 }
 
 async function queueCommand(path, message) {
@@ -2391,7 +2426,7 @@ function drawRawReplayGripperStateCurves() {
   drawSeriesCanvas("liveRightGripperCurveCanvas", `Right gripper state${titleSuffix}`, rightSeries, history.length > 1 ? 1 : null);
 }
 
-Object.assign(window, { refreshAll, refreshEpisodes, render, setRecordFps, setGlobalRecordRoot, loadGlobalRecordRoot, startTeleop, stopTeleop, homeTeleop, recenterTeleop, startInference, stopInference, restoreXrInput, startCam, startRsCam, stopCam, selectPreviewCamera, openQuickPlaybackOptions, closeQuickPlaybackOptions, toggleQuickPlaybackOptions, updateQuickPlaybackQuery, selectQuickPlaybackEpisode, handleQuickPlaybackKey, openCameraConfig, closeCameraConfig, setPlaybackSearch, setExportConfig, setExportRangeInput, startRec, stopRec, cancelRec, startExport, toggleExportEpisode, selectExportRange, selectAllExportEpisodes, clearExportSelection, invertExportSelection, loadPlayback, deleteEpisodes, deleteSelectedEpisodes, playbackStart, playbackPause, playbackStop, startRealReplay, stopRealReplay, seekPlayback, previewPlaybackSeek, setPlaybackCamera, previewPlaybackImage, loadPlaybackCurves });
+Object.assign(window, { refreshAll, refreshEpisodes, render, setRecordFps, setGlobalRecordRoot, loadGlobalRecordRoot, setLivePreviewEnabled, startTeleop, stopTeleop, homeTeleop, recenterTeleop, startInference, stopInference, restoreXrInput, startCam, startRsCam, stopCam, selectPreviewCamera, openQuickPlaybackOptions, closeQuickPlaybackOptions, toggleQuickPlaybackOptions, updateQuickPlaybackQuery, selectQuickPlaybackEpisode, handleQuickPlaybackKey, openCameraConfig, closeCameraConfig, setPlaybackSearch, setExportConfig, setExportRangeInput, startRec, stopRec, cancelRec, startExport, toggleExportEpisode, selectExportRange, selectAllExportEpisodes, clearExportSelection, invertExportSelection, loadPlayback, deleteEpisodes, deleteSelectedEpisodes, playbackStart, playbackPause, playbackStop, startRealReplay, stopRealReplay, seekPlayback, previewPlaybackSeek, setPlaybackCamera, previewPlaybackImage, loadPlaybackCurves });
 el("refreshBtn").addEventListener("click", refreshAll);
 state.active = "record"; render(); connectSse(); refreshAll();
 window.setInterval(() => {

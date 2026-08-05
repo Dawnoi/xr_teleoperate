@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, urlparse
 import cv2
 
 from teleop.ui.command_bus import UiCommandBus, UiCommandName
-from teleop.ui.episode_store import PlaybackSession, latest_episode_summary, list_episodes
+from teleop.ui.episode_store import PlaybackSession, list_episodes, load_persisted_validation, resolve_root
 from teleop.ui.exporter import DEFAULT_UI_URDF_PATH, UiExportManager, UiExportRequest
 from teleop.ui.state_store import UiStateStore
 
@@ -109,6 +109,37 @@ class TeleopUiServer:
                     return
                 if path == "/recording/status":
                     owner._json_ok(self, owner._recording_status_with_validation())
+                    return
+                if path == "/recording/validation":
+                    params = parse_qs(parsed.query)
+                    episode_name = owner._first_query_value(params, "episode")
+                    if not EPISODE_NAME_RE.fullmatch(episode_name):
+                        owner._json_ok(
+                            self,
+                            {"ok": False, "error": "episode must match episode_<number>"},
+                            status=400,
+                        )
+                        return
+                    root = resolve_root(
+                        owner._first_query_value(params, "root_dir"),
+                        owner._default_episode_root(),
+                    ).resolve()
+                    episode_dir = (root / episode_name).resolve()
+                    if root not in episode_dir.parents or not episode_dir.is_dir():
+                        owner._json_ok(
+                            self,
+                            {"ok": False, "error": f"episode directory not found: {episode_dir}"},
+                            status=404,
+                        )
+                        return
+                    owner._json_ok(
+                        self,
+                        {
+                            "ok": True,
+                            "episode_name": episode_name,
+                            "validation": load_persisted_validation(episode_dir),
+                        },
+                    )
                     return
                 if path == "/recording/episodes":
                     params = parse_qs(parsed.query)
@@ -742,10 +773,17 @@ class TeleopUiServer:
     def _recording_status_with_validation(self) -> dict[str, Any]:
         _, snapshot = self.state_store.snapshot()
         recording = dict(snapshot.get("recording", {}))
-        root_dir = self._default_episode_root()
-        latest = latest_episode_summary(root_dir)
-        if latest is not None:
-            recording["last_validation"] = dict(latest.get("validation", {}))
+        recording.setdefault(
+            "last_validation",
+            {
+                "level": "unknown",
+                "status": "not_loaded",
+                "errors": [
+                    "latest episode validation is not loaded in the real-time control process"
+                ],
+                "warnings": [],
+            },
+        )
         return recording
 
     @staticmethod
