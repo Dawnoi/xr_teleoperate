@@ -201,6 +201,9 @@ def get_robot_wrist_poses(arm_ik, arm_q):
 
 def compute_arm_gravity_tauff(arm_ik_obj, arm_q):
     try:
+        compute_gravity = getattr(arm_ik_obj, "compute_gravity_tauff", None)
+        if callable(compute_gravity):
+            return compute_gravity(arm_q)
         model = arm_ik_obj.reduced_robot.model
         data = arm_ik_obj.reduced_robot.data
         q = np.asarray(arm_q, dtype=float).copy()

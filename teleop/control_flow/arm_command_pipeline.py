@@ -290,6 +290,7 @@ def _limit_speed(
         current_lr_arm_q,
         max_joint_speed=(float(home_return_speed) if home_return_active else float(max_arm_joint_speed)),
         control_frequency=float(frequency),
+        synchronize_per_arm=not home_return_active,
     )
     safety_ms = (time.perf_counter() - safety_start) * 1000.0
     return limited_q, sol_q_before_speed_limit, safety_ms

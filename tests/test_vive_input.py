@@ -12,7 +12,7 @@ import numpy as np
 
 from core.input.vive_provider import ViveTrackerInputProvider, vive_config_from_args
 from scripts.vive_axis_calibrator import solve_axis_calibration
-from scripts.vive_keyboard_enable import HoldEnableState, _resolve_input_paths
+from scripts.vive_keyboard_enable import HoldEnableState, _resolve_input_paths, parse_args
 
 
 IDENTITY_FLAT = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
@@ -71,6 +71,11 @@ class ViveInputTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "unique pedal"):
                 _resolve_input_paths([], "/dev/input/event*")
+
+    def test_pedal_discovery_defaults_to_by_path(self):
+        args = parse_args([])
+
+        self.assertEqual(args.input_device_glob, "/dev/input/by-path/*-event-kbd")
 
     def test_common_pedal_name_is_auto_selected_from_by_path(self):
         with patch(

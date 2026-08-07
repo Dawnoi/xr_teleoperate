@@ -12,6 +12,9 @@ if [[ -f "${CONDA_SH}" ]]; then
 fi
 
 unset PYTHONPATH || true
+set +u
+source /opt/ros/humble/setup.bash
+set -u
 
 REAL_TELEOP_ENTRY="${REAL_TELEOP_ENTRY:-teleop/real/teleop_hand_and_arm.py}"
 NETWORK_INTERFACE="${NETWORK_INTERFACE:-eno1}"
@@ -48,7 +51,8 @@ exec python "${REAL_TELEOP_ENTRY}" \
   --vive-calibration-file "${VIVE_CALIBRATION_FILE}" \
   --vive-enable-left-topic "${VIVE_ENABLE_LEFT_TOPIC}" \
   --vive-enable-right-topic "${VIVE_ENABLE_RIGHT_TOPIC}" \
-  --max-arm-joint-speed "${MAX_ARM_JOINT_SPEED:-1.0}" \
+  --frequency "${TELEOP_FREQUENCY:-60.0}" \
+  --max-arm-joint-speed "${MAX_ARM_JOINT_SPEED:-3.0}" \
   --arm-workspace-mode tapered \
   --arm-workspace-z-min -0.05 \
   --arm-workspace-z-max 0.45 \

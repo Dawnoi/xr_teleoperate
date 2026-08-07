@@ -16,6 +16,44 @@ sys.path.append(parent2_dir)
 from core.control.weighted_moving_filter import WeightedMovingFilter
 
 
+G1_29_ARM_JOINT_NAMES = (
+    "left_shoulder_pitch_joint",
+    "left_shoulder_roll_joint",
+    "left_shoulder_yaw_joint",
+    "left_elbow_joint",
+    "left_wrist_roll_joint",
+    "left_wrist_pitch_joint",
+    "left_wrist_yaw_joint",
+    "right_shoulder_pitch_joint",
+    "right_shoulder_roll_joint",
+    "right_shoulder_yaw_joint",
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
+)
+
+G1_29_FIXED_BODY_JOINT_NAMES = (
+    "left_hip_pitch_joint",
+    "left_hip_roll_joint",
+    "left_hip_yaw_joint",
+    "left_knee_joint",
+    "left_ankle_pitch_joint",
+    "left_ankle_roll_joint",
+    "right_hip_pitch_joint",
+    "right_hip_roll_joint",
+    "right_hip_yaw_joint",
+    "right_knee_joint",
+    "right_ankle_pitch_joint",
+    "right_ankle_roll_joint",
+    "waist_yaw_joint",
+    "waist_roll_joint",
+    "waist_pitch_joint",
+)
+
+G1_29_ROTATION_COST_WEIGHT = 1.0
+
+
 def _resolve_asset_paths(asset_subdir: str, urdf_name: str):
     teleop_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     repo_root = os.path.dirname(teleop_dir)
@@ -101,6 +139,24 @@ class G1_29_ArmIK:
                 self.save_cache()
                 logger_mp.info(f">>> Cache saved to {self.cache_path}")
 
+        self.gravity_urdf_path, self.gravity_model_dir = _resolve_asset_paths(
+            "g1", "g1_body29_l20.urdf"
+        )
+        if os.path.isfile(self.gravity_urdf_path):
+            self.gravity_robot, self.gravity_reduced_robot = self._build_gravity_model()
+            logger_mp.info(
+                "[G1_29_ArmIK] gravity model: %s (IK remains %s)",
+                self.gravity_urdf_path,
+                self.urdf_path,
+            )
+        else:
+            self.gravity_robot = self.robot
+            self.gravity_reduced_robot = self.reduced_robot
+            logger_mp.warning(
+                "[G1_29_ArmIK] L20 gravity URDF missing, using the legacy IK model for gravity: %s",
+                self.gravity_urdf_path,
+            )
+
         # for i in range(self.reduced_robot.model.nframes):
         #     frame = self.reduced_robot.model.frames[i]
         #     frame_id = self.reduced_robot.model.getFrameId(frame.name)
@@ -158,7 +214,12 @@ class G1_29_ArmIK:
             self.var_q,
             self.reduced_robot.model.upperPositionLimit)
         )
-        self.opti.minimize(50 * self.translational_cost + self.rotation_cost + 0.02 * self.regularization_cost + 0.1 * self.smooth_cost)
+        self.opti.minimize(
+            50 * self.translational_cost
+            + G1_29_ROTATION_COST_WEIGHT * self.rotation_cost
+            + 0.02 * self.regularization_cost
+            + 0.1 * self.smooth_cost
+        )
 
         opts = {
             # CasADi-level options
@@ -245,6 +306,46 @@ class G1_29_ArmIK:
 
         return robot, reduced_robot
 
+    def _build_gravity_model(self):
+        """Build a locked L20 model without changing the IK model or its EE frames."""
+        robot = pin.RobotWrapper.BuildFromURDF(self.gravity_urdf_path, self.gravity_model_dir)
+        l20_joint_names = [
+            name
+            for jid, name in enumerate(robot.model.names)
+            if name.startswith("l20_") and robot.model.joints[jid].nq > 0
+        ]
+        reduced_robot = robot.buildReducedRobot(
+            list_of_joints_to_lock=list(G1_29_FIXED_BODY_JOINT_NAMES) + l20_joint_names,
+            reference_configuration=np.zeros(robot.model.nq),
+        )
+        if reduced_robot.model.nq != self.reduced_robot.model.nq:
+            raise RuntimeError(
+                "L20 gravity model joint dimension does not match IK model: "
+                f"gravity={reduced_robot.model.nq}, ik={self.reduced_robot.model.nq}"
+            )
+        for joint_name in G1_29_ARM_JOINT_NAMES:
+            ik_joint_id = self.reduced_robot.model.getJointId(joint_name)
+            gravity_joint_id = reduced_robot.model.getJointId(joint_name)
+            if ik_joint_id == 0 or gravity_joint_id == 0:
+                raise RuntimeError(f"gravity model is missing arm joint: {joint_name}")
+            ik_q_index = self.reduced_robot.model.idx_qs[ik_joint_id]
+            gravity_q_index = reduced_robot.model.idx_qs[gravity_joint_id]
+            if ik_q_index != gravity_q_index:
+                raise RuntimeError(
+                    f"gravity/IK joint order mismatch for {joint_name}: "
+                    f"gravity_q={gravity_q_index}, ik_q={ik_q_index}"
+                )
+        return robot, reduced_robot
+
+    def compute_gravity_tauff(self, arm_q):
+        q = np.asarray(arm_q, dtype=float).reshape(-1)
+        model = self.gravity_reduced_robot.model
+        if q.shape != (model.nq,):
+            raise ValueError(f"arm_q must have shape ({model.nq},), got {q.shape}")
+        data = self.gravity_reduced_robot.data
+        zeros = np.zeros(model.nv, dtype=float)
+        return pin.rnea(model, data, q, zeros, zeros)
+
     def scale_arms(self, human_left_pose, human_right_pose, human_arm_length=0.60, robot_arm_length=0.75):
         scale_factor = robot_arm_length / human_arm_length
         robot_left_pose = human_left_pose.copy()
@@ -282,7 +383,7 @@ class G1_29_ArmIK:
 
             self.init_data = sol_q
 
-            sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
+            sol_tauff = self.compute_gravity_tauff(sol_q)
 
             if self.Visualization:
                 self.vis.display(sol_q)  # for visualization
@@ -303,7 +404,7 @@ class G1_29_ArmIK:
 
             self.init_data = sol_q
 
-            sol_tauff = pin.rnea(self.reduced_robot.model, self.reduced_robot.data, sol_q, v, np.zeros(self.reduced_robot.model.nv))
+            sol_tauff = self.compute_gravity_tauff(sol_q)
 
             logger_mp.error(f"sol_q:{sol_q} \nmotorstate: \n{current_lr_arm_motor_q} \nleft_pose: \n{left_wrist} \nright_pose: \n{right_wrist}")
             if self.Visualization:

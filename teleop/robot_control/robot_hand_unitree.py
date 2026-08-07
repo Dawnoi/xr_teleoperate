@@ -354,16 +354,12 @@ class Dex1_1_Gripper_Controller:
         self.subscribe_state_thread.daemon = True
         self.subscribe_state_thread.start()
 
-        startup_wait_deadline = time.time() + 3.0
-        while not self.gripper_state_ready and time.time() < startup_wait_deadline:
-            time.sleep(0.01)
-            logger_mp.warning("[Dex1_1_Gripper_Controller] Waiting to subscribe dds...")
         if self.gripper_state_ready:
             logger_mp.info("[Dex1_1_Gripper_Controller] Subscribe dds ok.")
         else:
             logger_mp.warning(
-                "[Dex1_1_Gripper_Controller] No valid gripper state received within 3s. "
-                "Controller will continue running with health monitoring enabled."
+                "[Dex1_1_Gripper_Controller] Gripper state subscription is asynchronous; "
+                "continuing without waiting for Dex1. Health monitoring remains enabled."
             )
 
         self.gripper_control_thread = threading.Thread(target=self.control_thread, args=(left_gripper_value_in, right_gripper_value_in, self.left_gripper_state_value, self.right_gripper_state_value,

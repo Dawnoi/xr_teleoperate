@@ -121,6 +121,11 @@ class ViveKeyboardEnable(Node):
             else "Alt+L -> left, Alt+R -> right"
         )
         self.get_logger().info(f"hold-to-enable pedal mapping: {mapping}")
+        if not self._grab_input_devices:
+            self.get_logger().warning(
+                "input events are not exclusive; pedal keys may appear in the terminal. "
+                "Restart with --grab-input-devices."
+            )
 
     def open_input_devices(self):
         paths, explicit = _resolve_input_paths(
@@ -239,7 +244,11 @@ def parse_args(argv=None):
         help="Exact /dev/input path; repeat for two pedals.",
     )
     parser.add_argument("--input-device-glob", default="/dev/input/by-path/*-event-kbd")
-    parser.add_argument("--grab-input-devices", action="store_true")
+    parser.add_argument(
+        "--grab-input-devices",
+        action="store_true",
+        help="Exclusive-capture selected pedal events so they cannot reach the terminal.",
+    )
     parser.add_argument(
         "--swap-sides",
         action="store_true",

@@ -6,7 +6,7 @@ import argparse
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     # basic control parameters
-    parser.add_argument('--frequency', type = float, default = 30.0, help = 'control and record \'s frequency')
+    parser.add_argument('--frequency', type = float, default = 60.0, help = 'control and record \'s frequency')
     parser.add_argument('--input-mode', type=str, choices=['hand', 'controller'], default='hand',
                         help='Select XR device input tracking source. hand uses XR hand wrist as arm locator and pinch as the grip/deadman signal.')
     parser.add_argument('--arm', type=str, choices=['G1_29', 'G1_23', 'H1_2', 'H1', 'H2'], default='G1_29', help='Select arm controller')
