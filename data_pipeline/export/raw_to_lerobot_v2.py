@@ -91,6 +91,12 @@ def _finite(value: Any, label: str) -> float:
     return result
 
 
+def _mapping(value: Any, label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be an object, got {type(value).__name__}")
+    return value
+
+
 def episode_data_path(episode_dir: Path, episode_data_file: str) -> Path:
     if not episode_data_file or Path(episode_data_file).name != episode_data_file:
         raise ValueError(f"episode_data_file must be a filename, got {episode_data_file!r}")
@@ -251,6 +257,21 @@ def sample_monotonic_ns(item: Mapping[str, Any], frame_index: int) -> int:
 
 MOBILE_STATE_VECTOR_SIZE = 26
 MOBILE_ACTION_VECTOR_SIZE = 23
+MOBILE_COLUMN_HEIGHT_MINIMUM_M = 0.0
+MOBILE_COLUMN_HEIGHT_MAXIMUM_M = 0.42
+ONLINE_MOBILE_ALIGNMENT_TIMESTAMP_KEYS = (
+    "base_state",
+    "base_height",
+    "slam_tf",
+    "base_action",
+)
+ONLINE_MOBILE_ALIGNMENT_MODES = {
+    "exact",
+    "linear",
+    "edge_nearest_future",
+    "edge_hold_last",
+    "hold_last",
+}
 
 
 def _tcp_pose10(source: Mapping[str, Any], arm_key: str, ee_key: str, child_frame: str, label: str) -> np.ndarray:
@@ -270,8 +291,10 @@ def _tcp_pose10(source: Mapping[str, Any], arm_key: str, ee_key: str, child_fram
     return np.concatenate((np.asarray(pose6[:3], dtype=float), rot6d, gripper))
 
 
-def mobile_eef_base_vectors(item: Mapping[str, Any], frame_index: int) -> tuple[np.ndarray, np.ndarray]:
-    """Build OpenPI-ready EEF+base vectors from one offline-aligned raw frame."""
+def _mobile_base_vector_sources(
+    item: Mapping[str, Any],
+    frame_index: int,
+) -> tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]:
     states = item.get("states")
     actions = item.get("actions")
     if not isinstance(states, Mapping) or not isinstance(actions, Mapping):
@@ -280,14 +303,73 @@ def mobile_eef_base_vectors(item: Mapping[str, Any], frame_index: int) -> tuple[
     action_base = actions.get("base")
     if not isinstance(state_base, Mapping) or not isinstance(action_base, Mapping):
         raise ValueError(f"frame {frame_index} requires states.base and actions.base")
-    map_pose = state_base.get("slam_map_pose_interpolated")
-    velocity = state_base.get("velocity_interpolated")
-    height = state_base.get("height_interpolated")
-    mobile_action = action_base.get("interpolated")
-    if not isinstance(map_pose, Mapping) or not isinstance(velocity, Mapping) or not isinstance(height, Mapping):
-        raise ValueError(f"frame {frame_index} is missing offline-interpolated base state fields")
-    if not isinstance(mobile_action, Mapping):
-        raise ValueError(f"frame {frame_index} is missing actions.base.interpolated")
+
+    offline_keys = (
+        "slam_map_pose_interpolated",
+        "velocity_interpolated",
+        "height_interpolated",
+    )
+    present_offline_keys = [key for key in offline_keys if key in state_base]
+    if present_offline_keys:
+        missing_offline_keys = [key for key in offline_keys if key not in state_base]
+        if missing_offline_keys or "interpolated" not in action_base:
+            raise ValueError(
+                f"frame {frame_index} has mixed mobile alignment schemas: "
+                f"present_offline={present_offline_keys} missing_offline={missing_offline_keys} "
+                f"base_action_interpolated={'interpolated' in action_base}"
+            )
+        return (
+            _mapping(state_base["slam_map_pose_interpolated"], f"frame {frame_index} slam_map_pose_interpolated"),
+            _mapping(state_base["velocity_interpolated"], f"frame {frame_index} velocity_interpolated"),
+            _mapping(state_base["height_interpolated"], f"frame {frame_index} height_interpolated"),
+            _mapping(action_base["interpolated"], f"frame {frame_index} base_action.interpolated"),
+        )
+
+    online_keys = ("slam_map_pose", "velocity", "height")
+    missing_online_keys = [key for key in online_keys if key not in state_base]
+    if missing_online_keys:
+        raise ValueError(
+            f"frame {frame_index} has neither complete offline-aligned mobile fields nor "
+            f"complete online-aligned mobile fields: missing_online={missing_online_keys}"
+        )
+    timestamps = item.get("timestamps")
+    if not isinstance(timestamps, Mapping):
+        raise ValueError(f"frame {frame_index} online-aligned mobile record requires timestamps")
+    for timestamp_key in ONLINE_MOBILE_ALIGNMENT_TIMESTAMP_KEYS:
+        entry = timestamps.get(timestamp_key)
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"frame {frame_index} online-aligned mobile record missing timestamps.{timestamp_key}")
+        mode = entry.get("interpolation_mode")
+        if mode not in ONLINE_MOBILE_ALIGNMENT_MODES:
+            raise ValueError(
+                f"frame {frame_index} timestamps.{timestamp_key}.interpolation_mode must be one of "
+                f"{sorted(ONLINE_MOBILE_ALIGNMENT_MODES)}, got {mode!r}"
+            )
+    return (
+        _mapping(state_base["slam_map_pose"], f"frame {frame_index} slam_map_pose"),
+        _mapping(state_base["velocity"], f"frame {frame_index} velocity"),
+        _mapping(state_base["height"], f"frame {frame_index} height"),
+        action_base,
+    )
+
+
+def mobile_eef_base_vectors(item: Mapping[str, Any], frame_index: int) -> tuple[np.ndarray, np.ndarray]:
+    """Build OpenPI-ready EEF+base vectors from online or offline aligned raw data."""
+    states = _mapping(item.get("states"), f"frame {frame_index} states")
+    actions = _mapping(item.get("actions"), f"frame {frame_index} actions")
+    map_pose, velocity, height, mobile_action = _mobile_base_vector_sources(item, frame_index)
+    state_base = _mapping(states.get("base"), f"frame {frame_index} states.base")
+    if "column_height_m" not in state_base:
+        raise ValueError(f"frame {frame_index} states.base.column_height_m is required")
+    column_height_m = _finite(
+        state_base.get("column_height_m"),
+        f"frame {frame_index} states.base.column_height_m",
+    )
+    if not MOBILE_COLUMN_HEIGHT_MINIMUM_M <= column_height_m <= MOBILE_COLUMN_HEIGHT_MAXIMUM_M:
+        raise ValueError(
+            f"frame {frame_index} states.base.column_height_m must be within "
+            f"[{MOBILE_COLUMN_HEIGHT_MINIMUM_M}, {MOBILE_COLUMN_HEIGHT_MAXIMUM_M}], got {column_height_m}"
+        )
     state = np.concatenate(
         (
             _tcp_pose10(states, "left_arm", "left_ee", "left_dex1_tcp", f"frame {frame_index} states"),
@@ -299,7 +381,7 @@ def mobile_eef_base_vectors(item: Mapping[str, Any], frame_index: int) -> tuple[
                     _finite(map_pose.get("yaw"), f"frame {frame_index} map.yaw"),
                     _finite(velocity.get("vx"), f"frame {frame_index} velocity.vx"),
                     _finite(velocity.get("wz"), f"frame {frame_index} velocity.wz"),
-                    _finite(height.get("z"), f"frame {frame_index} height.z"),
+                    column_height_m,
                 ],
                 dtype=float,
             ),

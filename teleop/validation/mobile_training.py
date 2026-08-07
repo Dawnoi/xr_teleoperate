@@ -189,7 +189,7 @@ def _validate_alignment(
     if interpolation_mode not in {_EDGE_FUTURE_MODE, _EDGE_HOLD_MODE} and abs(delta_ms) > max_abs_delta_ms:
         issues.append(_issue("MOBILE_ALIGNMENT_EXCEEDED", "warning", f"frame {frame_index} {key} delta {delta_ms:.1f}ms exceeds {max_abs_delta_ms:.1f}ms", frame_index=frame_index, delta_ms=delta_ms, limit_ms=max_abs_delta_ms))
     if require_past and delta_ms > 0.0:
-        issues.append(_issue("MOBILE_ACTION_ALIGNMENT_FUTURE", "error", f"frame {frame_index} base action must be hold-last, got future delta {delta_ms:.1f}ms", frame_index=frame_index, delta_ms=delta_ms))
+        issues.append(_issue("MOBILE_ACTION_ALIGNMENT_FUTURE", "warning", f"frame {frame_index} base action uses a future source sample, delta {delta_ms:.1f}ms", frame_index=frame_index, delta_ms=delta_ms))
     return delta_ms
 
 
@@ -198,6 +198,7 @@ def _validate_base_action_alignment(
     *,
     max_support_delta_ms: float,
     frame_index: int,
+    emit_future_issue: bool = True,
     issues: list[dict[str, Any]],
 ) -> float | None:
     entry = timestamps.get("base_action")
@@ -237,21 +238,22 @@ def _validate_base_action_alignment(
                 )
             )
         elif interpolation_mode == "hold_last" and float(source_time_ns) > float(sample_time_ns):
-            issues.append(
-                _issue(
-                    "MOBILE_BASE_ACTION_HOLD_LAST_FUTURE",
-                    "error",
-                    f"frame {frame_index} hold-last base action source must not be later than the sample",
-                    frame_index=frame_index,
-                    source_time_ns=int(source_time_ns),
-                    sample_time_ns=int(sample_time_ns),
+            if emit_future_issue:
+                issues.append(
+                    _issue(
+                        "MOBILE_BASE_ACTION_HOLD_LAST_FUTURE",
+                        "warning",
+                        f"frame {frame_index} hold-last base action source is later than the sample",
+                        frame_index=frame_index,
+                        source_time_ns=int(source_time_ns),
+                        sample_time_ns=int(sample_time_ns),
+                    )
                 )
-            )
         elif interpolation_mode == _EDGE_FUTURE_MODE and float(source_time_ns) < float(sample_time_ns):
             issues.append(
                 _issue(
                     "MOBILE_BASE_ACTION_EDGE_FUTURE_PAST",
-                    "error",
+                    "warning",
                     f"frame {frame_index} start-edge base action source must not precede the sample",
                     frame_index=frame_index,
                     source_time_ns=int(source_time_ns),
@@ -275,6 +277,139 @@ def _validate_base_action_alignment(
             )
         )
     return support_delta_ms
+
+
+def _base_action_source_event_key(entry: Mapping[str, Any], mode: str) -> tuple[Any, ...] | None:
+    """Return an identity for one source action event, independent of image reuse."""
+    if mode == "linear":
+        previous = entry.get("support_prev_t_ns")
+        following = entry.get("support_next_t_ns")
+        if not _finite_number(previous) or not _finite_number(following):
+            return None
+        return ("linear", int(previous), int(following))
+    source_time_ns = entry.get("support_source_t_ns")
+    if not _finite_number(source_time_ns):
+        return None
+    return ("source", int(source_time_ns))
+
+
+def _validate_base_action_future_policy(
+    observations: Sequence[Mapping[str, Any]],
+    *,
+    issues: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Classify base-action future references by unique source event, not image frames."""
+    future_frame_indices: list[int] = []
+    interior_future_frame_indices: list[int] = []
+    edge_nearest_future_frame_indices: list[int] = []
+    edge_hold_last_frame_indices: list[int] = []
+    events: dict[tuple[Any, ...], dict[str, Any]] = {}
+    event_order: list[tuple[Any, ...]] = []
+    normal_seen = False
+    terminal_edge_hold_positions: set[int] = set()
+    for position in range(len(observations) - 1, -1, -1):
+        if str(observations[position]["interpolation_mode"]) != _EDGE_HOLD_MODE:
+            break
+        terminal_edge_hold_positions.add(position)
+
+    for position, observation in enumerate(observations):
+        frame_index = int(observation["frame_index"])
+        mode = str(observation["interpolation_mode"])
+        sample_time_ns = observation.get("sample_monotonic_ns")
+        source_time_ns = observation.get("support_source_t_ns")
+        source_is_future = (
+            _finite_number(sample_time_ns)
+            and _finite_number(source_time_ns)
+            and int(source_time_ns) > int(sample_time_ns)
+        )
+
+        is_start_edge_future = mode == _EDGE_FUTURE_MODE and not normal_seen
+        is_terminal_edge_hold = mode == _EDGE_HOLD_MODE and position in terminal_edge_hold_positions
+        if mode == _EDGE_FUTURE_MODE and is_start_edge_future:
+            edge_nearest_future_frame_indices.append(frame_index)
+        elif is_terminal_edge_hold:
+            edge_hold_last_frame_indices.append(frame_index)
+        else:
+            normal_seen = True
+
+        is_future_action = source_is_future and mode not in {"exact", "linear"}
+        event_key = _base_action_source_event_key(observation, mode)
+        if event_key is None:
+            continue
+        event = events.get(event_key)
+        if event is None:
+            event = {
+                "source_event_key": event_key,
+                "source_time_ns": int(source_time_ns),
+                "future": False,
+                "interior_future": False,
+                "frame_indices": [],
+            }
+            events[event_key] = event
+            event_order.append(event_key)
+        event["frame_indices"].append(frame_index)
+        if not is_future_action:
+            continue
+        future_frame_indices.append(frame_index)
+        is_interior_future = not is_start_edge_future and not is_terminal_edge_hold
+        if is_interior_future:
+            interior_future_frame_indices.append(frame_index)
+        event["future"] = True
+        event["interior_future"] = bool(event["interior_future"] or is_interior_future)
+
+    interior_events = [events[key] for key in event_order if events[key]["interior_future"]]
+    longest_run = 0
+    current_run = 0
+    for key in event_order:
+        if events[key]["interior_future"]:
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+        else:
+            current_run = 0
+
+    report = {
+        "future_frame_indices": future_frame_indices,
+        "interior_future_frame_indices": interior_future_frame_indices,
+        "edge_nearest_future_frame_indices": edge_nearest_future_frame_indices,
+        "edge_hold_last_frame_indices": edge_hold_last_frame_indices,
+        "interior_future_count": len(interior_events),
+        "longest_consecutive_interior_future_run": longest_run,
+        "interior_future_source_events": interior_events,
+    }
+
+    if edge_nearest_future_frame_indices:
+        issues.append(
+            _issue(
+                "MOBILE_BASE_ACTION_EDGE_NEAREST_FUTURE",
+                "warning",
+                "base action uses edge_nearest_future at the episode start",
+                frame_indices=edge_nearest_future_frame_indices,
+                count=len(edge_nearest_future_frame_indices),
+            )
+        )
+    if edge_hold_last_frame_indices:
+        issues.append(
+            _issue(
+                "MOBILE_BASE_ACTION_EDGE_HOLD_LAST",
+                "warning",
+                "base action uses edge_hold_last at the episode end",
+                frame_indices=edge_hold_last_frame_indices,
+                count=len(edge_hold_last_frame_indices),
+            )
+        )
+    if interior_events:
+        severity = "error" if len(interior_events) >= 3 or longest_run >= 2 else "warning"
+        issues.append(
+            _issue(
+                "MOBILE_BASE_ACTION_INTERIOR_FUTURE",
+                severity,
+                "base action uses future source events inside the episode",
+                frame_indices=interior_future_frame_indices,
+                source_event_count=len(interior_events),
+                longest_consecutive_source_event_run=longest_run,
+            )
+        )
+    return report
 
 
 _EDGE_FUTURE_MODE = "edge_nearest_future"
@@ -499,7 +634,7 @@ def _validate_global_slam_pose(
         if max_slam_tf_age_ms > limits["slam_tf_max_age_ms"]:
             issues.append(_issue("MOBILE_SLAM_TF_STALE", "warning", f"frame {frame_index} slam TF age {max_slam_tf_age_ms:.1f}ms exceeds {limits['slam_tf_max_age_ms']:.1f}ms", frame_index=frame_index, tf_age_ms=max_slam_tf_age_ms, limit_ms=limits["slam_tf_max_age_ms"]))
         if max_slam_tf_age_ms < -limits["slam_tf_max_future_ms"]:
-            issues.append(_issue("MOBILE_SLAM_TF_FUTURE", "error", f"frame {frame_index} slam TF is {-max_slam_tf_age_ms:.1f}ms in the future; verify ROS host clock synchronization", frame_index=frame_index, tf_age_ms=max_slam_tf_age_ms, limit_ms=limits["slam_tf_max_future_ms"]))
+            issues.append(_issue("MOBILE_SLAM_TF_FUTURE", "warning", f"frame {frame_index} slam TF is {-max_slam_tf_age_ms:.1f}ms in the future; verify ROS host clock synchronization", frame_index=frame_index, tf_age_ms=max_slam_tf_age_ms, limit_ms=limits["slam_tf_max_future_ms"]))
     return previous_map_pose, identity_assumption_count, max_slam_tf_age_ms, max_map_speed_mps, max_map_yaw_rate_radps
 
 
@@ -534,6 +669,7 @@ def validate_mobile_training(
     previous_map_pose: tuple[float, float, float, int] | None = None
     max_map_speed_mps = 0.0
     max_map_yaw_rate_radps = 0.0
+    base_action_observations: list[dict[str, Any]] = []
 
     for frame_index, item in enumerate(items):
         if not isinstance(item, Mapping):
@@ -632,11 +768,22 @@ def validate_mobile_training(
             timestamps,
             max_support_delta_ms=limits["base_action_max_support_delta_ms"],
             frame_index=frame_index,
+            emit_future_issue=False,
             issues=issues,
         )
         if base_action_delta_ms is not None:
             max_deltas_ms["base_action"] = max(max_deltas_ms["base_action"], base_action_delta_ms)
+        base_action_entry = timestamps.get("base_action")
+        if isinstance(base_action_entry, Mapping):
+            base_action_observations.append(
+                {
+                    "frame_index": frame_index,
+                    "sample_monotonic_ns": timestamps.get("sample_monotonic_ns"),
+                    **dict(base_action_entry),
+                }
+            )
 
+    base_action_future_report = _validate_base_action_future_policy(base_action_observations, issues=issues)
     if not velocity_only_base and identity_assumption_count:
         severity = "warning" if validated["allow_identity_source_to_base_link"] else "error"
         issues.append(_issue("MOBILE_IDENTITY_EXTRINSIC_ASSUMPTION", severity, f"{identity_assumption_count}/{len(items)} frames use source_to_base_link_identity_assumed", frame_count=identity_assumption_count))
@@ -679,6 +826,7 @@ def validate_mobile_training(
         "max_slam_tf_age_ms": max_slam_tf_age_ms,
         "max_map_speed_mps": max_map_speed_mps,
         "max_map_yaw_rate_radps": max_map_yaw_rate_radps,
+        "base_action_future_report": base_action_future_report,
         "source_gap_reports": source_gap_reports,
         "issues": issues,
         "errors": errors,

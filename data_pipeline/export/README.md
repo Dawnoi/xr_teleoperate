@@ -27,7 +27,9 @@ python data_pipeline/export/lerobot_to_umi_dp.py
 
 ## 移动操作 pi0.5 向量
 
-对离线对齐后的移动 episode 使用 `--episode-data-file data.mobile_aligned.json --mobile-eef-base 1`。导出的训练向量固定为：
+移动 episode 使用 `--mobile-eef-base 1`。当前在线采集的 `data.json` 已在每个相机采样时刻完成 base、height、SLAM TF 和 base action 对齐，exporter 直接读取 `states.base.{slam_map_pose,velocity,height}` 与 `actions.base`，并要求四条 `timestamps.{base_state,base_height,slam_tf,base_action}` 对齐记录完整。离线对齐 view 仍受支持：额外传入 `--episode-data-file data.mobile_aligned.json` 时，exporter 改读对应的 `*_interpolated` 字段。
+
+导出的训练向量固定为：
 
 - `observation.state: float64[26]`：左右 Dex1 TCP 各 `[xyz, Rot6D, gripper]`（各 10 维）、`slamware_map` 下底盘 `[x, y, yaw]`、`base_link` 下真实 `[vx, wz]`、升降柱真实高度。
 - `action: float64[23]`：左右 Dex1 TCP target 各 `[xyz, Rot6D, gripper]`（各 10 维）、`base_link` 下 `[vx_cmd, wz_cmd]` 和 `z_cmd`。
