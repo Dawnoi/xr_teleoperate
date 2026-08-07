@@ -302,12 +302,20 @@ class TeleopRecordingFlow:
     def needs_source_updates(self) -> bool:
         """Return whether an episode can still consume source history updates."""
         with self._condition:
+            active = (
+                self.state.record_start_monotonic_ns is not None
+                and not self.state.finalizing
+            )
+            finalizing_with_pending_samples = (
+                self.state.finalizing
+                and bool(self.state.pending_samples)
+            )
             return bool(
                 not self.state.canceling
                 and (
-                    self.state.record_start_monotonic_ns is not None
+                    active
                     or self.state.waiting_for_first_frame
-                    or self.state.finalizing
+                    or finalizing_with_pending_samples
                 )
             )
 
