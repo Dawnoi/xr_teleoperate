@@ -40,6 +40,7 @@ const state = {
   lastAlertSeq: 0,
   selectedPreviewCameraId: 0,
   livePreviewEnabled: false,
+  previewGeneration: 0,
   liveCurveHistory: [],
   playbackCurves: null,
   playbackSelectedCameraId: null,
@@ -1140,6 +1141,7 @@ function render() {
     state.lastSideStatusMs = nowMs;
     renderSideStatus();
   }
+  cleanupLivePreviewRequests();
   const content = el("content");
   content.innerHTML = state.active === "record" ? renderRecord()
     : state.active === "playback" ? renderPlayback()
@@ -1805,6 +1807,7 @@ function drawInferenceDualTcp3D() {
 
 function updatePreviewLoop() {
   if (!state.livePreviewEnabled || (state.active !== "record" && state.active !== "inference")) return;
+  const generation = state.previewGeneration;
   document.querySelectorAll("img[data-live-camera], img[data-inference-camera]").forEach((img) => {
     if (img.dataset.previewRequestPending === "1") return;
     const cameraId = img.dataset.liveCamera ?? img.dataset.inferenceCamera ?? "0";
@@ -1814,17 +1817,29 @@ function updatePreviewLoop() {
     const hint = img.parentElement?.querySelector(".hint") || null;
     img.dataset.previewRequestPending = "1";
     img.onload = () => {
+      if (generation !== state.previewGeneration || !state.livePreviewEnabled || !img.isConnected) return;
       img.dataset.previewRequestPending = "0";
       img.style.display = "block";
       if (hint) hint.textContent = "";
     };
     img.onerror = () => {
+      if (generation !== state.previewGeneration || !img.isConnected) return;
       img.dataset.previewRequestPending = "0";
       img.style.display = "none";
       if (hint) hint.textContent = `cam${cameraId} 暂无图像`;
     };
     if (hint && !img.getAttribute("src")) hint.textContent = `等待 cam${cameraId}...`;
     img.src = url;
+  });
+}
+
+function cleanupLivePreviewRequests() {
+  state.previewGeneration += 1;
+  document.querySelectorAll("img[data-live-camera], img[data-inference-camera]").forEach((img) => {
+    img.onload = null;
+    img.onerror = null;
+    img.removeAttribute("src");
+    img.dataset.previewRequestPending = "0";
   });
 }
 
