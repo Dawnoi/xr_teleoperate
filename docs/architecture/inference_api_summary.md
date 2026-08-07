@@ -24,7 +24,8 @@
 | API | 用途 |
 |---|---|
 | `GET /inference/status` | 获取在线推理 provider、状态和错误。 |
-| `GET /inference/start?prompt=<prompt>` | 使用 prompt 启动在线推理。 |
+| `GET /inference/profiles` | 列出可选推理协议及当前可用性；启动前必须读取。 |
+| `GET /inference/start?prompt=<prompt>&protocol_profile=<profile_id>` | 使用任务文本和已可用的协议启动在线推理；两个参数必填。 |
 | `GET /inference/stop` | 停止在线推理。 |
 | `GET /ui/provider/hold` | 切换到 hold 输入状态。 |
 | `GET /ui/provider/xr` | 切回 XR 实时输入。 |
@@ -33,7 +34,7 @@
 
 | API | 用途 |
 |---|---|
-| `GET /recording/status` | 判断是否正在录制或 armed，并读取底盘数采/停车故障状态。 |
+| `GET /recording/status` | 判断是否正在录制或 armed、后台校验是否完成，并读取底盘数采/停车故障状态。 |
 | `GET /recording/start` | 推理动作需要记录时开始数采。 |
 | `GET /recording/stop` | 停止并保存推理过程数采。 |
 | `GET /recording/cancel` | 取消当前推理过程数采。 |

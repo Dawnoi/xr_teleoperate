@@ -100,7 +100,7 @@ GET /assets/app.css
   "recording":{"active":false,"enabled":false,"phase":"idle","session_dir":"","root_dir":"","active_root_dir":"","fps":0.0,"frame_index":0,"error":"","last_alignment":{},"last_alert":{},"alert_seq":0,"last_validation":{},"base":{"enabled":false,"receiver_alive":false,"odom_topic":"","height_topic":"","state_max_age_ms":0.0,"action_max_age_ms":0.0,"stop_confirmed":true,"control_fault":false,"fault_reason":""}},
   "playback":{"state":"disabled","error":"playback is not implemented in xr_teleoperate UI"},
   "convert":{"ok":true,"state":"idle","phase":"idle","running":false,"message":"ready: LeRobot v2 raw exporter is available"},
-  "provider":{"active_provider":"hold","input_provider":"hold","last_error":"","last_reason":"ui_hold","real_replay":{"state":"idle","dataset_root":"","episode_name":"","episode_index":-1,"arm_source":"action","base_source":"none","speed_scale":1.0,"frame_index":-1,"error":"","reason":"","runtime_debug":{}},"online_inference":{"state":"idle","prompt":"","error":"","reason":"","debug":{},"runtime_debug":{}}},
+  "provider":{"active_provider":"hold","input_provider":"hold","last_error":"","last_reason":"ui_hold","real_replay":{"state":"idle","dataset_root":"","episode_name":"","episode_index":-1,"arm_source":"action","base_source":"none","speed_scale":1.0,"frame_index":-1,"error":"","reason":"","runtime_debug":{}},"online_inference":{"state":"idle","prompt":"","protocol_profile":"","error":"","reason":"","debug":{},"runtime_debug":{}}},
   "updated_mono":123.45,
   "teleop":{"started":false,"ready":false,"stopping":false}
 }
@@ -126,7 +126,7 @@ GET /assets/app.css
 | `provider.real_replay.dataset_root` / `episode_name` / `episode_index` | string / string / integer | 数据根、episode 名和数字索引。 |
 | `provider.real_replay.arm_source` / `base_source` | `action` / `state` / `fk_cmd_pose`；`none` / `action` | 机械臂和底盘动作来源。 |
 | `provider.real_replay.speed_scale` / `frame_index` / `error` / `reason` / `runtime_debug` | number / integer / string / string / object | 真机回放进度、错误、原因和诊断。 |
-| `provider.online_inference.state` / `prompt` / `error` / `reason` | `idle` / `running` / `stopped` / `error`；string | 在线推理生命周期、任务文本、错误和原因。 |
+| `provider.online_inference.state` / `prompt` / `protocol_profile` / `error` / `reason` | `idle` / `running` / `stopped` / `error`；string | 在线推理生命周期、任务文本、实际协议、错误和原因。 |
 | `provider.online_inference.debug` / `runtime_debug` | object | provider 原始调试快照和主控制循环诊断。 |
 | `updated_mono`                                 | number                                                 | 本机单调秒数，不能转换为 UTC。                   |
 | `teleop.started`                               | boolean                                                | 遥操作是否已启动。                               |
@@ -418,6 +418,7 @@ Content-Type: image/jpeg
 
 ```json
 {
+  "is_recording": false,
   "active": false,
   "enabled": true,
   "phase": "idle",
@@ -434,6 +435,9 @@ Content-Type: image/jpeg
   },
   "last_alert": {},
   "alert_seq": 0,
+  "validation_pending": false,
+  "validation_current_episode_dir": "",
+  "validation_queued_episode_dirs": [],
   "last_validation": {},
   "base": {
     "enabled": false,
@@ -451,7 +455,7 @@ Content-Type: image/jpeg
 
 | 字段                                       | 类型/取值                                     | 含义                                |
 | ------------------------------------------ | --------------------------------------------- | ----------------------------------- |
-| `active`                                 | boolean                                       | 正在写入，或已 armed 等待相机首帧。 |
+| `is_recording` / `active`                | boolean                                       | 同值；正在写入，或已 armed 等待相机首帧。 |
 | `enabled`                                  | boolean                                       | 是否以 `--record` 启动。            |
 | `phase`                                    | `idle` / `armed` / `recording` / `validating` | 当前录制生命周期。                  |
 | `session_dir`                              | string                                        | 当前 episode 目录；未开始为空。     |
@@ -462,6 +466,9 @@ Content-Type: image/jpeg
 | `last_alignment.pending_samples`           | integer                                       | 暂存且未落盘的对齐样本数。          |
 | `last_alignment.record_start_monotonic_ns` | integer 或 `null`                             | 录制请求的单调起始时间。            |
 | `last_alert` / `alert_seq`                 | object / integer                              | 当前默认 `{}`、`0`。                |
+| `validation_pending`                       | boolean                                       | 后台校验是否正在执行或排队；`true` 时不能开始新录制、改目录或删除 episode。 |
+| `validation_current_episode_dir`           | string                                        | 正在校验的 episode 目录；无任务时为空字符串。 |
+| `validation_queued_episode_dirs`           | string[]                                      | 等待校验的 episode 目录。 |
 | `last_validation`                          | object                                        | 最近 episode 的校验报告。           |
 | `base`                                     | object                                        | 底盘数采与停车状态，见下表。        |
 
@@ -633,6 +640,8 @@ GET /recording/episodes?root_dir=%2Fdata%2Fraw_task&limit=20
 | `validation.level`               | `ok` / `warning` / `error` | 持久化校验等级。                                |
 | `validation.status`              | string，可选               | 如 `missing`、`stale`。                         |
 | `validation.errors` / `warnings` | string[]                   | 具体校验问题。                                  |
+| `validation.structural` / `time_alignment` / `action_semantics` | object | 结构、时间对齐和动作语义校验的完整子报告。 |
+| `validation.mobile_training` | object | 移动训练数据校验报告；无移动训练字段时 `status=not_applicable`。包含 `status`、`frame_count`、`present_frame_count`、`identity_extrinsic_assumption_frames`、`timing`、`limits`、`max_alignment_delta_ms`、`max_slam_tf_age_ms`、`max_map_speed_mps`、`max_map_yaw_rate_radps`、`issues`、`errors`、`warnings`。 |
 | `cameras`                        | object[]                   | `camera_id`、`camera_name`、`camera_mode=rgb`。 |
 
 #### 1.2.8 `GET /recording/delete_episodes?root_dir=<path>&episode=<name>`

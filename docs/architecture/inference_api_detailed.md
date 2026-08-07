@@ -80,6 +80,7 @@ HTTP `400` 响应：
     "online_inference": {
       "state": "idle",
       "prompt": "",
+      "protocol_profile": "",
       "error": "",
       "reason": "",
       "debug": {},
@@ -118,7 +119,7 @@ HTTP `400` 响应：
 | `active_provider`                                                                                               | `xr_live` / `hold` / `raw_replay` / `online_inference`        | 真正为控制链路提供意图的输入源。                                 |
 | `input_provider`                                                                                                | string                                                        | XR 输入实现名、`hold`、`lerobot_offline` 或 `online_inference`。 |
 | `last_error` / `last_reason`                                                                                    | string                                                        | 最近错误和切换原因。                                             |
-| `online_inference.state` / `prompt` / `error` / `reason`                                                        | string                                                        | 在线推理生命周期、任务文本、错误和状态原因。                     |
+| `online_inference.state` / `prompt` / `protocol_profile` / `error` / `reason`                                   | string                                                        | 在线推理生命周期、任务文本、实际使用的协议、错误和状态原因。     |
 | `online_inference.debug` / `runtime_debug`                                                                      | object                                                        | provider 调试快照和主控制循环诊断。                              |
 | `real_replay.state` / `dataset_root` / `episode_name` / `episode_index`                                         | string / string / string / integer                            | 真机回放生命周期、数据根、episode 和数字索引。                   |
 | `real_replay.arm_source` / `base_source` / `speed_scale` / `frame_index` / `error` / `reason` / `runtime_debug` | string / string / number / integer / string / string / object | 真机回放来源、进度、错误、原因和诊断。                           |
@@ -360,7 +361,8 @@ Content-Type: image/jpeg
 | API                               | 用途                       |
 | --------------------------------- | -------------------------- |
 | `GET /inference/status`           | 在线推理及 provider 状态。 |
-| `GET /inference/start?prompt=...` | 请求启动在线推理。         |
+| `GET /inference/profiles`         | 可选推理协议及可用性。     |
+| `GET /inference/start?prompt=...&protocol_profile=...` | 请求启动在线推理。 |
 | `GET /inference/stop`             | 请求停止在线推理。         |
 | `GET /ui/provider/hold`           | 切换至安全 hold。          |
 | `GET /ui/provider/xr`             | 切回 XR 实时输入。         |
@@ -372,10 +374,11 @@ Content-Type: image/jpeg
 ```json
 {
   "ok":true,
-  "provider":{"active_provider":"hold","input_provider":"hold","last_error":"","last_reason":"ui_hold","real_replay":{"state":"idle","dataset_root":"","episode_name":"","episode_index":-1,"arm_source":"action","base_source":"none","speed_scale":1.0,"frame_index":-1,"error":"","reason":"","runtime_debug":{}},"online_inference":{"state":"idle","prompt":"","error":"","reason":"","debug":{},"runtime_debug":{}}},
+  "provider":{"active_provider":"hold","input_provider":"hold","last_error":"","last_reason":"ui_hold","real_replay":{"state":"idle","dataset_root":"","episode_name":"","episode_index":-1,"arm_source":"action","base_source":"none","speed_scale":1.0,"frame_index":-1,"error":"","reason":"","runtime_debug":{}},"online_inference":{"state":"idle","prompt":"","protocol_profile":"","error":"","reason":"","debug":{},"runtime_debug":{}}},
   "online_inference":{
     "state":"idle",
     "prompt":"",
+    "protocol_profile":"",
     "error":"",
     "reason":"",
     "debug":{},
@@ -392,27 +395,54 @@ Content-Type: image/jpeg
 | `provider.last_error` / `provider.last_reason`                                                                           | string                                                        | 最近 provider 错误和状态原因。                                                                          |
 | `provider.real_replay.state` / `dataset_root` / `episode_name` / `episode_index`                                         | string / string / string / integer                            | 真机回放状态和数据标识。                                                                                |
 | `provider.real_replay.arm_source` / `base_source` / `speed_scale` / `frame_index` / `error` / `reason` / `runtime_debug` | string / string / number / integer / string / string / object | 真机回放来源、进度、错误、原因和诊断。                                                                  |
-| `provider.online_inference`                                                                                              | object                                                        | 与顶层 `online_inference` 内容相同，含 `state`、`prompt`、`error`、`reason`、`debug`、`runtime_debug`。 |
+| `provider.online_inference`                                                                                              | object                                                        | 与顶层 `online_inference` 内容相同，含 `state`、`prompt`、`protocol_profile`、`error`、`reason`、`debug`、`runtime_debug`。 |
 | `online_inference`                                                                                                       | object                                                        | `provider.online_inference` 的便捷镜像。                                                                |
 | `online_inference.state`                                                                                                 | `idle` / `running` / `stopped` / `error` / `disabled`         | 推理生命周期；`disabled` 表示状态对象缺失。                                                             |
 | `online_inference.prompt`                                                                                                | string                                                        | 当前/最后一次启动传入的任务文本。                                                                       |
+| `online_inference.protocol_profile`                                                                                     | string                                                        | 当前/最后一次实际启动使用的协议 ID；未启动时为空字符串。                                                |
 | `online_inference.error`                                                                                                 | string                                                        | 推理错误。`state=error` 时必须显示。                                                                    |
 | `online_inference.reason`                                                                                                | string                                                        | 启动、停止或失败原因。                                                                                  |
 | `online_inference.debug`                                                                                                 | object                                                        | provider 原始调试快照，内部字段由 provider 决定。                                                       |
 | `online_inference.runtime_debug`                                                                                         | object                                                        | 主控制循环诊断，结构可扩展。                                                                            |
 
-#### 1.2.2 `GET /inference/start?prompt=<text>`
+#### 1.2.2 `GET /inference/profiles`
+
+功能：列出服务端支持的推理协议，以及它们在当前机器人运行时是否可用。启动前必须读取本接口，不能硬编码可用性。
+
+```json
+{
+  "ok":true,
+  "profiles":[
+    {"id":"pi05_dual_arm_20d","label":"pi0.5 双臂 20D","available":true,"reason":""},
+    {"id":"mobile_tcp23","label":"移动操作 TCP23","available":false,"reason":"mobile_tcp23 runtime is not configured"}
+  ]
+}
+```
+
+| 字段 | 类型/取值 | 含义 |
+| --- | --- | --- |
+| `ok` | 固定 `true` | HTTP 状态读取成功。 |
+| `profiles` | object[]，非空 | 可选协议列表。 |
+| `profiles[].id` | string | 传给 `protocol_profile` 的唯一协议 ID。当前内置 `pi05_dual_arm_20d`、`mobile_tcp23`。 |
+| `profiles[].label` | string | 仅用于 UI 显示的协议名称。 |
+| `profiles[].available` | boolean | 当前运行时是否满足该协议的全部前置条件。 |
+| `profiles[].reason` | string | 不可用时的明确原因；`available=true` 时为空字符串。 |
+
+`mobile_tcp23` 需要移动底盘状态、Dex1 TCP FK、G1D 运动学和 `direct_ik` 运行配置。它的可用性由服务端实时计算，不能通过客户端降级成其他协议。
+
+#### 1.2.3 `GET /inference/start?prompt=<text>&protocol_profile=<profile_id>`
 
 功能：将在线推理启动请求放入主控制循环队列。
 
-| 参数     | 必填 | 规则                                    |
-| -------- | ---- | --------------------------------------- |
-| `prompt` | 是   | 去首尾空白后非空；调用方负责 URL 编码。 |
+| 参数 | 必填 | 规则 |
+| --- | --- | --- |
+| `prompt` | 是 | 去首尾空白后非空；调用方负责 URL 编码。 |
+| `protocol_profile` | 是 | 必须等于 `GET /inference/profiles` 返回的某个 `id`，且该 profile 的 `available=true`。 |
 
 调用示例：
 
 ```http
-GET /inference/start?prompt=pick%20up%20the%20cube
+GET /inference/start?prompt=pick%20up%20the%20cube&protocol_profile=pi05_dual_arm_20d
 ```
 
 成功响应：
@@ -434,14 +464,16 @@ GET /inference/start?prompt=pick%20up%20the%20cube
 | `active_provider=online_inference` | 推理已经运行。                     |
 | provider 非 `hold`、`xr_live`      | 当前输入状态不允许启动。           |
 | prompt 为空                        | 必须提供任务文本。                 |
+| `protocol_profile` 缺失或未知       | 必须提供服务端已知的协议 ID。      |
+| profile 当前不可用                  | `error` 返回 `/inference/profiles` 中的 `reason`。 |
 
 缺少 head、left_wrist 或 right_wrist 相机不是 HTTP `400`：请求会先返回 `queued=true`，主控制循环随后将
 `online_inference.state` 置为 `error`，并在 `error` 中说明缺失相机。
 
-响应入队后，必须等 1.2.1 中 `online_inference.state=running` 才表示推理实际启动；
+响应入队后，必须等 1.2.1 中 `online_inference.state=running` 且 `online_inference.protocol_profile` 与请求一致，才表示推理实际启动；
 `state=error` 时读取 `error`、`reason`、`runtime_debug`。
 
-#### 1.2.3 `GET /inference/stop`
+#### 1.2.4 `GET /inference/stop`
 
 功能：将在线推理停止请求放入主控制循环队列。
 
@@ -460,7 +492,7 @@ GET /inference/start?prompt=pick%20up%20the%20cube
 后续必须等待
 `online_inference.state=stopped` 或 `error`，并确认 `provider.active_provider=hold`。
 
-#### 1.2.4 `GET /ui/provider/hold`
+#### 1.2.5 `GET /ui/provider/hold`
 
 功能：将输入 provider 切换到安全 hold 放入主控制循环队列。
 
@@ -485,7 +517,7 @@ GET /inference/start?prompt=pick%20up%20the%20cube
 成功后以
 `provider.active_provider=hold` 确认。
 
-#### 1.2.5 `GET /ui/provider/xr`
+#### 1.2.6 `GET /ui/provider/xr`
 
 功能：将输入 provider 切换回 XR 实时输入放入主控制循环队列。
 
@@ -525,6 +557,10 @@ GET /inference/start?prompt=pick%20up%20the%20cube
 {
   "active": false,
   "phase": "idle",
+  "validation_pending": false,
+  "validation_current_episode_dir": "",
+  "validation_queued_episode_dirs": [],
+  "last_validation": {},
   "last_alignment": {
     "waiting_for_first_frame": false,
     "pending_samples": 0,
@@ -551,6 +587,10 @@ GET /inference/start?prompt=pick%20up%20the%20cube
 | `last_alignment.waiting_for_first_frame`           | boolean                                       | `true` 表示录制已请求但仍在等待所有相机首帧；等价于不安全的 armed 状态。                        |
 | `last_alignment.pending_samples`                   | integer                                       | 已暂存、尚未落盘的对齐样本数。                                                                  |
 | `last_alignment.record_start_monotonic_ns`         | integer 或 `null`                             | 当前录制请求起始单调时间；无录制时为 `null`。                                                   |
+| `validation_pending`                               | boolean                                       | 后台 episode 校验是否正在执行或排队；`true` 时不可开始新的录制、改根目录或删除 episode。       |
+| `validation_current_episode_dir`                   | string                                        | 正在校验的 episode 目录；无任务时为空字符串。                                                   |
+| `validation_queued_episode_dirs`                   | string[]                                      | 等待校验的 episode 目录队列。                                                                    |
+| `last_validation`                                  | object                                        | 最近完成的完整校验报告；完成后的每个 episode 也保存在其 `validation.json`。                     |
 | `base.enabled`                                     | boolean                                       | 是否启用底盘数据采集。                                                                          |
 | `base.receiver_alive`                              | boolean                                       | 底盘状态接收线程是否存活。`false` 时不能把底盘状态视为可信。                                    |
 | `base.odom_topic` / `base.height_topic`            | string                                        | 当前底盘状态 DDS topic。                                                                        |
@@ -594,7 +634,7 @@ GET /inference/start?prompt=pick%20up%20the%20cube
 | `queued`  | 固定 `true`                    | 命令已进入主控制循环队列，不代表动作已完成。 |
 | `command` | string，当前为 `record_toggle` | 已入队的命令名称。                           |
 
-等待 `active=false`；该端点只提供 `last_validation`，当前不提供后台校验是否仍在运行的实时字段。
+等待 `active=false` 和 `validation_pending=false`；前者只表示录制已落盘，后者才表示 `validation.json` 已完成发布。
 
 #### 1.3.4 `GET /recording/cancel`
 
@@ -620,8 +660,9 @@ provider 或重新开始推理。
 ```text
 1. GET /snapshot：确认 teleop.started=true、recording.active=false、phase!=armed
 2. GET /ui/provider/hold：等待 provider.active_provider=hold
-3. GET /inference/start?prompt=...
-4. 等 online_inference.state=running
-5. 需要记录则 GET /recording/start，等 phase=recording 和 frame_index 增长
-6. GET /inference/stop，确认 provider=hold，再 stop 或 cancel recording
+3. GET /inference/profiles：选择 `available=true` 的 `id`
+4. GET /inference/start?prompt=...&protocol_profile=<id>
+5. 等 online_inference.state=running 且 protocol_profile 与请求一致
+6. 需要记录则 GET /recording/start，等 phase=recording 和 frame_index 增长
+7. GET /inference/stop，确认 provider=hold，再 stop 或 cancel recording
 ```

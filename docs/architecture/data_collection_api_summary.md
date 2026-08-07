@@ -29,13 +29,13 @@
 
 | API | 用途 |
 |---|---|
-| `GET /recording/status` | 录制、相机对齐、数据校验和底盘数采状态。 |
+| `GET /recording/status` | 录制、相机对齐、后台校验进度/报告和底盘数采状态。 |
 | `GET /recording/start` | 开始或 armed 数采。 |
 | `GET /recording/stop` | 停止并保存数采。 |
 | `GET /recording/toggle` | 切换录制。 |
 | `GET /recording/cancel` | 取消当前或 armed 的录制。 |
 | `GET /recording/set_root_dir?root_dir=<root_dir>` | 切换数采根目录。 |
-| `GET /recording/episodes?root_dir=<root_dir>&limit=<limit>` | 列出 episode；两个参数均可省略。 |
+| `GET /recording/episodes?root_dir=<root_dir>&limit=<limit>` | 列出 episode 及已持久化的结构、时间对齐、动作语义和移动训练质量报告；两个参数均可省略。 |
 | `GET /recording/delete_episodes?root_dir=<root_dir>&episode=<episode_name>` | 删除一个或多个 episode；`episode` 可重复。 |
 | `GET /recording/set_fps` | 兼容占位；返回成功但不改变采样频率。 |
 
