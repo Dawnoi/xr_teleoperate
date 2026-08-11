@@ -1,3 +1,6 @@
 [submodule "teleop/robot_control/dex-retargeting"]
 	path = teleop/robot_control/dex-retargeting
 	url = https://github.com/silencht/dex-retargeting
+[submodule "vendor/nero_web_console"]
+	path = vendor/nero_web_console
+	url = https://github.com/YXGN/web_console.git
