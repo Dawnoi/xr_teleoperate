@@ -49,7 +49,7 @@ class OnlineInferenceConfig:
 
     def __post_init__(self) -> None:
         self.protocol_profile = str(self.protocol_profile or "pika_pose7").strip()
-        if self.protocol_profile not in {"pika_pose7", "pi05_dual_arm_20d", "mobile_tcp23", "mobile_joint_base"}:
+        if self.protocol_profile not in {"pika_pose7", "pi05_dual_arm_20d", "mobile_tcp23", "mobile_pelvis_planar22", "mobile_joint_base"}:
             raise ValueError(f"unsupported protocol_profile: {self.protocol_profile!r}")
         if self.arm_side not in {"left", "right", "both"}:
             raise ValueError(f"unsupported arm_side: {self.arm_side!r}")
@@ -88,6 +88,7 @@ class RobotStateSample:
     left_gripper_width: float
     right_gripper_width: float
     mobile_state26: np.ndarray | None = None
+    mobile_pelvis_state25: np.ndarray | None = None
     mobile_joint_state22: np.ndarray | None = None
 
 
@@ -382,6 +383,8 @@ class OnlineInferenceSession:
             return self._build_pi05_observation_message()
         if self.config.protocol_profile == "mobile_tcp23":
             return self._build_mobile_tcp23_observation_message()
+        if self.config.protocol_profile == "mobile_pelvis_planar22":
+            return self._build_mobile_pelvis_planar22_observation_message()
         if self.config.protocol_profile == "mobile_joint_base":
             return self._build_mobile_joint_base_observation_message()
         message: Dict[str, Any] = {"type": "observation"}
@@ -473,6 +476,24 @@ class OnlineInferenceSession:
         return {
             "type": "observation",
             "mobile_joint_state": [float(value) for value in mobile_joint_state.tolist()],
+            "images": self._build_mobile_tcp23_images(camera_window),
+            "prompt": self.config.task_prompt,
+        }
+
+    def _build_mobile_pelvis_planar22_observation_message(self) -> Dict[str, Any]:
+        state_window, camera_window = self._select_observation_window()
+        mobile_pelvis_state = state_window[-1].mobile_pelvis_state25
+        if mobile_pelvis_state is None:
+            raise RuntimeError("mobile_pelvis_planar22 observation is missing the 25D pelvis state")
+        mobile_pelvis_state = np.asarray(mobile_pelvis_state, dtype=np.float32)
+        if mobile_pelvis_state.shape != (25,) or not np.all(np.isfinite(mobile_pelvis_state)):
+            raise ValueError(
+                "mobile_pelvis_planar22 state must be a finite 25D vector, "
+                f"got {mobile_pelvis_state.shape}"
+            )
+        return {
+            "type": "observation",
+            "mobile_pelvis_state": [float(value) for value in mobile_pelvis_state.tolist()],
             "images": self._build_mobile_tcp23_images(camera_window),
             "prompt": self.config.task_prompt,
         }
@@ -574,6 +595,22 @@ class OnlineInferenceSession:
                 [float(value) for value in mobile_state[:10]],
                 [float(value) for value in mobile_state[10:20]],
                 [float(value) for value in mobile_state[20:]],
+                self.config.task_prompt,
+            )
+            return
+        if self.config.protocol_profile == "mobile_pelvis_planar22":
+            mobile_pelvis_state = observation.get("mobile_pelvis_state")
+            images = observation.get("images")
+            if not isinstance(mobile_pelvis_state, list) or len(mobile_pelvis_state) != 25:
+                raise ValueError("mobile_pelvis_planar22 observation must contain mobile_pelvis_state[25]")
+            if not isinstance(images, dict):
+                raise ValueError("mobile_pelvis_planar22 observation images must be a role mapping")
+            logger.info(
+                "[ONLINE_INFERENCE][OBS][mobile_pelvis_planar22] image_roles=%s left_eef=%s right_eef=%s base=%s prompt=%r",
+                sorted(str(key) for key, value in images.items() if value),
+                [float(value) for value in mobile_pelvis_state[:10]],
+                [float(value) for value in mobile_pelvis_state[10:20]],
+                [float(value) for value in mobile_pelvis_state[20:]],
                 self.config.task_prompt,
             )
             return
@@ -781,6 +818,23 @@ class OnlineInferenceSession:
                 raise ValueError("mobile_tcp23 response requires base_action_dim=4")
             actions = validate_pi05_action_sequence(payload, expected_dim=20)
             left_steps, right_steps = pi05_action_sequence_to_pose7_chunks(actions, self.config.arm_side)
+        elif self.config.protocol_profile == "mobile_pelvis_planar22":
+            if payload.get("wire_format") != "mobile_pelvis_planar22_pose20_base4":
+                raise ValueError(
+                    "mobile_pelvis_planar22 response requires wire_format="
+                    "'mobile_pelvis_planar22_pose20_base4'"
+                )
+            if int(payload.get("model_action_dim", -1)) != 22:
+                raise ValueError("mobile_pelvis_planar22 response requires model_action_dim=22")
+            if int(payload.get("wire_arm_action_dim", -1)) != 20:
+                raise ValueError("mobile_pelvis_planar22 response requires wire_arm_action_dim=20")
+            if int(payload.get("base_action_dim", -1)) != 4:
+                raise ValueError("mobile_pelvis_planar22 response requires base_action_dim=4")
+            actions = validate_pi05_action_sequence(payload, expected_dim=20)
+            gripper_q = actions[:, (9, 19)]
+            if np.any(gripper_q < -1e-4) or np.any(gripper_q > 5.4001):
+                raise ValueError("mobile_pelvis_planar22 response gripper q must be within [0.0, 5.4]")
+            left_steps, right_steps = pi05_action_sequence_to_pose7_chunks(actions, self.config.arm_side)
         elif self.config.protocol_profile == "mobile_joint_base":
             if payload.get("wire_format") != "mobile_joint_base_q16_base4":
                 raise ValueError(
@@ -828,7 +882,7 @@ class OnlineInferenceSession:
         base_steps = self._parse_base_action_steps(
             payload,
             chunk_size,
-            required=self.config.protocol_profile in {"mobile_tcp23", "mobile_joint_base"},
+            required=self.config.protocol_profile in {"mobile_tcp23", "mobile_pelvis_planar22", "mobile_joint_base"},
         )
         self._last_action_debug = self._make_action_debug(left_steps, right_steps, chunk_size)
         if base_steps is not None:
@@ -1102,7 +1156,7 @@ class OnlineInferenceSession:
     ) -> Optional[List[np.ndarray]]:
         if "base_action" not in payload:
             if required:
-                raise ValueError("mobile_tcp23 response is missing base_action[T,4]")
+                raise ValueError("mobile inference response is missing base_action[T,4]")
             return None
         arr = np.asarray(payload["base_action"], dtype=np.float64)
         if arr.shape == (4,) and not required:
@@ -1253,8 +1307,13 @@ class OnlineInferenceSession:
                 if wrist_target.shape != (4, 4) or not np.all(np.isfinite(wrist_target)):
                     raise ValueError(
                         f"mobile TCP transformer returned invalid {side} wrist target {wrist_target.shape}"
-                    )
+                )
                 return wrist_target
+            if self.config.protocol_profile == "mobile_pelvis_planar22":
+                return np.asarray(
+                    pose7_xyzw_to_matrix(np.asarray(pose7, dtype=np.float64).tolist()),
+                    dtype=np.float64,
+                )
             if self.pose_transformer is not None:
                 return np.asarray(self.pose_transformer.action_to_unitree(side, pose7), dtype=np.float64)
             return np.asarray(pose7_xyzw_to_matrix(np.asarray(pose7, dtype=np.float64).tolist()), dtype=np.float64)

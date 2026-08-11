@@ -117,6 +117,8 @@ def build_camera_status(
                     "frame_height": frame_height,
                     "channels": channels,
                     "transport": str(meta.get("transport", "")),
+                    "endpoint": str(meta.get("endpoint", "")),
+                    "protocol": str(meta.get("protocol", "")),
                 },
             }
         )

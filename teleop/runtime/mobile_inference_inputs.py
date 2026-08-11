@@ -12,7 +12,7 @@ from teleop.control_flow.mobile_manipulation_coordinator import column_position_
 
 
 class MobileOnlineInferenceInputs:
-    """Build strict mobile observations for mobile_tcp23 and mobile_joint_base."""
+    """Build strict mobile observations for the supported mobile profiles."""
 
     def __init__(
         self,
@@ -118,6 +118,58 @@ class MobileOnlineInferenceInputs:
         missing.extend(self._base_state_receiver_requirements("base state receiver"))
         return "" if not missing else "mobile_joint_base unavailable: requires " + ", ".join(missing)
 
+    def pelvis_planar22_current(self) -> dict[str, Any]:
+        """Return the measured planar base state for legacy pelvis-frame EEF inference.
+
+        The arm EEF poses are intentionally not built here.  The main loop already
+        owns the G1_29 IK-frame feedback poses; those are the training dataset's
+        ``pelvis -> gripper_flange`` convention and must not be recomputed through
+        the newer base-link Dex1 TCP calibration.
+        """
+        profile_name = "mobile_pelvis_planar22"
+        receiver = self._require_base_state_receiver(profile_name)
+        odom_sample, _height_sample = receiver.snapshot_latest()
+        slam_history = receiver.snapshot_slam_tf_history()
+        if odom_sample is None or slam_history is None or not slam_history:
+            raise RuntimeError(f"{profile_name.upper()}_STATE_MISSING")
+        slam_sample = dict(slam_history[-1])
+        self._validate_odom_slam_state_ages(profile_name, odom_sample, slam_sample)
+        if str(slam_sample.get("frame_id")) != "slamware_map" or str(slam_sample.get("child_frame_id")) != "base_link":
+            raise RuntimeError(
+                f"{profile_name.upper()}_SLAM_FRAME_INVALID "
+                f"frame_id={slam_sample.get('frame_id')!r} child_frame_id={slam_sample.get('child_frame_id')!r}"
+            )
+        velocity = odom_sample.get("velocity")
+        if not isinstance(velocity, dict) or str(velocity.get("frame_id")) != "base_link":
+            raise RuntimeError(f"{profile_name.upper()}_BASE_VELOCITY_FRAME_INVALID: expected base_link")
+        map_pose = np.asarray([slam_sample["x"], slam_sample["y"], slam_sample["yaw"]], dtype=float)
+        base_velocity = np.asarray([velocity["vx"], velocity["wz"]], dtype=float)
+        if not np.all(np.isfinite(map_pose)) or not np.all(np.isfinite(base_velocity)):
+            raise RuntimeError(f"{profile_name.upper()}_BASE_STATE_NONFINITE")
+        return {
+            "current_map_base_pose": map_pose,
+            "current_base_velocity_base_link": base_velocity,
+        }
+
+    def pelvis_planar22_runtime_error(self) -> str:
+        missing: list[str] = []
+        if str(self._args.arm) != "G1_29":
+            missing.append("--arm G1_29")
+        if str(self._args.ee) != "dex1" or bool(self._args.no_gripper):
+            missing.append("--ee dex1 without --no-gripper")
+        if self._args.mobile_manipulation_mode != "direct_ik":
+            missing.append("--mobile-manipulation-mode direct_ik")
+        if self._args.base_controller != "g1d_agv" or not self._args.base_motion:
+            missing.append("--base-controller g1d_agv --base-motion")
+        if self._args.base_command_source != "provider":
+            missing.append("--base-command-source provider")
+        if self._args.base_velocity_frame != "base_link":
+            missing.append("--base-velocity-frame base_link")
+        if not self._args.record_slam_map_pose:
+            missing.append("--record-slam-map-pose")
+        missing.extend(self._base_state_receiver_requirements("base state receiver (--record-base)"))
+        return "" if not missing else "mobile_pelvis_planar22 unavailable: requires " + ", ".join(missing)
+
     def _require_base_state_receiver(self, profile_name: str):
         receiver = self._base_state_receiver
         if receiver is None:
@@ -138,6 +190,21 @@ class MobileOnlineInferenceInputs:
         ages = {
             "odom": now_ns - int(odom_sample["t_ns"]),
             "height": now_ns - int(height_sample["t_ns"]),
+            "slam_tf": now_ns - int(slam_sample["t_ns"]),
+        }
+        stale = {name: age for name, age in ages.items() if age < 0 or age > timeout_ns}
+        if stale:
+            raise RuntimeError(
+                f"{profile_name.upper()}_STATE_STALE "
+                + " ".join(f"{name}_age_ms={age / 1e6:.1f}" for name, age in stale.items())
+                + f" timeout_ms={timeout_ns / 1e6:.1f}"
+            )
+
+    def _validate_odom_slam_state_ages(self, profile_name: str, odom_sample, slam_sample) -> None:
+        now_ns = time.monotonic_ns()
+        timeout_ns = int(float(self._args.mobile_state_timeout_sec) * 1e9)
+        ages = {
+            "odom": now_ns - int(odom_sample["t_ns"]),
             "slam_tf": now_ns - int(slam_sample["t_ns"]),
         }
         stale = {name: age for name, age in ages.items() if age < 0 or age > timeout_ns}

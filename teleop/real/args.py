@@ -98,7 +98,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='HTTP handshake path for online inference.')
     parser.add_argument('--online-inference-http-infer-path', type=str, default='/infer',
                         help='HTTP infer path for online inference.')
-    parser.add_argument('--online-inference-protocol-profile', type=str, choices=['pika_pose7', 'pi05_dual_arm_20d', 'mobile_tcp23', 'mobile_joint_base'], default='pika_pose7',
+    parser.add_argument('--online-inference-protocol-profile', type=str, choices=['pika_pose7', 'pi05_dual_arm_20d', 'mobile_tcp23', 'mobile_pelvis_planar22', 'mobile_joint_base'], default='pika_pose7',
                         help='Online inference payload/action schema profile.')
     parser.add_argument('--online-inference-prompt', type=str, default='',
                         help='Task prompt sent to online inference services such as pi0.5.')
@@ -198,6 +198,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                         help='Bind port for the optional web UI server.')
     parser.add_argument('--ui-preview-fps', type=float, default=5.0,
                         help='Maximum state publish rate for the optional web UI event stream.')
+    parser.add_argument('--nero-console-provider', action='store_true',
+                        help='Enable the Nero ROS Provider bridge. The Nero Web host runs separately.')
+    parser.add_argument('--nero-online-replay-arm-source', type=str, choices=['action', 'state', 'fk_cmd_pose'], default='action',
+                        help='Arm representation used by Nero online replay.')
+    parser.add_argument('--nero-online-replay-base-source', type=str, choices=['none', 'action'], default='none',
+                        help='Base representation used by Nero online replay. action requires explicit base-motion authorization at replay start.')
     # mode flags
     parser.add_argument('--motion', action='store_true',
                         help='Use the arm SDK DDS command route (rt/arm_sdk) for real-robot arms.')
@@ -260,7 +266,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def parse_args(argv=None):
     args = build_arg_parser().parse_args(argv)
-    if args.ui and not args.rerun_live:
+    if (args.ui or args.nero_console_provider) and not args.rerun_live:
         args.headless = True
     if args.headless and args.rerun_live:
         raise ValueError('--rerun-live cannot be combined with --headless; use --ui --rerun-live to enable both explicitly')
@@ -331,6 +337,21 @@ def parse_args(argv=None):
             raise ValueError("mobile_tcp23 requires --base-command-source provider")
         if args.base_velocity_frame != 'base_link':
             raise ValueError("mobile_tcp23 requires --base-velocity-frame base_link")
+    if args.online_inference_protocol_profile == 'mobile_pelvis_planar22':
+        if args.arm != 'G1_29' or args.ee != 'dex1' or args.no_gripper:
+            raise ValueError("mobile_pelvis_planar22 requires --arm G1_29 --ee dex1 without --no-gripper")
+        if args.online_inference_transport != 'http':
+            raise ValueError("mobile_pelvis_planar22 requires --online-inference-transport http")
+        if args.online_inference_arm_side != 'both':
+            raise ValueError("mobile_pelvis_planar22 requires --online-inference-arm-side both")
+        if args.mobile_manipulation_mode != 'direct_ik':
+            raise ValueError("mobile_pelvis_planar22 requires --mobile-manipulation-mode direct_ik; model base actions must not pass through QP")
+        if args.base_controller != 'g1d_agv' or not args.base_motion:
+            raise ValueError("mobile_pelvis_planar22 requires --base-controller g1d_agv --base-motion")
+        if args.base_command_source != 'provider':
+            raise ValueError("mobile_pelvis_planar22 requires --base-command-source provider")
+        if args.base_velocity_frame != 'base_link':
+            raise ValueError("mobile_pelvis_planar22 requires --base-velocity-frame base_link")
     if args.online_inference_protocol_profile == 'mobile_joint_base':
         if args.arm != 'G1_29' or args.ee != 'dex1' or args.no_gripper:
             raise ValueError("mobile_joint_base requires --arm G1_29 --ee dex1 without --no-gripper")

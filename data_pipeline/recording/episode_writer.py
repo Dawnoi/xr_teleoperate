@@ -446,6 +446,22 @@ class EpisodeWriter():
                 raise ValueError(f"episode metadata must not overwrite existing key: {key}")
             self.info[key] = value
 
+    def set_next_episode_task_description(self, task_description):
+        """Set the text metadata that will be written by the next episode.
+
+        The writer rejects mutation while an episode is open, so a command can
+        never relabel data that is already being recorded.
+        """
+        if not isinstance(task_description, str):
+            raise TypeError("task_description must be a string")
+        normalized = task_description.strip()
+        if not normalized:
+            return str(self.text["desc"])
+        if not self.is_ready():
+            raise RuntimeError("task description cannot change while an episode is active")
+        self.text["desc"] = normalized
+        return normalized
+
  
     def create_episode(self, *, enabled_cameras):
         """

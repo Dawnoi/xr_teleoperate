@@ -1,0 +1,6 @@
+{
+  "id": "xr.teleoperation",
+  "display_name": "XR Teleoperation",
+  "modes": ["collector", "vla"],
+  "entry": "index.js"
+}

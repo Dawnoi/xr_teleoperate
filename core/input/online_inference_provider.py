@@ -79,6 +79,15 @@ def _http_handshake_payload(protocol_profile: str) -> dict[str, Any]:
             "robot": "g1d_dex1_mobile",
             "transport": "http",
         }
+    if profile == "mobile_pelvis_planar22":
+        return {
+            "action_dim": 20,
+            "action_space": "mobile_pelvis_planar22_pose20_base4",
+            "model_action_dim": 22,
+            "base_action_dim": 4,
+            "robot": "g1d_dex1_mobile",
+            "transport": "http",
+        }
     if profile == "mobile_joint_base":
         return {
             "action_dim": 16,
@@ -122,12 +131,12 @@ def create_online_inference_provider(args) -> "OnlineInferenceInputProvider":
     dry_run = bool(getattr(args, "online_inference_dry_run", False))
     protocol_profile = str(getattr(args, "online_inference_protocol_profile", "pika_pose7") or "pika_pose7").strip()
     transport_kind = str(getattr(args, "online_inference_transport", "tcp_jsonl") or "tcp_jsonl").strip()
-    transform_arm_side = "both" if protocol_profile in {"pi05_dual_arm_20d", "mobile_tcp23"} else getattr(args, "online_inference_arm_side", "both")
+    transform_arm_side = "both" if protocol_profile in {"pi05_dual_arm_20d", "mobile_tcp23", "mobile_pelvis_planar22"} else getattr(args, "online_inference_arm_side", "both")
     transformer = load_pose_transformer(
         enable_motion=(
             enable_motion
             and not dry_run
-            and protocol_profile != "mobile_joint_base"
+            and protocol_profile not in {"mobile_joint_base", "mobile_pelvis_planar22"}
         ),
         transform_config_path=getattr(args, "online_inference_transform_config", None),
         arm_side=transform_arm_side,
@@ -214,6 +223,7 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
                 "current_right_gripper_width",
             ),
             mobile_state26=self._mobile_state26(kwargs),
+            mobile_pelvis_state25=self._mobile_pelvis_state25(kwargs),
             mobile_joint_state22=self._mobile_joint_state22(kwargs),
         )
         camera_samples = self._coerce_camera_samples(kwargs)
@@ -364,6 +374,48 @@ class OnlineInferenceInputProvider(BaseTeleopInputProvider):
         ).astype(np.float32)
         if state.shape != (22,) or not np.all(np.isfinite(state)):
             raise RuntimeError(f"mobile_joint_base state construction failed: shape={state.shape}")
+        return state
+
+    def _mobile_pelvis_state25(self, kwargs: Mapping[str, Any]) -> np.ndarray | None:
+        if self._protocol_profile() != "mobile_pelvis_planar22":
+            return None
+        left_eef = _finite_pose_matrix(
+            kwargs.get("current_left_robot_wrist_pose"),
+            "current_left_robot_wrist_pose",
+        )
+        right_eef = _finite_pose_matrix(
+            kwargs.get("current_right_robot_wrist_pose"),
+            "current_right_robot_wrist_pose",
+        )
+        map_base = np.asarray(kwargs.get("current_map_base_pose"), dtype=float).reshape(-1)
+        if map_base.shape != (3,) or not np.all(np.isfinite(map_base)):
+            raise ValueError("current_map_base_pose must be a finite [map_x, map_y, map_yaw]")
+        base_velocity = np.asarray(kwargs.get("current_base_velocity_base_link"), dtype=float).reshape(-1)
+        if base_velocity.shape != (2,) or not np.all(np.isfinite(base_velocity)):
+            raise ValueError("current_base_velocity_base_link must be a finite [vx, wz]")
+        left_gripper = _finite_gripper_width(
+            kwargs.get("current_left_gripper_width", 0.0),
+            "current_left_gripper_width",
+        )
+        right_gripper = _finite_gripper_width(
+            kwargs.get("current_right_gripper_width", 0.0),
+            "current_right_gripper_width",
+        )
+        gripper_q = np.asarray([left_gripper, right_gripper], dtype=float)
+        if np.any(gripper_q < -1e-4) or np.any(gripper_q > 5.4001):
+            raise ValueError("mobile_pelvis_planar22 current Dex1 gripper q must be within [0.0, 5.4]")
+        state = np.concatenate(
+            [
+                np.asarray(matrix_to_pose9_rot6d(left_eef), dtype=float),
+                [left_gripper],
+                np.asarray(matrix_to_pose9_rot6d(right_eef), dtype=float),
+                [right_gripper],
+                map_base,
+                base_velocity,
+            ]
+        ).astype(np.float32)
+        if state.shape != (25,) or not np.all(np.isfinite(state)):
+            raise RuntimeError(f"mobile_pelvis_planar22 state construction failed: shape={state.shape}")
         return state
 
     def _protocol_profile(self) -> str:

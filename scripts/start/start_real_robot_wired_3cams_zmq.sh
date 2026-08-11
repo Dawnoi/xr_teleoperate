@@ -13,17 +13,17 @@ fi
 
 unset PYTHONPATH || true
 
-RECORD_SLAM_MAP_POSE=0
+REQUIRES_ROS=0
 for arg in "$@"; do
-  if [[ "${arg}" == "--record-slam-map-pose" ]]; then
-    RECORD_SLAM_MAP_POSE=1
+  if [[ "${arg}" == "--record-slam-map-pose" || "${arg}" == "--nero-console-provider" ]]; then
+    REQUIRES_ROS=1
     break
   fi
 done
-if [[ "${RECORD_SLAM_MAP_POSE}" == "1" ]]; then
+if [[ "${REQUIRES_ROS}" == "1" ]]; then
   ROS_SETUP="/opt/ros/humble/setup.bash"
   if [[ ! -f "${ROS_SETUP}" ]]; then
-    echo "[START] --record-slam-map-pose requires ${ROS_SETUP}" >&2
+    echo "[START] --record-slam-map-pose or --nero-console-provider requires ${ROS_SETUP}" >&2
     exit 1
   fi
   # shellcheck disable=SC1091

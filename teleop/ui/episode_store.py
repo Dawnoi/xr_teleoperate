@@ -344,6 +344,7 @@ class PlaybackSession:
     state: str = "disabled"
     play_started_monotonic: float = 0.0
     play_started_frame: int = 0
+    playback_rate: float = 1.0
 
     def load(self, root_dir: str, episode: str) -> dict[str, Any]:
         root = resolve_root(root_dir)
@@ -360,6 +361,7 @@ class PlaybackSession:
         self.state = "paused" if items else "empty"
         self.play_started_monotonic = 0.0
         self.play_started_frame = 0
+        self.playback_rate = 1.0
         return {"ok": True, "playback": self.status()}
 
     def status(self) -> dict[str, Any]:
@@ -378,6 +380,7 @@ class PlaybackSession:
             "total_frames": total,
             "current_time_sec": current_time_sec,
             "duration_sec": duration_sec,
+            "rate": float(self.playback_rate),
             "timestamp_ns": timestamp_ns,
             "cameras": self.cameras,
         }
@@ -420,6 +423,21 @@ class PlaybackSession:
         self.frame_index = min(max(0, int(frame)), max(0, total - 1))
         self.play_started_monotonic = time.monotonic()
         self.play_started_frame = self.frame_index
+        return self.status()
+
+    def set_position(self, *, frame_index: int | None = None, rate: float | None = None) -> dict[str, Any]:
+        if frame_index is None and rate is None:
+            raise ValueError("offline replay position requires frame_index or rate")
+        if frame_index is not None:
+            self.seek(frame_index)
+        if rate is not None:
+            normalized_rate = float(rate)
+            if not math.isfinite(normalized_rate) or normalized_rate <= 0.0:
+                raise ValueError("offline replay rate must be positive and finite")
+            self._advance_if_playing()
+            self.playback_rate = normalized_rate
+            self.play_started_monotonic = time.monotonic()
+            self.play_started_frame = self.frame_index
         return self.status()
 
     def image_path(self, camera_id: int, frame: int) -> Path:
@@ -492,7 +510,7 @@ class PlaybackSession:
         if self.state != "playing" or not self.items:
             return
         elapsed = max(0.0, time.monotonic() - self.play_started_monotonic)
-        target_time = self._frame_time_sec(self.play_started_frame) + elapsed
+        target_time = self._frame_time_sec(self.play_started_frame) + elapsed * self.playback_rate
         best = self.frame_index
         for index in range(self.play_started_frame, len(self.items)):
             if self._frame_time_sec(index) <= target_time:

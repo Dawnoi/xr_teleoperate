@@ -170,6 +170,43 @@ UI 的边界：
 
 当前 XR 浏览器页面由 `teleop/ui/web` 提供，保持原有布局。未来其他机器人若显式启动 `UiHost`，其页面会按 capabilities 动态生成操作控件；`accepted_by_control_layer` 表示意图已进入该机器人控制线程的既有命令总线，动作是否完成仍须以 snapshot 为准。
 
+### Nero 共享控制台 Provider
+
+`--nero-console-provider` 在 XR 进程内只启动两个 ROS Provider，不会启动或 import Nero 的 HTTP/Web 服务：
+
+- Collector：`/nero_console/v1/xr_collector`，由 Nero Collector 页面连接，默认 Web 端口 `8085`
+- VLA：`/nero_console/v1/xr_vla`，由 Nero VLA 页面连接，默认 Web 端口 `8081`
+
+旧的 `--ui` 与 `TeleopUiServer` 保留，可与该参数同时使用。Nero 命令会进入同一个 `UiCommandBus`，只能由 XR 主控制循环执行后才返回结果；ROS 回调不直接调用 DDS、IK 或硬件。
+
+XR 真机进程必须先加载 ROS Humble，再激活 `tv`。`--nero-console-provider` 会在控制组件创建前验证 `rclpy`；未加载 ROS 环境时立即退出，不会静默禁用 Provider：
+
+```bash
+source /opt/ros/humble/setup.bash
+conda activate tv
+python teleop/real/teleop_hand_and_arm.py ... --nero-console-provider
+```
+
+然后在独立的 Nero ROS 工作区中启动原版页面和 HTTP API：
+
+```bash
+ros2 launch nero_web_console console_server.launch.py \
+  mode:=collector provider_id:=xr_collector web_port:=8085 command_timeout_sec:=3.0 \
+  extension_roots:=$PWD/teleop/nero_console/web_extensions
+
+ros2 launch nero_web_console console_server.launch.py \
+  mode:=vla provider_id:=xr_vla web_port:=8081 command_timeout_sec:=3.0 \
+  extension_roots:=$PWD/teleop/nero_console/web_extensions
+```
+
+Provider 在 2.5 秒未取得 XR 主循环回执时会取消尚未消费的 intent，并在 Host 的 3 秒窗口内返回失败；因此 HTTP 超时不会遗留一个之后才执行的控制命令。
+
+VLA `runtime.start` 只使用 XR 进程已有的 `--online-inference-prompt`、`--online-inference-protocol-profile`、`--online-inference-dry-run` 和 `--online-inference-enable-motion`。缺少 prompt/profile/相机或运动授权会被明确拒绝；Provider 不会将 dry-run 偷换成真机运动。`collect.start.task_description` 会写入下一条 episode 的 `text.desc`。
+
+安装 `teleop/nero_console/web_extensions` 后，Nero 页面还会显示 XR 专有扩展面板。它仅翻译已有 XR 命令：重置头参考（键盘 `C`）、保持当前位置、恢复 XR 接管、回零和取消当前录制。扩展不改变 XR 控制、采集或相机状态机。
+
+动态相机管理、collection mode、采样频率、运行中 VLA I/O schema 或 dry-run 配置、VLA estop 和 export cancel 在 XR 中尚无同义安全入口，页面请求会返回明确失败，不会伪造成功。
+
 接入另一台机器人时，不复制 XR 控制代码：实现 `UiBackend` 的 `capabilities()`、`consume_intent()`、`snapshot()`、`get_preview()`，再将构造函数注册到 `UiBackendFactory`。若机器人服务分布在多个进程，Backend 应调用其 gateway，而不是把控制逻辑搬进 UI 进程。
 
 示例（假设本地三路相机分别是 `/dev/video0 /dev/video2 /dev/video4`）：
